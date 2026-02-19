@@ -1,0 +1,55 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+cargo build          # Debug build
+cargo build --release  # Release build
+cargo run            # Build and run
+cargo test           # Run tests
+cargo test <name>    # Run a single test by name
+cargo clippy         # Lint
+cargo fmt            # Format code
+```
+
+## Project
+
+Rust project using the 2024 edition. Currently a minimal starter — the entry point is `src/main.rs`.
+
+## Project Purpose
+
+`rins` is a discrete event simulation (DES) of the Lloyd's of London insurance market. The goal is to reproduce emergent market phenomena — underwriting cycles, catastrophe-amplified crises, broker-syndicate network herding — from first-principles agent behaviour. Macro behaviour is never hardcoded; it must arise from agent interactions.
+
+Target phenomena are tracked in `docs/phenomena.md`. Detailed market mechanics (pricing channels, lead-follow quoting) are in `docs/market-mechanics.md`. Both are developed incrementally alongside the simulation.
+
+Reference literature and calibration notes live in `~/Documents/Reference/ABM/` and `../insurance-market/catastrophe-calibration.md`.
+
+## Architecture: DES + Event Sourcing
+
+**DES (clockless time):** Time advances by pulling the lowest-timestamp event from a priority queue. There is no fixed-tick loop. Events schedule future events.
+
+**Event sourcing:** The event stream is the ground truth. It is immutable. Agent state (capital, portfolio, relationship scores, actuarial estimates) is derived by replaying events. Where full event sourcing creates unacceptable complexity (e.g., floating-point EWMA accumulation), mutable in-agent state is acceptable — but the agent must be reconstructible from its event slice.
+
+**Randomness:** All randomness flows through a seeded RNG passed explicitly. Simulations must be reproducible given the same seed.
+
+## Agent Design Philosophy
+
+Prefer agents with complex internal logic over decomposing that logic into sub-agents or strategy objects.
+
+**Syndicate** owns all pricing logic via two channels that share state and must coexist in a single agent — do not separate them into sub-agents or strategy traits. Syndicate heterogeneity is expressed through parameters; values are calibration concerns, not architectural ones — expect them to vary across experiments. Capital management (exposure limits, solvency floor, concentration limits) is internal to `Syndicate`. The coordinator never overrides a syndicate's pricing or acceptance decision.
+
+**Broker** tracks relationship strength with syndicates across lines of business and uses this to route risks and assemble panels. Heterogeneity is in specialism parameters, not subtyping.
+
+**Market (Coordinator)** orchestrates cross-agent interactions that cannot belong to a single agent: quoting rounds, loss distribution, insolvency processing, syndicate entry/exit, and industry-aggregate statistics. It makes no pricing decisions.
+
+Detailed pricing mechanics (actuarial channel, underwriter channel, lead-follow quoting) are documented in `docs/market-mechanics.md`.
+
+## Testing Approach
+
+Test-first. Write a failing test before implementing any behaviour.
+
+**Event injection pattern**: Tests build a synthetic historical event stream and feed it to an agent or coordinator to derive initial state. The test then fires a new event and asserts on output events or derived state. This avoids coupling tests to internal fields and exercises the event-sourcing path.
+
+Use property tests (proptest) for monotonicity properties where meaningful.
