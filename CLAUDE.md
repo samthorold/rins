@@ -22,7 +22,7 @@ Rust project using the 2024 edition. Currently a minimal starter — the entry p
 
 `rins` is a discrete event simulation (DES) of the Lloyd's of London insurance market. The goal is to reproduce emergent market phenomena — underwriting cycles, catastrophe-amplified crises, broker-syndicate network herding — from first-principles agent behaviour. Macro behaviour is never hardcoded; it must arise from agent interactions.
 
-Target phenomena are tracked in `docs/phenomena.md`. Detailed market mechanics (pricing channels, lead-follow quoting) are in `docs/market-mechanics.md`. Both are developed incrementally alongside the simulation.
+Target phenomena — emergent macro-level behaviours that the simulation must reproduce without hardcoding — are tracked in `docs/phenomena.md`. Structural rules, institutional procedures, and agent protocols that govern *how* the market operates are in `docs/market-mechanics.md`. Both are developed incrementally alongside the simulation.
 
 Reference literature and calibration notes live in `~/Documents/Reference/ABM/` and `../insurance-market/catastrophe-calibration.md`.
 
@@ -44,7 +44,7 @@ Prefer agents with complex internal logic over decomposing that logic into sub-a
 
 **Market (Coordinator)** orchestrates cross-agent interactions that cannot belong to a single agent: quoting rounds, loss distribution, insolvency processing, syndicate entry/exit, and industry-aggregate statistics. It makes no pricing decisions.
 
-Detailed pricing mechanics (actuarial channel, underwriter channel, lead-follow quoting) are documented in `docs/market-mechanics.md`.
+Market mechanics — the structural rules and institutional invariants governing how the market operates — are documented in `docs/market-mechanics.md`. The document describes *what* the market does, not how the simulation implements it; implementation choices and calibration values belong in code and calibration notes, not here.
 
 ## Testing Approach
 
