@@ -355,12 +355,12 @@ impl Market {
         self.policies.retain(|_, p| p.bound_year != year);
     }
 
-    /// Distribute a loss event across all matching bound policies.
+    /// Distribute a loss event to all matching bound policies.
     ///
-    /// Each policy's ground-up loss is proportional to its `sum_insured` relative to the
-    /// total exposed sum_insured. Policy terms (attachment, limit) are then applied to that
-    /// per-insured amount. This ensures Σ(ground_up) = severity and the market invariant
-    /// holds structurally — no post-hoc rescaling is needed.
+    /// Each policy that covers `peril` in `region` independently receives
+    /// `min(severity, limit) − attachment` as its net loss. Panel shares are then
+    /// applied to produce one `ClaimSettled` per panel entry. Policies whose net
+    /// loss is zero (severity ≤ attachment, or no peril/territory match) are skipped.
     pub fn on_loss_event(
         &self,
         day: Day,
@@ -373,17 +373,9 @@ impl Market {
             return out;
         };
 
-        let total_sum_insured: u64 =
-            ids.iter().map(|pid| self.policies[pid].risk.sum_insured).sum();
-        if total_sum_insured == 0 {
-            return out;
-        }
-
         for policy_id in ids {
             let policy = &self.policies[policy_id];
-            let ground_up = (severity as u128 * policy.risk.sum_insured as u128
-                / total_sum_insured as u128) as u64;
-            let gross_loss = ground_up.min(policy.risk.limit);
+            let gross_loss = severity.min(policy.risk.limit);
             let net_loss = gross_loss.saturating_sub(policy.risk.attachment);
             if net_loss == 0 {
                 continue;
@@ -788,29 +780,33 @@ mod tests {
         );
     }
 
-    // --- Pro-rata scaling tests ---
+    // --- Per-policy independent claim tests ---
 
+    /// Regression test for the pro-rata bug: when severity > attachment but the
+    /// pro-rata ground_up per policy (severity / N_policies) < attachment, the
+    /// pro-rata model produced zero claims. The correct per-policy model must
+    /// generate a claim for each matching policy independently.
     #[test]
-    fn total_claims_never_exceed_event_severity() {
-        // 3 policies with large limits; uncapped total >> severity.
-        // After fix: sum(ClaimSettled.amount) ≤ severity.
-        let severity = 1_000_000u64; // small event
-
-        let risk = |limit: u64| Risk {
-            line_of_business: "property".to_string(),
-            sum_insured: limit * 2,
-            territory: "US-SE".to_string(),
-            limit,
-            attachment: 0,
-            perils_covered: vec![Peril::WindstormAtlantic],
-        };
+    fn loss_above_attachment_generates_claims_with_many_policies() {
+        // 200 policies, SI=10B, attachment=500M, limit=5B.
+        // severity=3B is above attachment (500M) but pro-rata ground_up = 3B/200 = 15M < 500M.
+        // Per-policy model: each policy gets min(3B, 5B) - 500M = 2.5B → 200 claims.
+        let severity = 3_000_000_000u64;
+        let attachment = 500_000_000u64;
+        let limit = 5_000_000_000u64;
 
         let mut market = Market::new();
-        // Three 100% policies whose uncapped losses would total 3 × limit >> severity.
-        for i in 0..3u64 {
+        for i in 0..200u64 {
             market.on_policy_bound(
                 SubmissionId(i),
-                risk(5_000_000), // limit=5M, each would claim 5M without cap
+                Risk {
+                    line_of_business: "property".to_string(),
+                    sum_insured: 10_000_000_000,
+                    territory: "US-SE".to_string(),
+                    limit,
+                    attachment,
+                    perils_covered: vec![Peril::WindstormAtlantic],
+                },
                 Panel {
                     entries: vec![PanelEntry {
                         syndicate_id: SyndicateId(i + 1),
@@ -824,18 +820,23 @@ mod tests {
 
         let events =
             market.on_loss_event(crate::types::Day(1), "US-SE", Peril::WindstormAtlantic, severity);
-        let total: u64 = events
-            .iter()
-            .filter_map(|(_, e)| match e {
-                Event::ClaimSettled { amount, .. } => Some(*amount),
-                _ => None,
-            })
-            .sum();
+        let claim_count =
+            events.iter().filter(|(_, e)| matches!(e, Event::ClaimSettled { .. })).count();
 
-        assert!(
-            total <= severity,
-            "total claims {total} exceeded event severity {severity}"
+        assert_eq!(
+            claim_count, 200,
+            "expected 200 ClaimSettled events (one per policy), got {claim_count}"
         );
+
+        let expected_net = severity.min(limit) - attachment; // 2_500_000_000
+        for (_, e) in &events {
+            if let Event::ClaimSettled { amount, .. } = e {
+                assert_eq!(
+                    *amount, expected_net,
+                    "each policy should receive {expected_net}, got {amount}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -884,12 +885,12 @@ mod tests {
     }
 
     #[test]
-    fn proportional_allocation_by_sum_insured() {
-        // Policy A: sum_insured=3M, limit=3M, attachment=0
-        // Policy B: sum_insured=1M, limit=1M, attachment=0
-        // severity=1_000_000; total_sum_insured=4M
-        // Expected: ground_up_A = 750_000, gross_A = 750_000, net_A = 750_000
-        //           ground_up_B = 250_000, gross_B = 250_000, net_B = 250_000
+    fn each_policy_gets_independent_claim_based_on_severity() {
+        // Two policies with different limits, same peril+territory.
+        // Each independently receives min(severity, limit) - attachment.
+        // sum_insured does NOT affect claim amounts.
+        // Policy A: limit=3M, attachment=0 → claim=min(1M,3M)-0=1M
+        // Policy B: limit=500K, attachment=0 → claim=min(1M,500K)-0=500K
         let mut market = Market::new();
         market.on_policy_bound(
             SubmissionId(1),
@@ -916,7 +917,7 @@ mod tests {
                 line_of_business: "property".to_string(),
                 sum_insured: 1_000_000,
                 territory: "US-SE".to_string(),
-                limit: 1_000_000,
+                limit: 500_000,
                 attachment: 0,
                 perils_covered: vec![Peril::WindstormAtlantic],
             },
@@ -957,11 +958,10 @@ mod tests {
             })
             .expect("expected ClaimSettled for policy B (SyndicateId 2)");
 
-        assert_eq!(claim_a, 750_000, "policy A (3/4 of sum_insured) should bear 750_000");
-        assert_eq!(claim_b, 250_000, "policy B (1/4 of sum_insured) should bear 250_000");
-
-        let total = claim_a + claim_b;
-        assert_eq!(total, 1_000_000, "total claims must equal severity exactly");
+        // Policy A: min(1M, 3M) - 0 = 1M
+        assert_eq!(claim_a, 1_000_000, "policy A claim should equal severity (below limit)");
+        // Policy B: min(1M, 500K) - 0 = 500K (capped at policy limit)
+        assert_eq!(claim_b, 500_000, "policy B claim should be capped at its limit (500K)");
     }
 
     /// Only policies from the expired year are removed; later-year policies survive.

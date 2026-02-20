@@ -61,8 +61,11 @@ checks_run = 0
 for day in sorted(loss_index.keys()):
     losses = loss_index[day]
     for pid, policy in policies.items():
-        # Only check policies strictly bound before this loss day.
+        # Only check policies strictly bound before this loss day and in the same
+        # policy year — Lloyd's policies are annual and expire at YearEnd.
         if policy["bound_day"] >= day:
+            continue
+        if policy["bound_day"] // 360 != day // 360:
             continue
         expected_by_syn = defaultdict(int)
         total_expected_net = 0
