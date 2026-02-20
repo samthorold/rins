@@ -5,18 +5,53 @@ mod simulation;
 mod syndicate;
 mod types;
 
+use broker::Broker;
+use events::{Peril, Risk};
+use simulation::Simulation;
+use syndicate::Syndicate;
+use types::{BrokerId, Day, SyndicateId, Year};
+
 fn main() {
-    // Run for 5 simulated years (the natural production usage).
-    let mut sim = simulation::Simulation::new(42).until(types::Day::year_end(types::Year(5)));
+    let risk = Risk {
+        line_of_business: "property".to_string(),
+        sum_insured: 2_000_000,
+        territory: "US-SE".to_string(),
+        limit: 1_000_000,
+        attachment: 100_000,
+        perils_covered: vec![Peril::WindstormAtlantic, Peril::Flood],
+    };
+
+    let syndicates = vec![
+        Syndicate::new(SyndicateId(1), 50_000_000, 500),
+        Syndicate::new(SyndicateId(2), 40_000_000, 600),
+        Syndicate::new(SyndicateId(3), 30_000_000, 450),
+    ];
+
+    let brokers = vec![
+        Broker::new(BrokerId(1), 3, vec![risk.clone()]),
+        Broker::new(BrokerId(2), 2, vec![risk]),
+    ];
+
+    let mut sim = Simulation::new(42)
+        .until(Day::year_end(Year(5)))
+        .with_agents(syndicates, brokers);
+
     sim.schedule(
-        types::Day::year_start(types::Year(1)),
+        Day::year_start(Year(1)),
         events::Event::SimulationStart {
-            year_start: types::Year(1),
+            year_start: Year(1),
         },
     );
     sim.run();
+
     println!("Events fired: {}", sim.log.len());
     for e in &sim.log {
         println!("  day={:5}  {:?}", e.day.0, e.event);
+    }
+
+    // Report final syndicate capitals.
+    println!("\nFinal syndicate capitals:");
+    for s in &sim.syndicates {
+        println!("  Syndicate {:?}: {} pence", s.id, s.capital);
     }
 }

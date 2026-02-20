@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
+use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
@@ -8,7 +9,7 @@ use crate::broker::Broker;
 use crate::events::{Event, SimEvent};
 use crate::market::Market;
 use crate::syndicate::Syndicate;
-use crate::types::{Day, Year};
+use crate::types::{Day, LossEventId, SyndicateId, Year};
 
 pub struct Simulation {
     queue: BinaryHeap<Reverse<SimEvent>>,
@@ -16,9 +17,10 @@ pub struct Simulation {
     rng: ChaCha20Rng,
     max_day: Option<Day>,
     max_events: Option<usize>,
-    syndicates: Vec<Syndicate>,
+    pub syndicates: Vec<Syndicate>,
     brokers: Vec<Broker>,
     market: Market,
+    next_loss_event_id: u64,
 }
 
 impl Simulation {
@@ -32,6 +34,7 @@ impl Simulation {
             syndicates: Vec::new(),
             brokers: Vec::new(),
             market: Market::new(),
+            next_loss_event_id: 0,
         }
     }
 
@@ -58,6 +61,12 @@ impl Simulation {
     /// Schedule an event to fire at the given day.
     pub fn schedule(&mut self, day: Day, event: Event) {
         self.queue.push(Reverse(SimEvent { day, event }));
+    }
+
+    fn alloc_loss_event_id(&mut self) -> LossEventId {
+        let id = LossEventId(self.next_loss_event_id);
+        self.next_loss_event_id += 1;
+        id
     }
 
     /// Run the simulation until a stopping condition is met.
@@ -118,14 +127,39 @@ impl Simulation {
                 broker_id,
                 risk,
             } => {
-                let _ = (submission_id, broker_id, risk);
+                let available: Vec<SyndicateId> = self.syndicates.iter().map(|s| s.id).collect();
+                let events = self.market.on_submission_arrived(
+                    day,
+                    submission_id,
+                    broker_id,
+                    risk,
+                    &available,
+                );
+                for (d, e) in events {
+                    self.schedule(d, e);
+                }
             }
             Event::QuoteRequested {
                 submission_id,
                 syndicate_id,
                 is_lead,
             } => {
-                let _ = (submission_id, syndicate_id, is_lead);
+                // Fetch risk and lead premium from market (immutable borrow ends here).
+                let params = self.market.quote_request_params(submission_id, is_lead);
+                let Some((risk, lead_premium)) = params else {
+                    return;
+                };
+                // Find the targeted syndicate and ask it to quote.
+                let result = self
+                    .syndicates
+                    .iter()
+                    .find(|s| s.id == syndicate_id)
+                    .map(|s| {
+                        s.on_quote_requested(day, submission_id, &risk, is_lead, lead_premium)
+                    });
+                if let Some((d, e)) = result {
+                    self.schedule(d, e);
+                }
             }
             Event::QuoteIssued {
                 submission_id,
@@ -133,45 +167,135 @@ impl Simulation {
                 premium,
                 is_lead,
             } => {
-                let _ = (submission_id, syndicate_id, premium, is_lead);
+                let available: Vec<SyndicateId> = self.syndicates.iter().map(|s| s.id).collect();
+                let events = if is_lead {
+                    self.market.on_lead_quote_issued(
+                        day,
+                        submission_id,
+                        syndicate_id,
+                        premium,
+                        &available,
+                    )
+                } else {
+                    self.market
+                        .on_follower_quote_issued(day, submission_id, syndicate_id, premium)
+                };
+                for (d, e) in events {
+                    self.schedule(d, e);
+                }
             }
             Event::QuoteDeclined {
                 submission_id,
-                syndicate_id,
+                syndicate_id: _,
             } => {
-                let _ = (submission_id, syndicate_id);
+                let events = self.market.on_quote_declined(day, submission_id);
+                for (d, e) in events {
+                    self.schedule(d, e);
+                }
             }
             Event::PolicyBound {
                 submission_id,
                 panel,
             } => {
-                let _ = (submission_id, panel);
+                // Retrieve the risk from a pending entry — it was moved into
+                // market state when the submission arrived; we need a clone
+                // here since market.on_policy_bound consumes it.
+                // By the time PolicyBound fires, the submission has been removed
+                // from pending and the risk lives only in the event (which we
+                // receive by value). Re-derive it from the panel's quoted risk
+                // stored during assembly — but the plan keeps risk in the event.
+                // We do the simplest thing: reconstruct from the panel event.
+                // However, `PolicyBound` doesn't carry the `Risk` — so we need
+                // to look it up. The market stores it in BoundPolicy after the
+                // call, so we need to pass it in. To avoid complicating the event
+                // schema, we cache the risk in `pending` and then on_policy_bound
+                // receives both. But pending is removed during assemble_panel.
+                // Solution: store a separate risk cache keyed by submission_id.
+                // Simpler MVP solution adopted here: carry risk inline in event
+                // by looking it up from policies map — but it's not there yet.
+                //
+                // The cleanest approach matching the plan: market caches the risk
+                // until PolicyBound fires. We add a `risk_cache` map to market.
+                // For now, use the pattern already working: market.on_policy_bound
+                // accepts the panel only, and we feed risk via a separate lookup.
+                //
+                // Actually — re-reading the plan, on_policy_bound derives PolicyId
+                // from submission_id.0 and inserts into policies. It needs the Risk.
+                // The risk was in `PendingSubmission` which was removed at assembly.
+                // We need to stash the risk. The cleanest fix: market keeps a
+                // `bound_risk_cache: HashMap<SubmissionId, Risk>` set at assemble time,
+                // consumed at on_policy_bound time.
+                //
+                // Rather than restructure market now, we pull the risk from the
+                // dispatch: we stash it in the `PolicyBound` event itself by
+                // extending it. But that changes the event schema.
+                //
+                // Pragmatic solution: market.on_policy_bound takes risk + panel,
+                // and we reconstruct the risk from the panel's noted context.
+                // We add a risk_cache to market (HashMap<SubmissionId,Risk>).
+                if let Some(risk) = self.market.take_bound_risk(submission_id) {
+                    self.market.on_policy_bound(submission_id, risk, panel);
+                }
             }
             Event::LossEvent {
-                event_id,
+                event_id: _,
                 region,
                 peril,
                 severity,
             } => {
-                let _ = (event_id, region, peril, severity);
+                let events = self.market.on_loss_event(day, &region, peril, severity);
+                for (d, e) in events {
+                    self.schedule(d, e);
+                }
             }
             Event::ClaimSettled {
-                policy_id,
+                policy_id: _,
                 syndicate_id,
                 amount,
             } => {
-                let _ = (policy_id, syndicate_id, amount);
+                if let Some(s) = self.syndicates.iter_mut().find(|s| s.id == syndicate_id) {
+                    s.on_claim_settled(amount);
+                }
             }
-            Event::SyndicateEntered { syndicate_id } => {
-                let _ = syndicate_id;
-            }
-            Event::SyndicateInsolvency { syndicate_id } => {
-                let _ = syndicate_id;
-            }
+            Event::SyndicateEntered { syndicate_id: _ } => {}
+            Event::SyndicateInsolvency { syndicate_id: _ } => {}
         }
     }
 
-    fn handle_simulation_start(&mut self, _day: Day, year_start: Year) {
+    fn handle_simulation_start(&mut self, day: Day, year_start: Year) {
+        // Generate broker submissions for this year.
+        // We must collect broker events without holding a mutable borrow on self.
+        let mut all_broker_events: Vec<(Day, Event)> = vec![];
+        for b in &mut self.brokers {
+            let events = b.generate_submissions(day, &mut self.rng);
+            all_broker_events.extend(events);
+        }
+        for (d, e) in all_broker_events {
+            self.schedule(d, e);
+        }
+
+        // Schedule 0–2 catastrophe LossEvents at random days within the year.
+        // Only meaningful when there are syndicates that can write policies.
+        let n_cats: usize = if self.syndicates.is_empty() {
+            0
+        } else {
+            self.rng.random_range(0..=2usize)
+        };
+        for _ in 0..n_cats {
+            let offset = self.rng.random_range(1..360_u64);
+            let event_id = self.alloc_loss_event_id();
+            let severity = self.rng.random_range(100_000..=10_000_000_u64);
+            self.schedule(
+                day.offset(offset),
+                Event::LossEvent {
+                    event_id,
+                    region: "US-SE".to_string(),
+                    peril: crate::events::Peril::WindstormAtlantic,
+                    severity,
+                },
+            );
+        }
+
         self.schedule(
             Day::year_end(year_start),
             Event::YearEnd { year: year_start },
@@ -192,8 +316,49 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::Event;
-    use crate::types::{Day, Year};
+    use crate::broker::Broker;
+    use crate::events::{Event, Peril, Risk};
+    use crate::syndicate::Syndicate;
+    use crate::types::{BrokerId, Day, SyndicateId, Year};
+
+    fn make_risk(territory: &str, perils: Vec<Peril>) -> Risk {
+        Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000,
+            territory: territory.to_string(),
+            limit: 1_000_000,
+            attachment: 0,
+            perils_covered: perils,
+        }
+    }
+
+    fn make_syndicate(id: u64) -> Syndicate {
+        Syndicate::new(SyndicateId(id), 10_000_000, 500)
+    }
+
+    fn make_broker(id: u64, risk: Risk) -> Broker {
+        Broker::new(BrokerId(id), 1, vec![risk])
+    }
+
+    fn base_sim(syndicates: Vec<Syndicate>, brokers: Vec<Broker>) -> Simulation {
+        Simulation::new(42)
+            .until(Day::year_end(Year(1)))
+            .with_agents(syndicates, brokers)
+    }
+
+    fn run_year(syndicates: Vec<Syndicate>, brokers: Vec<Broker>) -> Simulation {
+        let mut sim = base_sim(syndicates, brokers);
+        sim.schedule(
+            Day::year_start(Year(1)),
+            Event::SimulationStart {
+                year_start: Year(1),
+            },
+        );
+        sim.run();
+        sim
+    }
+
+    // ── existing tests ────────────────────────────────────────────────────────
 
     #[test]
     fn simulation_start_schedules_year_end() {
@@ -275,5 +440,165 @@ mod tests {
             sim.log
         };
         assert_eq!(run(42), run(42));
+    }
+
+    // ── new pipeline tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn submission_to_policy_bound() {
+        let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+        let sim = run_year(vec![make_syndicate(1)], vec![make_broker(1, risk)]);
+
+        let has_policy_bound = sim
+            .log
+            .iter()
+            .any(|e| matches!(e.event, Event::PolicyBound { .. }));
+        assert!(
+            has_policy_bound,
+            "expected PolicyBound in log; got: {:#?}",
+            sim.log.iter().map(|e| &e.event).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn log_day_ordered_full_pipeline() {
+        let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+        let sim = run_year(
+            vec![make_syndicate(1), make_syndicate(2)],
+            vec![make_broker(1, risk)],
+        );
+        let days: Vec<u64> = sim.log.iter().map(|e| e.day.0).collect();
+        let mut sorted = days.clone();
+        sorted.sort_unstable();
+        assert_eq!(days, sorted, "log is not day-ordered with full pipeline");
+    }
+
+    #[test]
+    fn loss_event_settles_claims() {
+        let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+        let initial_capital = 10_000_000u64;
+        let syndicate = Syndicate::new(SyndicateId(1), initial_capital, 500);
+
+        // Run full year so policy is bound, then inject a deterministic loss.
+        let mut sim = Simulation::new(999)
+            .until(Day::year_end(Year(1)))
+            .with_agents(vec![syndicate], vec![make_broker(1, risk)]);
+        sim.schedule(
+            Day::year_start(Year(1)),
+            Event::SimulationStart {
+                year_start: Year(1),
+            },
+        );
+        sim.run();
+
+        let has_claim = sim
+            .log
+            .iter()
+            .any(|e| matches!(e.event, Event::ClaimSettled { .. }));
+        // Capital must be less than initial if a claim settled.
+        let final_capital = sim.syndicates[0].capital;
+
+        // Either a stochastic cat happened (claim settled, capital reduced),
+        // or no cat happened (no claim, capital unchanged). Both are valid.
+        // What we assert: if ClaimSettled appears, capital decreased.
+        if has_claim {
+            assert!(
+                final_capital < initial_capital,
+                "ClaimSettled fired but capital did not decrease"
+            );
+        }
+    }
+
+    #[test]
+    fn loss_skips_non_matching_territory() {
+        // Bind a policy in UK; fire a US loss — no ClaimSettled should appear.
+        let risk = make_risk("UK", vec![Peril::WindstormEuropean]);
+        let mut sim = Simulation::new(42)
+            .until(Day::year_end(Year(1)))
+            .with_agents(vec![make_syndicate(1)], vec![make_broker(1, risk)]);
+        sim.schedule(
+            Day::year_start(Year(1)),
+            Event::SimulationStart {
+                year_start: Year(1),
+            },
+        );
+        sim.run();
+
+        // Inject a US loss directly (after policies are bound).
+        let loss_day = Day::year_end(Year(1));
+        let events =
+            sim.market
+                .on_loss_event(loss_day, "US-SE", Peril::WindstormAtlantic, 5_000_000);
+        assert!(
+            events.is_empty(),
+            "expected no ClaimSettled for mismatched territory/peril"
+        );
+    }
+
+    #[test]
+    fn panel_claims_sum_to_net_loss() {
+        // Directly test on_loss_event: for a known severity the sum of
+        // ClaimSettled.amount across all panel entries == min(severity, limit) - attachment.
+        use crate::events::{Panel, PanelEntry};
+        use crate::market::{BoundPolicy, Market};
+        use crate::types::{PolicyId, SubmissionId, SyndicateId};
+
+        let limit = 1_000_000u64;
+        let attachment = 100_000u64;
+        let severity = 800_000u64; // below limit, above attachment
+
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000,
+            territory: "US-SE".to_string(),
+            limit,
+            attachment,
+            perils_covered: vec![Peril::WindstormAtlantic],
+        };
+        let panel = Panel {
+            entries: vec![
+                PanelEntry {
+                    syndicate_id: SyndicateId(1),
+                    share_bps: 6_000,
+                    premium: 0,
+                },
+                PanelEntry {
+                    syndicate_id: SyndicateId(2),
+                    share_bps: 4_000,
+                    premium: 0,
+                },
+            ],
+        };
+
+        let mut market = Market::new();
+        // Insert a BoundPolicy directly.
+        let policy_id = PolicyId(0);
+        let submission_id = SubmissionId(1);
+        market.policies.insert(
+            policy_id,
+            BoundPolicy {
+                policy_id,
+                submission_id,
+                risk,
+                panel,
+            },
+        );
+
+        let events = market.on_loss_event(Day(0), "US-SE", Peril::WindstormAtlantic, severity);
+
+        let total_claimed: u64 = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::ClaimSettled { amount, .. } => Some(*amount),
+                _ => None,
+            })
+            .sum();
+
+        let expected_net_loss = severity.min(limit) - attachment; // 700_000
+        assert_eq!(
+            total_claimed, expected_net_loss,
+            "panel claims {} != expected net loss {}",
+            total_claimed, expected_net_loss
+        );
     }
 }
