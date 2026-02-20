@@ -1,6 +1,7 @@
 mod broker;
 mod events;
 mod market;
+mod perils;
 mod simulation;
 mod syndicate;
 mod types;

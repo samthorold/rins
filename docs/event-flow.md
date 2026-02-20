@@ -13,7 +13,7 @@ flowchart TD
     SS_NEXT["**SimulationStart**\n{year_start: N+1}"]
 
     SS -->|"Broker.generate_submissions()\n→ spread over first 30 days"| SA
-    SS -->|"schedule 0–2 stochastic cats\nat random days in year"| LE
+    SS -->|"perils::schedule_loss_events\nPoisson(λ) per PerilConfig\n(cat + attritional)"| LE
     SS -->|"schedule day 365"| YE
 
     %% ── Quoting round ───────────────────────────────────────────────────────
@@ -91,7 +91,7 @@ flowchart TD
 | 5 | `QuoteIssued` | `Syndicate::on_quote_requested` | `Market::on_lead_quote_issued` / `Market::on_follower_quote_issued` |
 | 6 | `QuoteDeclined` | `Syndicate::on_quote_requested` | `Market::on_quote_declined` |
 | 7 | `PolicyBound` | `Market::assemble_panel` (+2 days) | `Market::on_policy_bound` (registers policy, YTD premium) |
-| 8 | `LossEvent` | `handle_simulation_start` (stochastic) | `Market::on_loss_event` |
+| 8 | `LossEvent` | `handle_simulation_start` via `perils::schedule_loss_events` (Poisson frequency-severity) | `Market::on_loss_event` |
 | 9 | `ClaimSettled` | `Market::on_loss_event` | `Syndicate::on_claim_settled` + `Market::on_claim_settled` (YTD) |
 | 10 | `SyndicateEntered` | — | no-op |
 | 11 | `SyndicateInsolvency` | — | no-op |
