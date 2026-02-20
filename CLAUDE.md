@@ -46,6 +46,18 @@ Prefer agents with complex internal logic over decomposing that logic into sub-a
 
 Market mechanics — the structural rules and institutional invariants governing how the market operates — are documented in `docs/market-mechanics.md`. The document describes *what* the market does, not how the simulation implements it; implementation choices and calibration values belong in code and calibration notes, not here.
 
+## Performance
+
+Criterion benchmarks are in `benches/simulation_perf.rs`. Baselines, findings, and
+guidance on when to act on them are in `docs/performance.md`.
+
+```bash
+cargo bench                             # run all benchmark groups
+cargo bench -- --save-baseline initial  # save a named baseline
+cargo bench -- --baseline initial       # regression check against saved baseline
+cargo test -- --ignored stress_scenario_completes_within_budget --nocapture
+```
+
 ## Testing Approach
 
 Test-first. Write a failing test before implementing any behaviour.

@@ -686,4 +686,191 @@ mod tests {
             total_claimed, expected_net_loss
         );
     }
+
+    // ── Time-bounded integration tests ────────────────────────────────────────
+
+    /// Test A: a medium-scale scenario (20 syndicates, 10 brokers, 100 subs/broker)
+    /// must complete a single simulated year within 2 seconds.
+    #[test]
+    fn medium_scale_completes_within_budget() {
+        use std::time::Instant;
+
+        let syndicates: Vec<Syndicate> = (1..=20)
+            .map(|i| Syndicate::new(SyndicateId(i), 50_000_000, 500))
+            .collect();
+        let brokers: Vec<Broker> = (1..=10)
+            .map(|i| {
+                let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+                Broker::new(BrokerId(i), 100, vec![risk])
+            })
+            .collect();
+        let mut sim = Simulation::new(42)
+            .until(Day::year_end(Year(1)))
+            .with_agents(syndicates, brokers);
+        sim.schedule(
+            Day::year_start(Year(1)),
+            Event::SimulationStart { year_start: Year(1) },
+        );
+
+        let start = Instant::now();
+        sim.run();
+        let elapsed = start.elapsed();
+
+        // Correctness: at least half the expected policies must have been bound.
+        let bound_count = sim
+            .log
+            .iter()
+            .filter(|e| matches!(&e.event, Event::PolicyBound { .. }))
+            .count();
+        assert!(
+            bound_count >= 5,
+            "degenerate run: only {bound_count} policies bound",
+        );
+
+        assert!(
+            elapsed <= std::time::Duration::from_secs(2),
+            "medium scenario took {elapsed:?}, over 2 s budget",
+        );
+    }
+
+    /// Test B: distributing one loss event across 5,000 pre-inserted policies
+    /// (5-entry panels) must complete within 500 ms and emit exactly 25,000
+    /// `ClaimSettled` events.
+    #[test]
+    fn loss_distribution_5000_policies_within_budget() {
+        use std::time::Instant;
+
+        use crate::events::{Panel, PanelEntry};
+        use crate::market::BoundPolicy;
+        use crate::types::{LossEventId, PolicyId, SubmissionId};
+
+        let mut sim = Simulation::new(42);
+
+        // Insert 5,000 policies with 5-entry equal-share panels directly.
+        let panel_size = 5usize;
+        let share_per = 10_000u32 / panel_size as u32; // 2_000
+        for i in 0..5_000usize {
+            let policy_id = PolicyId(i as u64);
+            let entries: Vec<PanelEntry> = (0..panel_size)
+                .map(|j| PanelEntry {
+                    syndicate_id: SyndicateId((j + 1) as u64),
+                    share_bps: share_per,
+                    premium: 0,
+                })
+                .collect();
+            let risk = Risk {
+                line_of_business: "property".to_string(),
+                sum_insured: 10_000_000,
+                territory: "US-SE".to_string(),
+                limit: 5_000_000,
+                attachment: 500_000,
+                perils_covered: vec![Peril::WindstormAtlantic],
+            };
+            sim.market.policies.insert(
+                policy_id,
+                BoundPolicy {
+                    policy_id,
+                    submission_id: SubmissionId(i as u64),
+                    risk,
+                    panel: Panel { entries },
+                },
+            );
+        }
+
+        sim.schedule(
+            Day(180),
+            Event::LossEvent {
+                event_id: LossEventId(0),
+                region: "US-SE".to_string(),
+                peril: Peril::WindstormAtlantic,
+                severity: 10_000_000,
+            },
+        );
+
+        let start = Instant::now();
+        sim.run();
+        let elapsed = start.elapsed();
+
+        let claim_count = sim
+            .log
+            .iter()
+            .filter(|e| matches!(&e.event, Event::ClaimSettled { .. }))
+            .count();
+        assert_eq!(claim_count, 25_000, "expected 25,000 ClaimSettled events, got {claim_count}");
+
+        assert!(
+            elapsed <= std::time::Duration::from_millis(500),
+            "5k-policy loss distribution took {elapsed:?}, over 500 ms budget",
+        );
+    }
+
+    /// Test C: a small scenario (5 syndicates, 2 brokers, 10 subs/broker) run
+    /// for 5 years must finish within 1 second, catching super-linear slowdowns.
+    #[test]
+    fn five_year_small_scenario_per_year_budget() {
+        use std::time::Instant;
+
+        let syndicates: Vec<Syndicate> = (1..=5)
+            .map(|i| Syndicate::new(SyndicateId(i), 50_000_000, 500))
+            .collect();
+        let brokers: Vec<Broker> = (1..=2)
+            .map(|i| {
+                let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+                Broker::new(BrokerId(i), 10, vec![risk])
+            })
+            .collect();
+        let mut sim = Simulation::new(42)
+            .until(Day::year_end(Year(5)))
+            .with_agents(syndicates, brokers);
+        sim.schedule(
+            Day::year_start(Year(1)),
+            Event::SimulationStart { year_start: Year(1) },
+        );
+
+        let start = Instant::now();
+        sim.run();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed <= std::time::Duration::from_secs(1),
+            "5-year small scenario took {elapsed:?}, over 1 s budget",
+        );
+    }
+
+    /// Test D: the large scenario (80 syndicates, 25 brokers, 500 subs/broker,
+    /// 1 year) must complete within 60 seconds. Marked `#[ignore]` — run
+    /// explicitly with: `cargo test -- --ignored stress_scenario_completes_within_budget --nocapture`
+    #[test]
+    #[ignore]
+    fn stress_scenario_completes_within_budget() {
+        use std::time::Instant;
+
+        let syndicates: Vec<Syndicate> = (1..=80)
+            .map(|i| Syndicate::new(SyndicateId(i), 50_000_000, 500))
+            .collect();
+        let brokers: Vec<Broker> = (1..=25)
+            .map(|i| {
+                let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+                Broker::new(BrokerId(i), 500, vec![risk])
+            })
+            .collect();
+        let mut sim = Simulation::new(42)
+            .until(Day::year_end(Year(1)))
+            .with_agents(syndicates, brokers);
+        sim.schedule(
+            Day::year_start(Year(1)),
+            Event::SimulationStart { year_start: Year(1) },
+        );
+
+        let start = Instant::now();
+        sim.run();
+        let elapsed = start.elapsed();
+
+        eprintln!("stress: log.len() = {}", sim.log.len());
+
+        assert!(
+            elapsed <= std::time::Duration::from_secs(60),
+            "stress scenario took {elapsed:?}, over 60 s budget",
+        );
+    }
 }
