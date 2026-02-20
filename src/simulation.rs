@@ -5,6 +5,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use crate::broker::Broker;
+use crate::config::SimulationConfig;
 use crate::events::{Event, SimEvent};
 use crate::market::Market;
 use crate::perils;
@@ -62,6 +63,23 @@ impl Simulation {
         self.syndicates = syndicates;
         self.brokers = brokers;
         self
+    }
+
+    /// Construct a `Simulation` from a `SimulationConfig`.
+    pub fn from_config(config: &SimulationConfig) -> Self {
+        let syndicates = config
+            .syndicates
+            .iter()
+            .map(|c| Syndicate::new(c.id, c.capital, c.rate_on_line_bps))
+            .collect();
+        let brokers = config
+            .brokers
+            .iter()
+            .map(|c| Broker::new(c.id, c.submissions_per_year, c.risks.clone()))
+            .collect();
+        Simulation::new(config.seed)
+            .until(Day::year_end(Year(config.years)))
+            .with_agents(syndicates, brokers)
     }
 
     /// Schedule an event to fire at the given day.

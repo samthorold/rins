@@ -1,4 +1,5 @@
 mod broker;
+mod config;
 mod events;
 mod market;
 mod perils;
@@ -9,36 +10,12 @@ mod types;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-use broker::Broker;
-use events::{Peril, Risk};
+use config::SimulationConfig;
 use simulation::Simulation;
-use syndicate::Syndicate;
-use types::{BrokerId, Day, SyndicateId, Year};
+use types::{Day, Year};
 
 fn main() {
-    let risk = Risk {
-        line_of_business: "property".to_string(),
-        sum_insured: 2_000_000,
-        territory: "US-SE".to_string(),
-        limit: 1_000_000,
-        attachment: 100_000,
-        perils_covered: vec![Peril::WindstormAtlantic, Peril::Flood],
-    };
-
-    let syndicates = vec![
-        Syndicate::new(SyndicateId(1), 50_000_000, 500),
-        Syndicate::new(SyndicateId(2), 40_000_000, 600),
-        Syndicate::new(SyndicateId(3), 30_000_000, 450),
-    ];
-
-    let brokers = vec![
-        Broker::new(BrokerId(1), 3, vec![risk.clone()]),
-        Broker::new(BrokerId(2), 2, vec![risk]),
-    ];
-
-    let mut sim = Simulation::new(42)
-        .until(Day::year_end(Year(5)))
-        .with_agents(syndicates, brokers);
+    let mut sim = Simulation::from_config(&SimulationConfig::canonical());
 
     sim.schedule(
         Day::year_start(Year(1)),

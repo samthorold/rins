@@ -1,4 +1,5 @@
 pub mod broker;
+pub mod config;
 pub mod events;
 pub mod market;
 pub mod perils;
