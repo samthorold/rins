@@ -140,7 +140,12 @@ impl Simulation {
                     b.on_year_end(year);
                 }
 
-                // 4. Schedule next year (keeps the sim running until max_day).
+                // 4. Expire all policies written in this year (annual terms).
+                //    Must happen after compute_year_stats so YTD claims/premiums
+                //    are captured before policies are removed.
+                self.market.expire_policies(year);
+
+                // 5. Schedule next year (keeps the sim running until max_day).
                 self.handle_year_end(day, year);
             }
             Event::SubmissionArrived {
@@ -226,44 +231,11 @@ impl Simulation {
                 submission_id,
                 panel,
             } => {
-                // Retrieve the risk from a pending entry — it was moved into
-                // market state when the submission arrived; we need a clone
-                // here since market.on_policy_bound consumes it.
-                // By the time PolicyBound fires, the submission has been removed
-                // from pending and the risk lives only in the event (which we
-                // receive by value). Re-derive it from the panel's quoted risk
-                // stored during assembly — but the plan keeps risk in the event.
-                // We do the simplest thing: reconstruct from the panel event.
-                // However, `PolicyBound` doesn't carry the `Risk` — so we need
-                // to look it up. The market stores it in BoundPolicy after the
-                // call, so we need to pass it in. To avoid complicating the event
-                // schema, we cache the risk in `pending` and then on_policy_bound
-                // receives both. But pending is removed during assemble_panel.
-                // Solution: store a separate risk cache keyed by submission_id.
-                // Simpler MVP solution adopted here: carry risk inline in event
-                // by looking it up from policies map — but it's not there yet.
-                //
-                // The cleanest approach matching the plan: market caches the risk
-                // until PolicyBound fires. We add a `risk_cache` map to market.
-                // For now, use the pattern already working: market.on_policy_bound
-                // accepts the panel only, and we feed risk via a separate lookup.
-                //
-                // Actually — re-reading the plan, on_policy_bound derives PolicyId
-                // from submission_id.0 and inserts into policies. It needs the Risk.
-                // The risk was in `PendingSubmission` which was removed at assembly.
-                // We need to stash the risk. The cleanest fix: market keeps a
-                // `bound_risk_cache: HashMap<SubmissionId, Risk>` set at assemble time,
-                // consumed at on_policy_bound time.
-                //
-                // Rather than restructure market now, we pull the risk from the
-                // dispatch: we stash it in the `PolicyBound` event itself by
-                // extending it. But that changes the event schema.
-                //
-                // Pragmatic solution: market.on_policy_bound takes risk + panel,
-                // and we reconstruct the risk from the panel's noted context.
-                // We add a risk_cache to market (HashMap<SubmissionId,Risk>).
                 if let Some(risk) = self.market.take_bound_risk(submission_id) {
-                    self.market.on_policy_bound(submission_id, risk, panel);
+                    // Derive the policy year from the current day so that
+                    // expire_policies can remove it at the correct YearEnd.
+                    let year = Year((day.0 / Day::DAYS_PER_YEAR) as u32 + 1);
+                    self.market.on_policy_bound(submission_id, risk, panel, year);
                 }
             }
             Event::LossEvent {
@@ -562,7 +534,7 @@ mod tests {
     #[test]
     fn full_dispatch_loss_reduces_capital_deterministically() {
         use crate::events::{Panel, PanelEntry};
-        use crate::types::{LossEventId, SubmissionId};
+        use crate::types::{LossEventId, SubmissionId, Year};
 
         let mut sim = Simulation::new(0);
         sim.syndicates = vec![
@@ -586,6 +558,7 @@ mod tests {
                     PanelEntry { syndicate_id: SyndicateId(2), share_bps: 4_000, premium: 0 },
                 ],
             },
+            Year(1),
         );
 
         sim.schedule(
@@ -636,7 +609,7 @@ mod tests {
         // ClaimSettled.amount across all panel entries == min(severity, limit) - attachment.
         use crate::events::{Panel, PanelEntry};
         use crate::market::Market;
-        use crate::types::{SubmissionId, SyndicateId};
+        use crate::types::{SubmissionId, SyndicateId, Year};
 
         let limit = 1_000_000u64;
         let attachment = 100_000u64;
@@ -658,7 +631,7 @@ mod tests {
         };
 
         let mut market = Market::new();
-        market.on_policy_bound(SubmissionId(1), risk, panel);
+        market.on_policy_bound(SubmissionId(1), risk, panel, Year(1));
 
         let events = market.on_loss_event(Day(0), "US-SE", Peril::WindstormAtlantic, severity);
 
@@ -733,7 +706,7 @@ mod tests {
                 premium: 80_000,
             }],
         };
-        sim.market.on_policy_bound(SubmissionId(1), risk, panel);
+        sim.market.on_policy_bound(SubmissionId(1), risk, panel, Year(1));
 
         // Settle a claim of 60_000 → realised loss ratio = 60_000 / 80_000 = 0.75.
         // on_policy_bound assigns PolicyId(0) (next_policy_id starts at 0).
@@ -916,7 +889,7 @@ mod tests {
         use std::time::Instant;
 
         use crate::events::{Panel, PanelEntry};
-        use crate::types::{LossEventId, SubmissionId};
+        use crate::types::{LossEventId, SubmissionId, Year};
 
         let mut sim = Simulation::new(42);
 
@@ -939,7 +912,7 @@ mod tests {
                 attachment: 500_000,
                 perils_covered: vec![Peril::WindstormAtlantic],
             };
-            sim.market.on_policy_bound(SubmissionId(i as u64), risk, Panel { entries });
+            sim.market.on_policy_bound(SubmissionId(i as u64), risk, Panel { entries }, Year(1));
         }
 
         sim.schedule(

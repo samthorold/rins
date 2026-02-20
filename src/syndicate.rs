@@ -623,7 +623,7 @@ mod tests {
         };
 
         let mut market = Market::new();
-        market.on_policy_bound(SubmissionId(1), risk, panel);
+        market.on_policy_bound(SubmissionId(1), risk, panel, crate::types::Year(1));
 
         // Fire a loss: severity 600_000 → net_loss = 600_000 - 100_000 = 500_000.
         let claim_events =

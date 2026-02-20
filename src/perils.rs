@@ -42,67 +42,71 @@ pub struct PerilConfig {
 pub fn default_peril_configs() -> Vec<PerilConfig> {
     vec![
         // ── Catastrophe perils — Pareto severity, heavy-tailed ──────────────
+        // shape=3.0 eliminates infinite-variance artefacts and prevents total wipeouts.
+        // E[X] = scale * shape/(shape-1) = scale * 1.5 pence.
+        // Scales are 1000× the original placeholder values.
         PerilConfig {
             peril: Peril::WindstormAtlantic,
             region: "US-SE",
             annual_frequency: 0.5, // PLACEHOLDER
-            severity: SeverityModel::Pareto { scale: 2_000_000.0, shape: 1.5 }, // PLACEHOLDER
+            severity: SeverityModel::Pareto { scale: 2_000_000_000.0, shape: 3.0 }, // E[X] ≈ £30M
         },
         PerilConfig {
             peril: Peril::WindstormEuropean,
             region: "EU",
             annual_frequency: 0.8, // PLACEHOLDER
-            severity: SeverityModel::Pareto { scale: 1_500_000.0, shape: 1.8 }, // PLACEHOLDER
+            severity: SeverityModel::Pareto { scale: 1_500_000_000.0, shape: 3.0 }, // E[X] ≈ £22M
         },
         PerilConfig {
             peril: Peril::EarthquakeUS,
             region: "US-CA",
             annual_frequency: 0.2, // PLACEHOLDER
-            severity: SeverityModel::Pareto { scale: 5_000_000.0, shape: 1.3 }, // PLACEHOLDER
+            severity: SeverityModel::Pareto { scale: 5_000_000_000.0, shape: 3.0 }, // E[X] ≈ £75M
         },
         PerilConfig {
             peril: Peril::EarthquakeJapan,
             region: "JP",
             annual_frequency: 0.3, // PLACEHOLDER
-            severity: SeverityModel::Pareto { scale: 4_000_000.0, shape: 1.4 }, // PLACEHOLDER
+            severity: SeverityModel::Pareto { scale: 4_000_000_000.0, shape: 3.0 }, // E[X] ≈ £60M
         },
         PerilConfig {
             peril: Peril::Flood,
             region: "EU",
             annual_frequency: 1.5, // PLACEHOLDER
-            severity: SeverityModel::Pareto { scale: 800_000.0, shape: 2.0 }, // PLACEHOLDER
+            severity: SeverityModel::Pareto { scale: 800_000_000.0, shape: 3.0 }, // E[X] ≈ £12M
         },
         PerilConfig {
             peril: Peril::Flood,
             region: "US-SE",
             annual_frequency: 1.5, // PLACEHOLDER
-            severity: SeverityModel::Pareto { scale: 800_000.0, shape: 2.0 }, // PLACEHOLDER
+            severity: SeverityModel::Pareto { scale: 800_000_000.0, shape: 3.0 }, // E[X] ≈ £12M
         },
         // ── Attritional losses — LogNormal severity, moderate tail ───────────
-        // mu=11.5, sigma=1.2 → E[X] ≈ 165_000 pence; median ≈ 98_700 pence
+        // mu=18.4, sigma=1.2 → E[X] ≈ 200_000_000 pence (£2M) per event
+        // mu=11.5 + ln(1000) ≈ 11.5 + 6.9 = 18.4
         PerilConfig {
             peril: Peril::Attritional,
             region: "US-SE",
             annual_frequency: 12.0, // PLACEHOLDER ≈ monthly batch
-            severity: SeverityModel::LogNormal { mu: 11.5, sigma: 1.2 }, // PLACEHOLDER
+            severity: SeverityModel::LogNormal { mu: 18.4, sigma: 1.2 }, // PLACEHOLDER
         },
         PerilConfig {
             peril: Peril::Attritional,
             region: "US-CA",
             annual_frequency: 12.0, // PLACEHOLDER
-            severity: SeverityModel::LogNormal { mu: 11.5, sigma: 1.2 }, // PLACEHOLDER
+            severity: SeverityModel::LogNormal { mu: 18.4, sigma: 1.2 }, // PLACEHOLDER
         },
         PerilConfig {
             peril: Peril::Attritional,
             region: "EU",
             annual_frequency: 12.0, // PLACEHOLDER
-            severity: SeverityModel::LogNormal { mu: 11.5, sigma: 1.2 }, // PLACEHOLDER
+            severity: SeverityModel::LogNormal { mu: 18.4, sigma: 1.2 }, // PLACEHOLDER
         },
         PerilConfig {
             peril: Peril::Attritional,
             region: "UK",
             annual_frequency: 12.0, // PLACEHOLDER
-            severity: SeverityModel::LogNormal { mu: 11.5, sigma: 1.2 }, // PLACEHOLDER
+            severity: SeverityModel::LogNormal { mu: 18.4, sigma: 1.2 }, // PLACEHOLDER
         },
     ]
 }
@@ -323,7 +327,7 @@ mod tests {
                 premium: 50_000,
             }],
         };
-        market.on_policy_bound(SubmissionId(0), risk, panel);
+        market.on_policy_bound(SubmissionId(0), risk, panel, crate::types::Year(1));
 
         let events = market.on_loss_event(Day(10), "US-SE", Peril::Attritional, 500_000);
         assert!(

@@ -89,7 +89,7 @@ pub fn prepopulate_policies(market: &mut Market, policy_count: usize, panel_size
             attachment: 500_000,
             perils_covered: vec![Peril::WindstormAtlantic],
         };
-        market.on_policy_bound(SubmissionId(i as u64), risk, Panel { entries });
+        market.on_policy_bound(SubmissionId(i as u64), risk, Panel { entries }, Year(1));
     }
 }
 

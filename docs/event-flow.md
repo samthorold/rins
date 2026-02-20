@@ -27,7 +27,7 @@ flowchart TD
         QR_F["**QuoteRequested**\n{is_lead: false}\n+1 day"]
         PB["**PolicyBound**\n{submission_id, panel}\n+2 days"]
         LE_D["on_loss_event\nmatches territory + peril\napplies attachment/limit"]
-        STATS["compute_year_stats\n→ industry_loss_ratio\n→ YTD reset"]
+        STATS["compute_year_stats\n→ industry_loss_ratio\n→ YTD reset\n→ expire year policies"]
     end
 
     subgraph Syndicate["Syndicate  (ATP pricing)"]
@@ -85,7 +85,7 @@ flowchart TD
 | # | Event | Producer | Consumer |
 |---|-------|----------|----------|
 | 1 | `SimulationStart` | `handle_year_end` / external seed | `Simulation::handle_simulation_start` |
-| 2 | `YearEnd` | `handle_simulation_start` | `Simulation::dispatch` → `Market::compute_year_stats`, `Syndicate::on_year_end`, `Broker::on_year_end` |
+| 2 | `YearEnd` | `handle_simulation_start` | `Simulation::dispatch` → `Market::compute_year_stats`, `Syndicate::on_year_end`, `Broker::on_year_end`, `Market::expire_policies` |
 | 3 | `SubmissionArrived` | `Broker::generate_submissions` | `Market::on_submission_arrived` |
 | 4 | `QuoteRequested` | `Market::on_submission_arrived`, `Market::on_lead_quote_issued` | `Syndicate::on_quote_requested` |
 | 5 | `QuoteIssued` | `Syndicate::on_quote_requested` | `Market::on_lead_quote_issued` / `Market::on_follower_quote_issued` |

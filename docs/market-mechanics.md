@@ -71,7 +71,21 @@ All events in a quoting round share the same simulation timestamp. The ordering 
 
 ---
 
-## 4. Broker Relationship Score Evolution
+## 4. Policy Terms and Expiry
+
+All policies in this simulation are **annual contracts**: they are written at some point during a simulation year and expire at the end of that same year. This reflects the Lloyd's standard placement cycle, where the vast majority of business is placed on a 12-month basis.
+
+**Consequences for the simulation:**
+
+- Loss events can only trigger claims against policies that are still active (i.e., bound in the current year). A loss in year N has no effect on policies written in years 1..N−1.
+- Syndicates must re-underwrite their entire book each year. Premiums earned in year N do not carry forward; each year starts with zero gross written premium.
+- Total industry exposure (and therefore potential claims) is bounded by the policies written in a single year, not by accumulation across years.
+
+**Implementation:** `Market::expire_policies(year)` is called at the close of each `YearEnd` event, after `compute_year_stats` has captured the year's loss and premium data. It removes all `bound_year == year` policies from both the policies map and the peril-territory index.
+
+---
+
+## 5. Broker Relationship Score Evolution
 
 Each broker maintains a relationship score per (syndicate, line-of-business) pair. Scores are initialised low for new relationships and evolve through placement activity.
 
@@ -100,7 +114,7 @@ New syndicates enter with a score draw from a low-mean distribution for all brok
 
 ---
 
-## 5. Syndicate Entry / Exit Triggers
+## 6. Syndicate Entry / Exit Triggers
 
 This section describes the procedural rules governing when and how syndicates enter and leave the market. It is the mechanism behind phenomenon 6 (counter-cyclical capacity supply).
 
@@ -112,7 +126,7 @@ This section describes the procedural rules governing when and how syndicates en
 
 ---
 
-## 6. Managed Runoff and Central Fund
+## 7. Managed Runoff and Central Fund
 
 This section describes the institutional backstop that handles insolvent syndicates. It is a Lloyd's structural rule, not an emergent behaviour.
 
@@ -124,7 +138,7 @@ This section describes the institutional backstop that handles insolvent syndica
 
 ---
 
-## 7. Loss Event Mechanics
+## 8. Loss Event Mechanics
 
 Losses fall into two structurally distinct classes. Each has different correlation properties across syndicates and different implications for capital and cycle dynamics.
 
@@ -153,7 +167,7 @@ Losses fall into two structurally distinct classes. Each has different correlati
 
 ---
 
-## 8. Annual Coordinator Statistics
+## 9. Annual Coordinator Statistics
 
 At the close of each annual period, the coordinator aggregates market-wide statistics and publishes them to all active syndicates. These are the market signal syndicates consume in their next pricing cycle and the primary outputs for benchmarking the simulation against Lloyd's empirical targets.
 

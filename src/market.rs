@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::events::{Event, Panel, PanelEntry, Peril, Risk};
 use crate::syndicate::Syndicate;
@@ -35,6 +35,10 @@ pub struct BoundPolicy {
     pub submission_id: SubmissionId,
     pub risk: Risk,
     pub panel: Panel,
+    /// The simulation year in which this policy was bound.
+    /// Policies are annual: they expire at the end of `bound_year` and must
+    /// not generate claims or be carried forward into the following year.
+    pub bound_year: Year,
 }
 
 pub struct Market {
@@ -292,7 +296,13 @@ impl Market {
 
     /// Register a newly bound policy. Called when `PolicyBound` fires.
     /// Accumulates gross premium into the YTD counter for the policy's line.
-    pub fn on_policy_bound(&mut self, submission_id: SubmissionId, risk: Risk, panel: Panel) {
+    pub fn on_policy_bound(
+        &mut self,
+        submission_id: SubmissionId,
+        risk: Risk,
+        panel: Panel,
+        year: Year,
+    ) {
         let total_premium: u64 = panel.entries.iter().map(|e| e.premium).sum();
         *self
             .ytd_premiums_by_line
@@ -314,8 +324,35 @@ impl Market {
                 submission_id,
                 risk,
                 panel,
+                bound_year: year,
             },
         );
+    }
+
+    /// Remove all policies written in `year` from the active portfolio.
+    ///
+    /// Lloyd's policies are annual contracts: they expire at the end of the year
+    /// in which they were bound. Calling this at YearEnd prevents stale policies
+    /// from accumulating across years and being hit by subsequent loss events.
+    pub fn expire_policies(&mut self, year: Year) {
+        let expired: HashSet<PolicyId> = self
+            .policies
+            .values()
+            .filter(|p| p.bound_year == year)
+            .map(|p| p.policy_id)
+            .collect();
+
+        if expired.is_empty() {
+            return;
+        }
+
+        // Remove expired IDs from every index bucket; drop buckets that go empty.
+        for ids in self.peril_territory_index.values_mut() {
+            ids.retain(|id| !expired.contains(id));
+        }
+        self.peril_territory_index.retain(|_, ids| !ids.is_empty());
+
+        self.policies.retain(|_, p| p.bound_year != year);
     }
 
     /// Distribute a loss event across all matching bound policies.
@@ -395,7 +432,7 @@ mod tests {
         };
 
         let mut market = Market::new();
-        market.on_policy_bound(SubmissionId(1), risk, panel);
+        market.on_policy_bound(SubmissionId(1), risk, panel, Year(1));
 
         let events =
             market.on_loss_event(crate::types::Day(0), "US-SE", Peril::WindstormAtlantic, 800_000);
@@ -432,7 +469,7 @@ mod tests {
                 premium: 80_000,
             }],
         };
-        market.on_policy_bound(SubmissionId(1), risk, panel);
+        market.on_policy_bound(SubmissionId(1), risk, panel, Year(1));
 
         // on_policy_bound assigns PolicyId(0) (next_policy_id starts at 0).
         market.on_claim_settled(PolicyId(0), 40_000);
@@ -473,7 +510,7 @@ mod tests {
                 premium: 50_000,
             }],
         };
-        market.on_policy_bound(sid, risk.clone(), panel.clone());
+        market.on_policy_bound(sid, risk.clone(), panel.clone(), Year(1));
         assert_eq!(market.policies.len(), 1);
         let policy = market.policies.values().next().unwrap();
         assert_eq!(policy.submission_id, sid);
@@ -502,7 +539,7 @@ mod tests {
                 premium: 0,
             }],
         };
-        market.on_policy_bound(SubmissionId(0), risk, panel);
+        market.on_policy_bound(SubmissionId(0), risk, panel, Year(1));
 
         let ids_wind = market
             .peril_territory_index
@@ -534,6 +571,7 @@ mod tests {
                     premium: 0,
                 }],
             },
+            Year(1),
         );
         // severity (50_000) < attachment (100_000) → net_loss = 0
         let events =
@@ -558,6 +596,7 @@ mod tests {
                     premium: 0,
                 }],
             },
+            Year(1),
         );
         // severity 5_000_000 > limit 1_000_000
         // gross = 1_000_000; net = 900_000; amount = 900_000 * 10_000 / 10_000 = 900_000
@@ -595,6 +634,7 @@ mod tests {
                     PanelEntry { syndicate_id: SyndicateId(3), share_bps: 2_000, premium: 0 },
                 ],
             },
+            Year(1),
         );
         // severity = 600_000; gross = 600_000; net = 600_000 - 100_000 = 500_000
         let events = market.on_loss_event(
@@ -648,6 +688,7 @@ mod tests {
                     premium: 0,
                 }],
             },
+            Year(1),
         );
         let events = market.on_loss_event(
             crate::types::Day(0),
@@ -675,6 +716,7 @@ mod tests {
                     premium: 0,
                 }],
             },
+            Year(1),
         );
         // on_loss_event looks up by (region, peril); "EU" won't match "US-SE" index.
         let events = market.on_loss_event(
@@ -687,5 +729,95 @@ mod tests {
             events.is_empty(),
             "expected no claims for unmatched territory, got {events:?}"
         );
+    }
+
+    // --- Policy expiry tests ---
+
+    /// A policy expired at YearEnd must not generate claims in the following year.
+    #[test]
+    fn expired_policy_does_not_generate_claims() {
+        use crate::events::{Panel, PanelEntry};
+        use crate::types::{Day, SubmissionId, SyndicateId, Year};
+
+        let mut market = Market::new();
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000,
+            territory: "US-SE".to_string(),
+            limit: 1_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::WindstormAtlantic],
+        };
+        let panel = Panel {
+            entries: vec![PanelEntry {
+                syndicate_id: SyndicateId(1),
+                share_bps: 10_000,
+                premium: 50_000,
+            }],
+        };
+
+        // Bind a year-1 policy, then expire it.
+        market.on_policy_bound(SubmissionId(1), risk, panel, Year(1));
+        market.expire_policies(Year(1));
+
+        // Policy map and index must both be empty.
+        assert!(market.policies.is_empty(), "expired policy should be removed from policies");
+        assert!(
+            market.peril_territory_index.is_empty(),
+            "index should be empty after expiry"
+        );
+
+        // A loss in year 2 on the same region/peril must produce no claims.
+        let events = market.on_loss_event(Day(360), "US-SE", Peril::WindstormAtlantic, 500_000);
+        assert!(
+            events.is_empty(),
+            "expected no ClaimSettled for expired policy, got {events:?}"
+        );
+    }
+
+    /// Only policies from the expired year are removed; later-year policies survive.
+    #[test]
+    fn only_expired_year_policies_are_removed() {
+        use crate::events::{Panel, PanelEntry};
+        use crate::types::{Day, SubmissionId, SyndicateId, Year};
+
+        let mut market = Market::new();
+        let make_panel = |sid: u64| Panel {
+            entries: vec![PanelEntry {
+                syndicate_id: SyndicateId(sid),
+                share_bps: 10_000,
+                premium: 0,
+            }],
+        };
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000,
+            territory: "US-SE".to_string(),
+            limit: 1_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::WindstormAtlantic],
+        };
+
+        // Bind one policy in year 1 and one in year 2.
+        market.on_policy_bound(SubmissionId(1), risk.clone(), make_panel(1), Year(1));
+        market.on_policy_bound(SubmissionId(2), risk, make_panel(2), Year(2));
+
+        // Expire year 1 only.
+        market.expire_policies(Year(1));
+
+        // Year-1 policy is gone; year-2 policy remains.
+        assert_eq!(market.policies.len(), 1, "only year-2 policy should remain");
+
+        // A loss must hit the year-2 policy (Syn 2) but not the expired year-1 policy (Syn 1).
+        let events = market.on_loss_event(Day(360), "US-SE", Peril::WindstormAtlantic, 500_000);
+        let hit_syndicates: Vec<u64> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::ClaimSettled { syndicate_id, .. } => Some(syndicate_id.0),
+                _ => None,
+            })
+            .collect();
+        assert!(hit_syndicates.contains(&2), "year-2 policy (Syn 2) should be hit");
+        assert!(!hit_syndicates.contains(&1), "expired year-1 policy (Syn 1) must not be hit");
     }
 }
