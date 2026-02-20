@@ -1,15 +1,15 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use crate::broker::Broker;
 use crate::events::{Event, SimEvent};
 use crate::market::Market;
+use crate::perils;
 use crate::syndicate::Syndicate;
-use crate::types::{Day, LossEventId, SyndicateId, Year};
+use crate::types::{Day, SyndicateId, Year};
 
 pub struct Simulation {
     queue: BinaryHeap<Reverse<SimEvent>>,
@@ -67,12 +67,6 @@ impl Simulation {
     /// Schedule an event to fire at the given day.
     pub fn schedule(&mut self, day: Day, event: Event) {
         self.queue.push(Reverse(SimEvent { day, event }));
-    }
-
-    fn alloc_loss_event_id(&mut self) -> LossEventId {
-        let id = LossEventId(self.next_loss_event_id);
-        self.next_loss_event_id += 1;
-        id
     }
 
     /// Run the simulation until a stopping condition is met.
@@ -293,26 +287,19 @@ impl Simulation {
             self.schedule(d, e);
         }
 
-        // Schedule 0–2 catastrophe LossEvents at random days within the year.
-        // Only meaningful when there are syndicates that can write policies.
-        let n_cats: usize = if self.syndicates.is_empty() {
-            0
-        } else {
-            self.rng.random_range(0..=2usize)
-        };
-        for _ in 0..n_cats {
-            let offset = self.rng.random_range(1..360_u64);
-            let event_id = self.alloc_loss_event_id();
-            let severity = self.rng.random_range(100_000..=10_000_000_u64);
-            self.schedule(
-                day.offset(offset),
-                Event::LossEvent {
-                    event_id,
-                    region: "US-SE".to_string(),
-                    peril: crate::events::Peril::WindstormAtlantic,
-                    severity,
-                },
+        // Schedule loss events for the year using a Poisson frequency-severity
+        // model. Only meaningful when there are syndicates that can write policies.
+        if !self.syndicates.is_empty() {
+            let configs = perils::default_peril_configs();
+            let loss_events = perils::schedule_loss_events(
+                &configs,
+                year_start,
+                &mut self.rng,
+                &mut self.next_loss_event_id,
             );
+            for (d, e) in loss_events {
+                self.schedule(d, e);
+            }
         }
 
         self.schedule(
@@ -557,8 +544,7 @@ mod tests {
     #[test]
     fn full_dispatch_loss_reduces_capital_deterministically() {
         use crate::events::{Panel, PanelEntry};
-        use crate::market::BoundPolicy;
-        use crate::types::{LossEventId, PolicyId, SubmissionId};
+        use crate::types::{LossEventId, SubmissionId};
 
         let mut sim = Simulation::new(0);
         sim.syndicates = vec![
@@ -566,34 +552,21 @@ mod tests {
             Syndicate::new(SyndicateId(2), 10_000_000, 500),
         ];
 
-        let policy_id = PolicyId(0);
-        sim.market.policies.insert(
-            policy_id,
-            BoundPolicy {
-                policy_id,
-                submission_id: SubmissionId(0),
-                risk: Risk {
-                    line_of_business: "property".to_string(),
-                    sum_insured: 2_000_000,
-                    territory: "US-SE".to_string(),
-                    limit: 1_000_000,
-                    attachment: 100_000,
-                    perils_covered: vec![Peril::WindstormAtlantic],
-                },
-                panel: Panel {
-                    entries: vec![
-                        PanelEntry {
-                            syndicate_id: SyndicateId(1),
-                            share_bps: 6_000,
-                            premium: 0,
-                        },
-                        PanelEntry {
-                            syndicate_id: SyndicateId(2),
-                            share_bps: 4_000,
-                            premium: 0,
-                        },
-                    ],
-                },
+        sim.market.on_policy_bound(
+            SubmissionId(0),
+            Risk {
+                line_of_business: "property".to_string(),
+                sum_insured: 2_000_000,
+                territory: "US-SE".to_string(),
+                limit: 1_000_000,
+                attachment: 100_000,
+                perils_covered: vec![Peril::WindstormAtlantic],
+            },
+            Panel {
+                entries: vec![
+                    PanelEntry { syndicate_id: SyndicateId(1), share_bps: 6_000, premium: 0 },
+                    PanelEntry { syndicate_id: SyndicateId(2), share_bps: 4_000, premium: 0 },
+                ],
             },
         );
 
@@ -644,8 +617,8 @@ mod tests {
         // Directly test on_loss_event: for a known severity the sum of
         // ClaimSettled.amount across all panel entries == min(severity, limit) - attachment.
         use crate::events::{Panel, PanelEntry};
-        use crate::market::{BoundPolicy, Market};
-        use crate::types::{PolicyId, SubmissionId, SyndicateId};
+        use crate::market::Market;
+        use crate::types::{SubmissionId, SyndicateId};
 
         let limit = 1_000_000u64;
         let attachment = 100_000u64;
@@ -661,32 +634,13 @@ mod tests {
         };
         let panel = Panel {
             entries: vec![
-                PanelEntry {
-                    syndicate_id: SyndicateId(1),
-                    share_bps: 6_000,
-                    premium: 0,
-                },
-                PanelEntry {
-                    syndicate_id: SyndicateId(2),
-                    share_bps: 4_000,
-                    premium: 0,
-                },
+                PanelEntry { syndicate_id: SyndicateId(1), share_bps: 6_000, premium: 0 },
+                PanelEntry { syndicate_id: SyndicateId(2), share_bps: 4_000, premium: 0 },
             ],
         };
 
         let mut market = Market::new();
-        // Insert a BoundPolicy directly.
-        let policy_id = PolicyId(0);
-        let submission_id = SubmissionId(1);
-        market.policies.insert(
-            policy_id,
-            BoundPolicy {
-                policy_id,
-                submission_id,
-                risk,
-                panel,
-            },
-        );
+        market.on_policy_bound(SubmissionId(1), risk, panel);
 
         let events = market.on_loss_event(Day(0), "US-SE", Peril::WindstormAtlantic, severity);
 
@@ -889,16 +843,14 @@ mod tests {
         use std::time::Instant;
 
         use crate::events::{Panel, PanelEntry};
-        use crate::market::BoundPolicy;
-        use crate::types::{LossEventId, PolicyId, SubmissionId};
+        use crate::types::{LossEventId, SubmissionId};
 
         let mut sim = Simulation::new(42);
 
-        // Insert 5,000 policies with 5-entry equal-share panels directly.
+        // Bind 5,000 policies with 5-entry equal-share panels via on_policy_bound.
         let panel_size = 5usize;
         let share_per = 10_000u32 / panel_size as u32; // 2_000
         for i in 0..5_000usize {
-            let policy_id = PolicyId(i as u64);
             let entries: Vec<PanelEntry> = (0..panel_size)
                 .map(|j| PanelEntry {
                     syndicate_id: SyndicateId((j + 1) as u64),
@@ -914,15 +866,7 @@ mod tests {
                 attachment: 500_000,
                 perils_covered: vec![Peril::WindstormAtlantic],
             };
-            sim.market.policies.insert(
-                policy_id,
-                BoundPolicy {
-                    policy_id,
-                    submission_id: SubmissionId(i as u64),
-                    risk,
-                    panel: Panel { entries },
-                },
-            );
+            sim.market.on_policy_bound(SubmissionId(i as u64), risk, Panel { entries });
         }
 
         sim.schedule(

@@ -304,8 +304,8 @@ mod tests {
     #[test]
     fn attritional_loss_event_flows_to_claim_settled() {
         use crate::events::{Panel, PanelEntry, Risk};
-        use crate::market::{BoundPolicy, Market};
-        use crate::types::{PolicyId, SubmissionId, SyndicateId};
+        use crate::market::Market;
+        use crate::types::{SubmissionId, SyndicateId};
 
         let mut market = Market::new();
         let risk = Risk {
@@ -323,15 +323,7 @@ mod tests {
                 premium: 50_000,
             }],
         };
-        market.policies.insert(
-            PolicyId(0),
-            BoundPolicy {
-                policy_id: PolicyId(0),
-                submission_id: SubmissionId(0),
-                risk,
-                panel,
-            },
-        );
+        market.on_policy_bound(SubmissionId(0), risk, panel);
 
         let events = market.on_loss_event(Day(10), "US-SE", Peril::Attritional, 500_000);
         assert!(

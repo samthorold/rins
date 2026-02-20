@@ -41,6 +41,9 @@ pub struct Market {
     next_policy_id: u64,
     pending: HashMap<SubmissionId, PendingSubmission>,
     pub policies: HashMap<PolicyId, BoundPolicy>,
+    /// Inverted index: (territory, peril) → policy IDs. Populated in
+    /// `on_policy_bound`; used by `on_loss_event` to skip non-matching policies.
+    pub peril_territory_index: HashMap<(String, Peril), Vec<PolicyId>>,
     /// Risk stashed at panel-assembly time, consumed when `PolicyBound` fires.
     risk_cache: HashMap<SubmissionId, Risk>,
     /// Year-to-date gross premiums written per line of business.
@@ -55,6 +58,7 @@ impl Market {
             next_policy_id: 0,
             pending: HashMap::new(),
             policies: HashMap::new(),
+            peril_territory_index: HashMap::new(),
             risk_cache: HashMap::new(),
             ytd_premiums_by_line: HashMap::new(),
             ytd_claims_by_line: HashMap::new(),
@@ -297,6 +301,12 @@ impl Market {
 
         let policy_id = PolicyId(self.next_policy_id);
         self.next_policy_id += 1;
+        for &peril in &risk.perils_covered {
+            self.peril_territory_index
+                .entry((risk.territory.clone(), peril))
+                .or_default()
+                .push(policy_id);
+        }
         self.policies.insert(
             policy_id,
             BoundPolicy {
@@ -319,13 +329,11 @@ impl Market {
         severity: u64,
     ) -> Vec<(Day, Event)> {
         let mut out = vec![];
-        for (policy_id, policy) in &self.policies {
-            if policy.risk.territory != region {
-                continue;
-            }
-            if !policy.risk.perils_covered.contains(&peril) {
-                continue;
-            }
+        let Some(ids) = self.peril_territory_index.get(&(region.to_string(), peril)) else {
+            return out;
+        };
+        for policy_id in ids {
+            let policy = &self.policies[policy_id];
             let gross_loss = severity.min(policy.risk.limit);
             let net_loss = gross_loss.saturating_sub(policy.risk.attachment);
             if net_loss == 0 {
@@ -369,7 +377,7 @@ mod tests {
 
     #[test]
     fn per_syndicate_loss_allocation_matches_share() {
-        use crate::types::{PolicyId, SubmissionId};
+        use crate::types::SubmissionId;
 
         let risk = Risk {
             line_of_business: "property".to_string(),
@@ -387,11 +395,7 @@ mod tests {
         };
 
         let mut market = Market::new();
-        let policy_id = PolicyId(0);
-        market.policies.insert(
-            policy_id,
-            BoundPolicy { policy_id, submission_id: SubmissionId(1), risk, panel },
-        );
+        market.on_policy_bound(SubmissionId(1), risk, panel);
 
         let events =
             market.on_loss_event(crate::types::Day(0), "US-SE", Peril::WindstormAtlantic, 800_000);
@@ -475,5 +479,42 @@ mod tests {
         assert_eq!(policy.submission_id, sid);
         assert_eq!(policy.risk.limit, risk.limit);
         assert_eq!(policy.panel.entries.len(), 1);
+    }
+
+    #[test]
+    fn index_populated_on_policy_bound() {
+        use crate::events::{Panel, PanelEntry, Peril, Risk};
+        use crate::types::{PolicyId, SubmissionId, SyndicateId};
+
+        let mut market = Market::new();
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 1_000_000,
+            territory: "US-SE".to_string(),
+            limit: 500_000,
+            attachment: 0,
+            perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
+        };
+        let panel = Panel {
+            entries: vec![PanelEntry {
+                syndicate_id: SyndicateId(1),
+                share_bps: 10_000,
+                premium: 0,
+            }],
+        };
+        market.on_policy_bound(SubmissionId(0), risk, panel);
+
+        let ids_wind = market
+            .peril_territory_index
+            .get(&("US-SE".to_string(), Peril::WindstormAtlantic))
+            .expect("WindstormAtlantic index entry missing");
+        let ids_attr = market
+            .peril_territory_index
+            .get(&("US-SE".to_string(), Peril::Attritional))
+            .expect("Attritional index entry missing");
+        assert_eq!(ids_wind.len(), 1);
+        assert_eq!(ids_attr.len(), 1);
+        assert_eq!(ids_wind[0], PolicyId(0));
+        assert_eq!(ids_attr[0], PolicyId(0));
     }
 }

@@ -55,26 +55,28 @@ Throughput is in submissions/second.
 
 | scenario | syndicates | brokers × subs/broker | time | throughput |
 |---|---|---|---|---|
-| small | 5 | 2 × 10 | 209 µs | 96 K/s |
-| medium | 20 | 10 × 100 | 34 ms | 29 K/s |
-| large | 80 | 25 × 500 | ~4 s | ~3.2 K/s |
+| small | 5 | 2 × 10 | 212 µs | 94 K/s |
+| medium | 20 | 10 × 100 | 35 ms | 28 K/s |
+| large | 80 | 25 × 500 | ~2.3 s | ~5.4 K/s |
 
-Large is ~120× slower than a linear extrapolation from medium. The dominant cost has
-shifted: attritional loss processing now generates O(bound_policies × panel_size)
-`ClaimSettled` events per attritional event per year (λ=12 for US-SE and UK). At
-large scale this vastly outnumbers quoting-pipeline events. See **Finding 4**.
+Large improved ~1.7× (from ~4 s) after adding the peril/territory index (Finding 4 fix).
+Small and medium are essentially unchanged — at those scales most policies match the
+loss region anyway, so the index saves little filtering work. The remaining large-scale
+cost is queue churn and `ClaimSettled` dispatch; see **Finding 4** (updated).
 
 ### `multi_year` — medium scenario, 1/5/10 years
 
 | years | total time | per-year |
 |---|---|---|
-| 1 | 73 ms | 73 ms |
-| 5 | 816 ms | 163 ms |
-| 10 | 2.0 s | 200 ms |
+| 1 | 33 ms | 33 ms |
+| 5 | 423 ms | 85 ms |
+| 10 | 1.85 s | 185 ms |
 
-Per-year cost grows ~2.7× from year 1 to year 10. The `log: Vec<SimEvent>` growth
-effect is amplified by the attritional claim volume — many more events accumulate per
-year, increasing reallocation cost. Not alarming at medium scale; revisit at large scale.
+Per-year cost grows ~5.6× from year 1 to year 10 (was 2.7× pre-index). The absolute
+numbers are much lower post-index, but per-year cost still grows super-linearly: the
+`log: Vec<SimEvent>` grows across years, increasing push/reallocation overhead, and
+later years have more bound policies (hence more claim fan-out). Not alarming at medium
+scale; revisit at large scale.
 
 ### `event_queue` — `BinaryHeap` push+drain in isolation
 
@@ -139,6 +141,15 @@ Wiring `Peril::Attritional` into every broker submission increased `full_year/me
 from 9.9 ms to 34 ms (3.4×) and `full_year/large` from 627 ms to ~4 s (6.4×). The
 asymmetric scaling arises because attritional event count is fixed per year (Poisson λ)
 but claim volume scales with O(policies × panel_size). At large scale the attritional
-claim fan-out dominates all other costs. If the large scenario needs to run faster,
-the highest-leverage optimisation is a peril/territory index on `Market.policies` that
-avoids scanning non-matching policies for each loss event (see Finding 3).
+claim fan-out dominates all other costs.
+
+**Partially addressed (2026-02-20):** A `peril_territory_index: HashMap<(String, Peril),
+Vec<PolicyId>>` was added to `Market`. `on_policy_bound` now registers each peril in
+the index; `on_loss_event` does a single index lookup and iterates only matching
+policies, eliminating the O(all_policies) scan. This reduced `full_year/large` from
+~4 s to ~2.3 s (~1.7×) and `multi_year` proportionally. The remaining cost is the
+O(matching_policies × panel_size) inner loop plus queue churn from the resulting
+`ClaimSettled` events — the index cannot help with that. Further improvement would
+require reducing attritional fan-out (e.g., aggregate attritional claims per syndicate
+before emitting events, or decoupling attritional losses from the per-policy routing
+path).

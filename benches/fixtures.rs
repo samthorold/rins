@@ -1,9 +1,9 @@
 use rins::broker::Broker;
 use rins::events::{Event, Panel, PanelEntry, Peril, Risk};
-use rins::market::{BoundPolicy, Market};
+use rins::market::Market;
 use rins::simulation::Simulation;
 use rins::syndicate::Syndicate;
-use rins::types::{BrokerId, Day, PolicyId, SubmissionId, SyndicateId, Year};
+use rins::types::{BrokerId, Day, SubmissionId, SyndicateId, Year};
 
 pub struct Scenario {
     pub syndicates: usize,
@@ -66,7 +66,7 @@ pub fn make_brokers(n: usize, subs_per_broker: usize) -> Vec<Broker> {
         .collect()
 }
 
-/// Directly insert `policy_count` `BoundPolicy` records into `market.policies`.
+/// Bind `policy_count` policies into `market` via `on_policy_bound`.
 /// All policies use territory "US-SE" and `Peril::WindstormAtlantic` so a single
 /// `LossEvent` hits all of them. Shares are allocated equally with any remainder
 /// assigned to entry 0.
@@ -74,8 +74,6 @@ pub fn prepopulate_policies(market: &mut Market, policy_count: usize, panel_size
     let share_per = 10_000u32 / panel_size as u32;
     let remainder = 10_000u32 - share_per * panel_size as u32;
     for i in 0..policy_count {
-        let policy_id = PolicyId(i as u64);
-        let submission_id = SubmissionId(i as u64);
         let entries: Vec<PanelEntry> = (0..panel_size)
             .map(|j| PanelEntry {
                 syndicate_id: SyndicateId((j + 1) as u64),
@@ -91,15 +89,7 @@ pub fn prepopulate_policies(market: &mut Market, policy_count: usize, panel_size
             attachment: 500_000,
             perils_covered: vec![Peril::WindstormAtlantic],
         };
-        market.policies.insert(
-            policy_id,
-            BoundPolicy {
-                policy_id,
-                submission_id,
-                risk,
-                panel: Panel { entries },
-            },
-        );
+        market.on_policy_bound(SubmissionId(i as u64), risk, Panel { entries });
     }
 }
 
