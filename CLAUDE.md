@@ -84,6 +84,12 @@ cargo bench -- --baseline initial       # regression check against saved baselin
 cargo test -- --ignored stress_scenario_completes_within_budget --nocapture
 ```
 
+## Skills
+
+Skills live in `.claude/skills/` and are developed alongside the project. As the simulation grows, existing skills should be updated to reflect new events, agents, or analysis patterns, and new skills should be added for recurring workflows.
+
+Amendments and new skills are encouraged — but always check with the user before creating or modifying a skill.
+
 ## Testing Approach
 
 Test-first. Write a failing test before implementing any behaviour.
