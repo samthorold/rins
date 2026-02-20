@@ -588,6 +588,61 @@ mod tests {
         );
     }
 
+    // --- Claim-capital tests ---
+
+    #[test]
+    fn capital_after_sequential_claims() {
+        let mut s = fresh_syndicate(); // capital = 10_000_000
+        s.on_claim_settled(300_000);
+        s.on_claim_settled(200_000);
+        assert_eq!(s.capital, 9_500_000);
+    }
+
+    #[test]
+    fn end_to_end_loss_reduces_syndicate_capital() {
+        use crate::events::{Panel, PanelEntry, Peril, Risk};
+        use crate::market::Market;
+        use crate::types::{Day, SubmissionId};
+
+        // Build synthetic policy: US-SE, WindstormAtlantic, limit=1_000_000, attach=100_000.
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000,
+            territory: "US-SE".to_string(),
+            limit: 1_000_000,
+            attachment: 100_000,
+            perils_covered: vec![Peril::WindstormAtlantic],
+        };
+        // Single-syndicate panel: Syn 1 takes 100%.
+        let panel = Panel {
+            entries: vec![PanelEntry {
+                syndicate_id: SyndicateId(1),
+                share_bps: 10_000,
+                premium: 50_000,
+            }],
+        };
+
+        let mut market = Market::new();
+        market.on_policy_bound(SubmissionId(1), risk, panel);
+
+        // Fire a loss: severity 600_000 → net_loss = 600_000 - 100_000 = 500_000.
+        let claim_events =
+            market.on_loss_event(Day(0), "US-SE", Peril::WindstormAtlantic, 600_000);
+
+        // Apply ClaimSettled events to the syndicate.
+        let mut syn = fresh_syndicate(); // SyndicateId(1), capital = 10_000_000
+        for (_, ev) in &claim_events {
+            if let crate::events::Event::ClaimSettled { syndicate_id, amount, .. } = ev {
+                if *syndicate_id == SyndicateId(1) {
+                    syn.on_claim_settled(*amount);
+                }
+            }
+        }
+
+        // net_loss = 500_000; share = 10_000 / 10_000 → deduction = 500_000.
+        assert_eq!(syn.capital, 9_500_000, "capital should be initial - net_loss");
+    }
+
     // 16. ATP is monotone non-decreasing after observing higher loss ratios (proptest).
     proptest! {
         #[test]

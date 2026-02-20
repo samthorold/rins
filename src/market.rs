@@ -517,4 +517,175 @@ mod tests {
         assert_eq!(ids_wind[0], PolicyId(0));
         assert_eq!(ids_attr[0], PolicyId(0));
     }
+
+    // --- Claim-splitting tests ---
+
+    #[test]
+    fn claim_below_attachment_produces_no_event() {
+        let mut market = Market::new();
+        // make_risk: attachment = 100_000, limit = 1_000_000, peril = WindstormAtlantic
+        market.on_policy_bound(
+            SubmissionId(1),
+            make_risk(),
+            Panel {
+                entries: vec![PanelEntry {
+                    syndicate_id: SyndicateId(1),
+                    share_bps: 10_000,
+                    premium: 0,
+                }],
+            },
+        );
+        // severity (50_000) < attachment (100_000) → net_loss = 0
+        let events =
+            market.on_loss_event(crate::types::Day(0), "US-SE", Peril::WindstormAtlantic, 50_000);
+        assert!(
+            events.is_empty(),
+            "expected no ClaimSettled when severity <= attachment, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn claim_severity_capped_at_policy_limit() {
+        let mut market = Market::new();
+        // make_risk: limit = 1_000_000, attachment = 100_000
+        market.on_policy_bound(
+            SubmissionId(1),
+            make_risk(),
+            Panel {
+                entries: vec![PanelEntry {
+                    syndicate_id: SyndicateId(1),
+                    share_bps: 10_000,
+                    premium: 0,
+                }],
+            },
+        );
+        // severity 5_000_000 > limit 1_000_000
+        // gross = 1_000_000; net = 900_000; amount = 900_000 * 10_000 / 10_000 = 900_000
+        let events = market.on_loss_event(
+            crate::types::Day(0),
+            "US-SE",
+            Peril::WindstormAtlantic,
+            5_000_000,
+        );
+        let amount = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::ClaimSettled { syndicate_id, amount, .. }
+                    if *syndicate_id == SyndicateId(1) =>
+                {
+                    Some(*amount)
+                }
+                _ => None,
+            })
+            .expect("expected ClaimSettled for SyndicateId(1)");
+        assert_eq!(amount, 900_000, "capped claim should be limit - attachment");
+    }
+
+    #[test]
+    fn sum_of_claims_le_net_loss_three_syndicates() {
+        // 3-syndicate panel: 5000 / 3000 / 2000 bps
+        let mut market = Market::new();
+        market.on_policy_bound(
+            SubmissionId(1),
+            make_risk(),
+            Panel {
+                entries: vec![
+                    PanelEntry { syndicate_id: SyndicateId(1), share_bps: 5_000, premium: 0 },
+                    PanelEntry { syndicate_id: SyndicateId(2), share_bps: 3_000, premium: 0 },
+                    PanelEntry { syndicate_id: SyndicateId(3), share_bps: 2_000, premium: 0 },
+                ],
+            },
+        );
+        // severity = 600_000; gross = 600_000; net = 600_000 - 100_000 = 500_000
+        let events = market.on_loss_event(
+            crate::types::Day(0),
+            "US-SE",
+            Peril::WindstormAtlantic,
+            600_000,
+        );
+        let net_loss = 500_000u64;
+
+        let find = |sid: SyndicateId| {
+            events
+                .iter()
+                .find_map(|(_, e)| match e {
+                    Event::ClaimSettled { syndicate_id, amount, .. } if *syndicate_id == sid => {
+                        Some(*amount)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no ClaimSettled for {sid:?}"))
+        };
+
+        let a1 = find(SyndicateId(1)); // 500_000 * 5000 / 10_000 = 250_000
+        let a2 = find(SyndicateId(2)); // 500_000 * 3000 / 10_000 = 150_000
+        let a3 = find(SyndicateId(3)); // 500_000 * 2000 / 10_000 = 100_000
+
+        assert_eq!(a1, 250_000);
+        assert_eq!(a2, 150_000);
+        assert_eq!(a3, 100_000);
+
+        let sum = a1 + a2 + a3;
+        assert!(sum <= net_loss, "sum_claims={sum} > net_loss={net_loss}");
+        assert!(
+            (net_loss - sum) < 3,
+            "rounding gap {} should be < n_syndicates(3)",
+            net_loss - sum
+        );
+    }
+
+    #[test]
+    fn no_claim_for_unmatched_peril() {
+        // Policy covers WindstormAtlantic; loss fires EarthquakeUS → no claims.
+        let mut market = Market::new();
+        market.on_policy_bound(
+            SubmissionId(1),
+            make_risk(), // perils_covered = [WindstormAtlantic]
+            Panel {
+                entries: vec![PanelEntry {
+                    syndicate_id: SyndicateId(1),
+                    share_bps: 10_000,
+                    premium: 0,
+                }],
+            },
+        );
+        let events = market.on_loss_event(
+            crate::types::Day(0),
+            "US-SE",
+            Peril::EarthquakeUS,
+            500_000,
+        );
+        assert!(
+            events.is_empty(),
+            "expected no claims for unmatched peril, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn no_claim_for_unmatched_territory() {
+        // Policy is in US-SE; loss fires for EU → no claims.
+        let mut market = Market::new();
+        market.on_policy_bound(
+            SubmissionId(1),
+            make_risk(), // territory = "US-SE"
+            Panel {
+                entries: vec![PanelEntry {
+                    syndicate_id: SyndicateId(1),
+                    share_bps: 10_000,
+                    premium: 0,
+                }],
+            },
+        );
+        // on_loss_event looks up by (region, peril); "EU" won't match "US-SE" index.
+        let events = market.on_loss_event(
+            crate::types::Day(0),
+            "EU",
+            Peril::WindstormAtlantic,
+            500_000,
+        );
+        assert!(
+            events.is_empty(),
+            "expected no claims for unmatched territory, got {events:?}"
+        );
+    }
 }

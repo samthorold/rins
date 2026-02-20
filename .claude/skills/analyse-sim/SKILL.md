@@ -92,6 +92,8 @@ for y in years:
 
 Run it with: `python3 /tmp/analyse_sim.py`
 
+Then run the verify-events skill to check event-stream integrity: write `/tmp/verify_claims.py` (the script from the verify-events skill) and run `python3 /tmp/verify_claims.py --no-regen`. Report any FAIL lines before the Step 3 analysis.
+
 ## Step 3 — Report
 
 Present the analysis output with brief interpretation:
