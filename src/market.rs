@@ -415,6 +415,49 @@ mod tests {
     }
 
     #[test]
+    fn ytd_accumulates_premiums_and_claims_then_resets() {
+        use crate::types::{PolicyId, SubmissionId, Year};
+
+        let mut market = Market::new();
+        // Bind a policy with known premium (80_000 for "property" on US-SE).
+        let risk = make_risk(); // property / US-SE / attachment=100_000 / limit=1_000_000
+        let panel = Panel {
+            entries: vec![PanelEntry {
+                syndicate_id: SyndicateId(1),
+                share_bps: 10_000,
+                premium: 80_000,
+            }],
+        };
+        market.on_policy_bound(SubmissionId(1), risk, panel);
+
+        // on_policy_bound assigns PolicyId(0) (next_policy_id starts at 0).
+        market.on_claim_settled(PolicyId(0), 40_000);
+
+        let stats = market.compute_year_stats(&[], Year(1));
+
+        // loss_ratio = 40_000 / 80_000 = 0.50
+        assert!(
+            (stats.industry_loss_ratio - 0.5).abs() < 1e-10,
+            "industry_loss_ratio={} expected 0.50",
+            stats.industry_loss_ratio
+        );
+        assert!(
+            (stats.loss_ratios_by_line["property"] - 0.5).abs() < 1e-10,
+            "property loss_ratio={} expected 0.50",
+            stats.loss_ratios_by_line["property"]
+        );
+
+        // Accumulators must reset: a second call with no new data returns the fallback.
+        let stats2 = market.compute_year_stats(&[], Year(2));
+        assert!(
+            (stats2.industry_loss_ratio - 0.65).abs() < 1e-10,
+            "YTD should reset; expected fallback 0.65, got {}",
+            stats2.industry_loss_ratio
+        );
+        assert!(stats2.loss_ratios_by_line.is_empty());
+    }
+
+    #[test]
     fn market_registers_policy_on_bound() {
         let mut market = Market::new();
         let sid = SubmissionId(1);

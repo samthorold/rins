@@ -706,6 +706,135 @@ mod tests {
         );
     }
 
+    // ── Event-stream coherence tests ──────────────────────────────────────────
+
+    /// The first lead QuoteIssued premium in a year-1 run must equal the ATP
+    /// computed with the initial benchmark (0.65). This traces the full
+    /// dispatch path: SubmissionArrived → QuoteRequested → on_quote_requested
+    /// → QuoteIssued, verifying the benchmark is threaded correctly.
+    #[test]
+    fn year_one_lead_premium_equals_atp_with_initial_benchmark() {
+        // Expected ATP for property / US-SE / limit=1_000_000 / attachment=0 /
+        // WindstormAtlantic with fresh syndicate (z=0) and benchmark=0.65:
+        //   blended   = 0.65
+        //   territory = 1.4  (US-SE)
+        //   peril     = 1.5  (WindstormAtlantic)
+        //   layer_f   = 1.0  (attachment=0)
+        //   ATP       = round(1_000_000 * 0.65 * 1.4 * 1.5) = 1_365_000
+        let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+        let sim = run_year(vec![make_syndicate(1)], vec![make_broker(1, risk.clone())]);
+
+        let lead_premium = sim
+            .log
+            .iter()
+            .find_map(|e| match &e.event {
+                Event::QuoteIssued { is_lead: true, premium, .. } => Some(*premium),
+                _ => None,
+            })
+            .expect("no lead QuoteIssued in log");
+
+        let expected = make_syndicate(1).atp(&risk, 0.65);
+        assert_eq!(
+            lead_premium, expected,
+            "lead premium {lead_premium} != expected ATP {expected}"
+        );
+    }
+
+    /// Firing YearEnd after manually staging YTD data must update
+    /// `current_industry_benchmark` to the realised loss ratio.
+    #[test]
+    fn year_end_updates_benchmark_from_ytd_data() {
+        use crate::events::{Panel, PanelEntry};
+        use crate::types::{PolicyId, SubmissionId, Year};
+
+        // No brokers — no stochastic submissions or catastrophe events.
+        let mut sim = Simulation::new(0).until(Day::year_end(Year(1)));
+        sim.syndicates = vec![make_syndicate(1)];
+
+        // Manually bind a policy with known premium (80_000) so the market
+        // accumulates YTD data without going through the submission pipeline.
+        let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+        let panel = Panel {
+            entries: vec![PanelEntry {
+                syndicate_id: SyndicateId(1),
+                share_bps: 10_000,
+                premium: 80_000,
+            }],
+        };
+        sim.market.on_policy_bound(SubmissionId(1), risk, panel);
+
+        // Settle a claim of 60_000 → realised loss ratio = 60_000 / 80_000 = 0.75.
+        // on_policy_bound assigns PolicyId(0) (next_policy_id starts at 0).
+        sim.market.on_claim_settled(PolicyId(0), 60_000);
+
+        sim.schedule(Day::year_end(Year(1)), Event::YearEnd { year: Year(1) });
+        sim.run();
+
+        assert!(
+            (sim.current_industry_benchmark - 0.75).abs() < 1e-10,
+            "benchmark={} expected 0.75",
+            sim.current_industry_benchmark
+        );
+    }
+
+    /// A year with heavier-than-average losses must produce higher quoted
+    /// premiums in the following year.
+    ///
+    /// Two simulations share seed 42 (identical stochastic cats). Simulation B
+    /// has an extra deterministic large loss injected at day 100 of year 1.
+    /// Because YTD claims differ, the industry benchmark and each syndicate's
+    /// EWMA are higher in B at year-end. Year-2 ATP — which blends EWMA with the
+    /// benchmark — must therefore be higher in B than in A.
+    #[test]
+    fn higher_loss_year_raises_next_year_quoted_premium() {
+        use crate::types::{LossEventId, Year};
+
+        let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+
+        let build = |inject_loss: bool| {
+            let mut sim = Simulation::new(42)
+                .until(Day::year_end(Year(2)))
+                .with_agents(vec![make_syndicate(1)], vec![make_broker(1, risk.clone())]);
+            sim.schedule(
+                Day::year_start(Year(1)),
+                Event::SimulationStart { year_start: Year(1) },
+            );
+            if inject_loss {
+                // Large loss at day 100 of year 1: severity >> limit so net_loss = limit.
+                sim.schedule(
+                    Day::year_start(Year(1)).offset(100),
+                    Event::LossEvent {
+                        event_id: LossEventId(999),
+                        region: "US-SE".to_string(),
+                        peril: Peril::WindstormAtlantic,
+                        severity: 10_000_000,
+                    },
+                );
+            }
+            sim.run();
+            sim
+        };
+
+        let sim_clean = build(false);
+        let sim_loss = build(true);
+
+        let year2_start = Day::year_start(Year(2)).0;
+        let first_lead_premium = |sim: &Simulation| {
+            sim.log.iter().filter(|e| e.day.0 >= year2_start).find_map(|e| match &e.event {
+                Event::QuoteIssued { is_lead: true, premium, .. } => Some(*premium),
+                _ => None,
+            })
+        };
+
+        let p_clean = first_lead_premium(&sim_clean).expect("no year-2 lead quote in clean sim");
+        let p_loss = first_lead_premium(&sim_loss).expect("no year-2 lead quote in loss sim");
+
+        assert!(
+            p_loss > p_clean,
+            "year-2 premium after loss year ({p_loss}) should exceed clean year ({p_clean})"
+        );
+    }
+
     // ── Time-bounded integration tests ────────────────────────────────────────
 
     /// Test A: a medium-scale scenario (20 syndicates, 10 brokers, 100 subs/broker)
