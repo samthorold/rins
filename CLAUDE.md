@@ -14,6 +14,30 @@ cargo clippy         # Lint
 cargo fmt            # Format code
 ```
 
+## Investigating Simulation Output
+
+**Regenerate first:** Always run `cargo run` to produce a fresh `events.ndjson` before analysing event-stream behaviour. The file reflects the most recent run; stale files silently mislead.
+
+**Structured NDJSON analysis (use this to avoid false positives):** Group events by type and year before drawing conclusions.
+
+```python
+import json, collections
+
+events = [json.loads(l) for l in open("events.ndjson")]
+
+# 1. Count event types
+type_counts = collections.Counter(list(e['event'].keys())[0] for e in events if isinstance(e['event'], dict))
+
+# 2. Extract values of interest, grouped by year (day // 360 + 1)
+for e in events:
+    ev = e['event']
+    if isinstance(ev, dict) and 'QuoteIssued' in ev:
+        year = e['day'] // 360 + 1
+        # ... collect and compare year-over-year
+```
+
+**Never draw conclusions from a single-year snapshot or from Debug print output alone.** The Debug output shows per-panel-entry premiums, not the raw ATP — these look identical across syndicates by construction. Reading `QuoteIssued.premium` from the NDJSON gives the correct per-syndicate ATP before panel splitting.
+
 ## Project
 
 Rust project using the 2024 edition. Currently a minimal starter — the entry point is `src/main.rs`.

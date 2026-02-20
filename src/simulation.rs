@@ -789,6 +789,61 @@ mod tests {
         );
     }
 
+    /// Price response must be visible in the event log of a single run.
+    ///
+    /// This is the test equivalent of the NDJSON analysis that refuted issue #1:
+    /// collect all `QuoteIssued { is_lead: true }` events, group by year, and
+    /// assert that year-2 premiums exceed year-1 premiums after a large loss.
+    /// Unlike `higher_loss_year_raises_next_year_quoted_premium`, which compares
+    /// two parallel simulations, this test reads one simulation's own event log.
+    #[test]
+    fn price_response_visible_in_event_stream() {
+        use crate::types::{LossEventId, Year};
+
+        let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+        let mut sim = Simulation::new(42)
+            .until(Day::year_end(Year(2)))
+            .with_agents(vec![make_syndicate(1)], vec![make_broker(1, risk)]);
+        sim.schedule(
+            Day::year_start(Year(1)),
+            Event::SimulationStart { year_start: Year(1) },
+        );
+        // Large loss at day 100 of year 1: drives EWMA and benchmark upward.
+        sim.schedule(
+            Day::year_start(Year(1)).offset(100),
+            Event::LossEvent {
+                event_id: LossEventId(999),
+                region: "US-SE".to_string(),
+                peril: Peril::WindstormAtlantic,
+                severity: 10_000_000,
+            },
+        );
+        sim.run();
+
+        let year_boundary = Day::year_start(Year(2)).0;
+        let avg_lead_premium = |min_day: u64, max_day: u64| -> u64 {
+            let premiums: Vec<u64> = sim
+                .log
+                .iter()
+                .filter(|e| e.day.0 >= min_day && e.day.0 < max_day)
+                .filter_map(|e| match &e.event {
+                    Event::QuoteIssued { is_lead: true, premium, .. } => Some(*premium),
+                    _ => None,
+                })
+                .collect();
+            assert!(!premiums.is_empty(), "no lead quotes in day range {min_day}..{max_day}");
+            premiums.iter().sum::<u64>() / premiums.len() as u64
+        };
+
+        let p_year1 = avg_lead_premium(0, year_boundary);
+        let p_year2 = avg_lead_premium(year_boundary, u64::MAX);
+
+        assert!(
+            p_year2 > p_year1,
+            "year-2 avg lead premium ({p_year2}) should exceed year-1 ({p_year1}) after large loss"
+        );
+    }
+
     // ── Time-bounded integration tests ────────────────────────────────────────
 
     /// Test A: a medium-scale scenario (20 syndicates, 10 brokers, 100 subs/broker)
