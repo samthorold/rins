@@ -127,6 +127,10 @@ impl Syndicate {
             .unwrap_or(&1.0);
 
         // 6. Peril factor — max across covered perils; default 1.0 when list is empty.
+        // "Worst-peril dominates": perils are treated as alternative event triggers,
+        // so only the most hazardous peril drives the loading. If perils are instead
+        // independent severity contributors, this should be multiplicative or additive.
+        // Calibration-sensitive choice — revisit when multi-peril claims data is available.
         let peril_f = risk
             .perils_covered
             .iter()
@@ -134,7 +138,11 @@ impl Syndicate {
             .reduce(f64::max)
             .unwrap_or(1.0);
 
-        // 7. Layer factor (pro-rata).
+        // 7. Layer factor (pro-rata by layer position, Lloyd's market-mechanics §1).
+        // Approximates the fraction of expected loss falling in this layer relative
+        // to the total tower. `sum_insured` is intentionally ignored; a first-dollar
+        // cover always gets layer_f=1.0 regardless of the overall exposure size.
+        // This is the standard Lloyd's simplification acceptable for MVP.
         let layer_f = risk.limit as f64 / (risk.attachment as f64 + risk.limit as f64);
 
         // 8. ATP.
@@ -161,8 +169,9 @@ impl Syndicate {
     }
 
     /// Price and issue (or decline) a quote for a submission.
-    /// MVP: premium = rate_on_line_bps * limit / 10_000.
-    /// TODO: actuarial channel (§1), underwriter channel (§2), capital constraint override.
+    /// Premium is set by the actuarial channel (ATP).
+    /// `industry_benchmark` is the market-wide loss ratio from the previous year's YearStats.
+    /// TODO: underwriter channel (§2), capital constraint override.
     pub fn on_quote_requested(
         &self,
         day: Day,
@@ -170,8 +179,9 @@ impl Syndicate {
         risk: &Risk,
         is_lead: bool,
         lead_premium: Option<u64>,
+        industry_benchmark: f64,
     ) -> (Day, Event) {
-        let premium = self.rate_on_line_bps as u64 * risk.limit / 10_000;
+        let premium = self.atp(risk, industry_benchmark);
         // is_lead and lead_premium are inputs to the underwriter channel — deferred.
         let _ = (is_lead, lead_premium);
         (
@@ -192,9 +202,18 @@ impl Syndicate {
     }
 
     /// Called by the coordinator at year-end.
-    /// Will update actuarial EWMA and internal pricing state.
-    pub fn on_year_end(&mut self, _year: Year, _rng: &mut impl Rng) {
-        // TODO: update EWMA loss estimates, apply parameter drift
+    /// Updates the EWMA loss ratio for each line from the market-wide realised ratios.
+    /// `line_loss_ratios` is keyed by line of business and computed by the coordinator
+    /// from YTD premiums and claims; only lines with sufficient premium volume are present.
+    pub fn on_year_end(
+        &mut self,
+        _year: Year,
+        line_loss_ratios: &std::collections::HashMap<String, f64>,
+        _rng: &mut impl Rng,
+    ) {
+        for (line, &loss_ratio) in line_loss_ratios {
+            self.observe_line_loss_ratio(line, loss_ratio);
+        }
     }
 }
 
@@ -236,15 +255,17 @@ mod tests {
         assert_eq!(s.capital, 0);
     }
 
+    // 0. on_quote_requested returns the same premium as atp() called directly.
     #[test]
-    fn syndicate_quotes_rate_on_line() {
-        let s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
+    fn on_quote_requested_uses_atp() {
+        let s = fresh_syndicate();
         let risk = make_risk(1_000_000);
+        let benchmark = 0.65;
         let (_, event) =
-            s.on_quote_requested(crate::types::Day(0), SubmissionId(1), &risk, true, None);
+            s.on_quote_requested(crate::types::Day(0), SubmissionId(1), &risk, true, None, benchmark);
         match event {
             Event::QuoteIssued { premium, .. } => {
-                assert_eq!(premium, 500 * 1_000_000 / 10_000); // 50_000
+                assert_eq!(premium, s.atp(&risk, benchmark));
             }
             _ => panic!("expected QuoteIssued"),
         }
@@ -519,6 +540,52 @@ mod tests {
             prop_assert!(atp_lo >= atp_hi,
                 "attachment lo={lo} atp={atp_lo} > attachment hi={hi} atp={atp_hi}");
         }
+    }
+
+    // 17. on_year_end drives the same EWMA update as observe_line_loss_ratio directly.
+    #[test]
+    fn on_year_end_updates_ewma() {
+        use rand::SeedableRng;
+        let mut s = fresh_syndicate();
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0);
+        let mut line_ratios = std::collections::HashMap::new();
+        line_ratios.insert("property".to_string(), 0.80_f64);
+        s.on_year_end(crate::types::Year(1), &line_ratios, &mut rng);
+        let exp = s.experience.get("property").unwrap();
+        // base=0.60, alpha=0.3 → ewma = 0.3*0.80 + 0.7*0.60 = 0.24+0.42 = 0.66
+        assert!(
+            (exp.ewma_loss_ratio - 0.66).abs() < 1e-10,
+            "ewma={} expected 0.66",
+            exp.ewma_loss_ratio
+        );
+        assert_eq!(exp.volume, 1);
+    }
+
+    // 18. Finding 3: after 1 observation, blended is a convex combination of
+    //     ewma and benchmark (never outside their range).
+    //     Demonstrates that the volume=0→1 transition is bounded.
+    #[test]
+    fn blended_at_volume_one_is_convex_combination_of_ewma_and_benchmark() {
+        // base=0.60, benchmark=0.80, observation=0.70 (between the two)
+        // ewma after 1 obs: 0.3*0.70 + 0.7*0.60 = 0.63
+        // z = 1/(1+50) ≈ 0.0196
+        // blended = 0.0196*0.63 + 0.9804*0.80 ≈ 0.797  — between 0.63 and 0.80
+        let mut s = fresh_syndicate(); // credibility_k=50, base["property"]=0.60
+        s.observe_line_loss_ratio("property", 0.70);
+        let exp = s.experience.get("property").unwrap();
+        assert_eq!(exp.volume, 1);
+
+        let benchmark = 0.80_f64;
+        let z = exp.volume as f64 / (exp.volume as f64 + s.actuarial.credibility_k);
+        let blended = z * exp.ewma_loss_ratio + (1.0 - z) * benchmark;
+
+        // blended is always a convex combination: lo ≤ blended ≤ hi.
+        let lo = benchmark.min(exp.ewma_loss_ratio);
+        let hi = benchmark.max(exp.ewma_loss_ratio);
+        assert!(
+            blended >= lo && blended <= hi,
+            "blended={blended:.6} not in [{lo:.4}, {hi:.4}]: not a convex combination"
+        );
     }
 
     // 16. ATP is monotone non-decreasing after observing higher loss ratios (proptest).

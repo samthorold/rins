@@ -21,6 +21,11 @@ pub struct Simulation {
     brokers: Vec<Broker>,
     market: Market,
     next_loss_event_id: u64,
+    /// Industry-wide loss ratio from the most recently completed year.
+    /// Used as the credibility complement when syndicates price new business.
+    /// Initialised to 0.65 (market-mechanics §1 baseline) until a full year of
+    /// data is available.
+    current_industry_benchmark: f64,
 }
 
 impl Simulation {
@@ -35,6 +40,7 @@ impl Simulation {
             brokers: Vec::new(),
             market: Market::new(),
             next_loss_event_id: 0,
+            current_industry_benchmark: 0.65,
         }
     }
 
@@ -104,14 +110,17 @@ impl Simulation {
                 self.handle_simulation_start(day, year_start);
             }
             Event::YearEnd { year } => {
-                // 1. Coordinator derives industry stats (immutable read of agents).
-                //    compute_year_stats returns owned YearStats, releasing the
-                //    borrow before agents are mutated below.
-                let _stats = self.market.compute_year_stats(&self.syndicates, year);
+                // 1. Coordinator computes industry stats from YTD accumulators.
+                //    compute_year_stats is &mut (resets YTD totals) but returns an
+                //    owned YearStats, releasing the borrow before agents are mutated.
+                let stats = self.market.compute_year_stats(&self.syndicates, year);
 
-                // 2. Each Syndicate updates its actuarial state for next year's pricing.
+                // Publish this year's industry loss ratio for next year's ATP pricing.
+                self.current_industry_benchmark = stats.industry_loss_ratio;
+
+                // 2. Each Syndicate updates its EWMA with realised per-line loss ratios.
                 for s in &mut self.syndicates {
-                    s.on_year_end(year, &mut self.rng);
+                    s.on_year_end(year, &stats.loss_ratios_by_line, &mut self.rng);
                 }
 
                 // 3. Each Broker applies relationship decay.
@@ -150,12 +159,20 @@ impl Simulation {
                     return;
                 };
                 // Find the targeted syndicate and ask it to quote.
+                let benchmark = self.current_industry_benchmark;
                 let result = self
                     .syndicates
                     .iter()
                     .find(|s| s.id == syndicate_id)
                     .map(|s| {
-                        s.on_quote_requested(day, submission_id, &risk, is_lead, lead_premium)
+                        s.on_quote_requested(
+                            day,
+                            submission_id,
+                            &risk,
+                            is_lead,
+                            lead_premium,
+                            benchmark,
+                        )
                     });
                 if let Some((d, e)) = result {
                     self.schedule(d, e);
@@ -249,13 +266,15 @@ impl Simulation {
                 }
             }
             Event::ClaimSettled {
-                policy_id: _,
+                policy_id,
                 syndicate_id,
                 amount,
             } => {
                 if let Some(s) = self.syndicates.iter_mut().find(|s| s.id == syndicate_id) {
                     s.on_claim_settled(amount);
                 }
+                // Accumulate into market YTD totals for industry loss ratio computation.
+                self.market.on_claim_settled(policy_id, amount);
             }
             Event::SyndicateEntered { syndicate_id: _ } => {}
             Event::SyndicateInsolvency { syndicate_id: _ } => {}

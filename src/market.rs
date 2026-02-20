@@ -8,8 +8,11 @@ use crate::types::{Day, PolicyId, SubmissionId, SyndicateId, Year};
 /// Syndicates read these when pricing for the next year.
 pub struct YearStats {
     pub year: Year,
-    pub industry_loss_ratio: f64, // placeholder; will derive from events
+    pub industry_loss_ratio: f64,
     pub active_syndicate_count: usize,
+    /// Realised loss ratio per line of business for the completed year.
+    /// Passed into each Syndicate::on_year_end so EWMA stays current.
+    pub loss_ratios_by_line: HashMap<String, f64>,
 }
 
 /// Transient state for a submission while it is in the quoting pipeline.
@@ -40,6 +43,10 @@ pub struct Market {
     pub policies: HashMap<PolicyId, BoundPolicy>,
     /// Risk stashed at panel-assembly time, consumed when `PolicyBound` fires.
     risk_cache: HashMap<SubmissionId, Risk>,
+    /// Year-to-date gross premiums written per line of business.
+    ytd_premiums_by_line: HashMap<String, u64>,
+    /// Year-to-date claims settled per line of business.
+    ytd_claims_by_line: HashMap<String, u64>,
 }
 
 impl Market {
@@ -49,16 +56,53 @@ impl Market {
             pending: HashMap::new(),
             policies: HashMap::new(),
             risk_cache: HashMap::new(),
+            ytd_premiums_by_line: HashMap::new(),
+            ytd_claims_by_line: HashMap::new(),
         }
     }
 
-    /// Compute industry statistics from the active syndicate pool.
+    /// Compute industry statistics from the year-to-date accumulators.
+    /// Resets YTD accumulators for the next year.
     /// Returns an owned value — caller can then mutably borrow agents.
-    pub fn compute_year_stats(&self, syndicates: &[Syndicate], year: Year) -> YearStats {
+    pub fn compute_year_stats(&mut self, syndicates: &[Syndicate], year: Year) -> YearStats {
+        let total_premiums: u64 = self.ytd_premiums_by_line.values().sum();
+        let total_claims: u64 = self.ytd_claims_by_line.values().sum();
+
+        let industry_loss_ratio = if total_premiums > 0 {
+            total_claims as f64 / total_premiums as f64
+        } else {
+            // No policies written this year; fall back to a plausible prior.
+            0.65
+        };
+
+        let mut loss_ratios_by_line: HashMap<String, f64> = HashMap::new();
+        for (line, &premiums) in &self.ytd_premiums_by_line {
+            if premiums > 0 {
+                let claims = self.ytd_claims_by_line.get(line).copied().unwrap_or(0);
+                loss_ratios_by_line.insert(line.clone(), claims as f64 / premiums as f64);
+            }
+        }
+
+        // Reset accumulators ready for next year.
+        self.ytd_premiums_by_line.clear();
+        self.ytd_claims_by_line.clear();
+
         YearStats {
             year,
-            industry_loss_ratio: 0.0, // TODO: derive from event log
+            industry_loss_ratio,
             active_syndicate_count: syndicates.len(),
+            loss_ratios_by_line,
+        }
+    }
+
+    /// Record that a claim has been settled against a policy.
+    /// Accumulates into the YTD claims total for the policy's line of business.
+    pub fn on_claim_settled(&mut self, policy_id: PolicyId, amount: u64) {
+        if let Some(policy) = self.policies.get(&policy_id) {
+            *self
+                .ytd_claims_by_line
+                .entry(policy.risk.line_of_business.clone())
+                .or_insert(0) += amount;
         }
     }
 
@@ -243,7 +287,14 @@ impl Market {
     }
 
     /// Register a newly bound policy. Called when `PolicyBound` fires.
+    /// Accumulates gross premium into the YTD counter for the policy's line.
     pub fn on_policy_bound(&mut self, submission_id: SubmissionId, risk: Risk, panel: Panel) {
+        let total_premium: u64 = panel.entries.iter().map(|e| e.premium).sum();
+        *self
+            .ytd_premiums_by_line
+            .entry(risk.line_of_business.clone())
+            .or_insert(0) += total_premium;
+
         let policy_id = PolicyId(self.next_policy_id);
         self.next_policy_id += 1;
         self.policies.insert(
