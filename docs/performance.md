@@ -11,9 +11,15 @@ cargo bench -- --baseline initial        # compare against saved baseline
 
 HTML reports are written to `target/criterion/` (not committed).
 
-## Baseline — 2026-02-20
+## Baseline — 2026-02-20 (post-attritional)
 
 Machine: Apple M-series (darwin 25.2.0), optimised build (`--release`).
+
+Numbers below reflect the state after wiring attritional coverage: every broker
+submission now includes `Peril::Attritional`, so bound policies generate attritional
+claims against the per-region Poisson schedules (λ=12/year for US-SE and UK in the
+benchmark fixture). This is the dominant workload change relative to the pre-attritional
+baseline — see **Finding 4**.
 
 ### `loss_distribution` — `Market::on_loss_event`, policy count scaling (panel size = 5)
 
@@ -49,24 +55,26 @@ Throughput is in submissions/second.
 
 | scenario | syndicates | brokers × subs/broker | time | throughput |
 |---|---|---|---|---|
-| small | 5 | 2 × 10 | 44 µs | 450 K/s |
-| medium | 20 | 10 × 100 | 9.9 ms | 101 K/s |
-| large | 80 | 25 × 500 | 627 ms | 19.9 K/s |
+| small | 5 | 2 × 10 | 209 µs | 96 K/s |
+| medium | 20 | 10 × 100 | 34 ms | 29 K/s |
+| large | 80 | 25 × 500 | ~4 s | ~3.2 K/s |
 
-Large is ~14× slower than a linear extrapolation from medium. The cause is the O(n)
-syndicate lookup in `dispatch` firing on every `QuoteRequested` event. See **Finding 2**.
+Large is ~120× slower than a linear extrapolation from medium. The dominant cost has
+shifted: attritional loss processing now generates O(bound_policies × panel_size)
+`ClaimSettled` events per attritional event per year (λ=12 for US-SE and UK). At
+large scale this vastly outnumbers quoting-pipeline events. See **Finding 4**.
 
 ### `multi_year` — medium scenario, 1/5/10 years
 
 | years | total time | per-year |
 |---|---|---|
-| 1 | 9.4 ms | 9.4 ms |
-| 5 | 64.8 ms | 13.0 ms |
-| 10 | 145 ms | 14.5 ms |
+| 1 | 73 ms | 73 ms |
+| 5 | 816 ms | 163 ms |
+| 10 | 2.0 s | 200 ms |
 
-Near-linear with a ~54% per-year overhead by year 10. Likely `log: Vec<SimEvent>`
-growing and triggering periodic reallocations as the log accumulates across years.
-Not alarming at current scales.
+Per-year cost grows ~2.7× from year 1 to year 10. The `log: Vec<SimEvent>` growth
+effect is amplified by the attritional claim volume — many more events accumulate per
+year, increasing reallocation cost. Not alarming at medium scale; revisit at large scale.
 
 ### `event_queue` — `BinaryHeap` push+drain in isolation
 
@@ -104,15 +112,17 @@ an O(n) scan. At 80 syndicates (worst case) this costs 34 ns per call. Even at l
 scale this is negligible compared to the ~10 µs per submission for quoting pipeline
 overhead. No HashMap index is warranted yet; revisit if syndicate count exceeds ~500.
 
-### Finding 2 — `full_year/large` bottleneck is quoting pipeline dispatch, not lookup
+### Finding 2 — `full_year/large` bottleneck is now attritional claim processing, not quoting
 
-The large scenario (80 syndicates, 25 brokers, 500 subs/broker) runs in 627 ms.
-At 100% bind rate each submission triggers 2S + 2 events through the quoting pipeline
-(S = 80). That is ~12,500 submissions × 162 events = ~2 M dispatches, many of which
-touch the syndicate pool. The per-syndicate lookup (34 ns) across 12,500 lead quotes
-accounts for only ~0.4 ms; the bulk of the 627 ms is quoting pipeline overhead
-(risk cloning, HashMap operations in Market, queue churn). Profiling is needed to
-identify the dominant term before optimising.
+The large scenario (80 syndicates, 25 brokers, 500 subs/broker) runs in ~4 s
+post-attritional (was 627 ms). The quoting pipeline cost is unchanged; the new
+dominant term is `on_loss_event` called for each of ~24 attritional events per year
+(λ=12 for US-SE and UK). Each call iterates all ~10,000 bound policies and emits one
+`ClaimSettled` per matching panel entry (~3,300 matching × 80 entries = ~265,000
+events per attritional event, ~6.4 M per year). At ~64 Melem/s throughput from the
+`loss_distribution` benchmark, attritional processing alone accounts for ~100 ms at
+large scale; the remaining cost is queue churn, `ClaimSettled` dispatch, and capital
+updates across 80 syndicates per event. Profiling needed to identify the exact split.
 
 ### Finding 3 — loss distribution cache cliff at ~10,000 policies
 
@@ -122,3 +132,13 @@ once the map exceeds L3 capacity. If the simulation needs to handle >10k simulta
 live policies, consider switching `policies` to a `Vec<BoundPolicy>` (sorted by
 policy_id for O(log n) lookup) or maintaining a pre-filtered index by territory/peril
 to skip non-matching policies without touching their data.
+
+### Finding 4 — attritional coverage is the dominant workload at medium-to-large scale
+
+Wiring `Peril::Attritional` into every broker submission increased `full_year/medium`
+from 9.9 ms to 34 ms (3.4×) and `full_year/large` from 627 ms to ~4 s (6.4×). The
+asymmetric scaling arises because attritional event count is fixed per year (Poisson λ)
+but claim volume scales with O(policies × panel_size). At large scale the attritional
+claim fan-out dominates all other costs. If the large scenario needs to run faster,
+the highest-leverage optimisation is a peril/territory index on `Market.policies` that
+avoids scanning non-matching policies for each loss event (see Finding 3).
