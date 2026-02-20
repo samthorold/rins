@@ -74,6 +74,20 @@ mod tests {
     }
 
     #[test]
+    fn capital_depletes_by_exact_claim_amount() {
+        let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
+        s.on_claim_settled(300_000);
+        assert_eq!(s.capital, 9_700_000);
+    }
+
+    #[test]
+    fn capital_saturates_at_zero() {
+        let mut s = Syndicate::new(SyndicateId(1), 100_000, 500);
+        s.on_claim_settled(500_000);
+        assert_eq!(s.capital, 0);
+    }
+
+    #[test]
     fn syndicate_quotes_rate_on_line() {
         let s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
         let risk = make_risk(1_000_000);

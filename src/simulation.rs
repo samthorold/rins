@@ -536,6 +536,91 @@ mod tests {
     }
 
     #[test]
+    fn full_dispatch_loss_reduces_capital_deterministically() {
+        use crate::events::{Panel, PanelEntry};
+        use crate::market::BoundPolicy;
+        use crate::types::{LossEventId, PolicyId, SubmissionId};
+
+        let mut sim = Simulation::new(0);
+        sim.syndicates = vec![
+            Syndicate::new(SyndicateId(1), 10_000_000, 500),
+            Syndicate::new(SyndicateId(2), 10_000_000, 500),
+        ];
+
+        let policy_id = PolicyId(0);
+        sim.market.policies.insert(
+            policy_id,
+            BoundPolicy {
+                policy_id,
+                submission_id: SubmissionId(0),
+                risk: Risk {
+                    line_of_business: "property".to_string(),
+                    sum_insured: 2_000_000,
+                    territory: "US-SE".to_string(),
+                    limit: 1_000_000,
+                    attachment: 100_000,
+                    perils_covered: vec![Peril::WindstormAtlantic],
+                },
+                panel: Panel {
+                    entries: vec![
+                        PanelEntry {
+                            syndicate_id: SyndicateId(1),
+                            share_bps: 6_000,
+                            premium: 0,
+                        },
+                        PanelEntry {
+                            syndicate_id: SyndicateId(2),
+                            share_bps: 4_000,
+                            premium: 0,
+                        },
+                    ],
+                },
+            },
+        );
+
+        sim.schedule(
+            Day(10),
+            Event::LossEvent {
+                event_id: LossEventId(0),
+                region: "US-SE".to_string(),
+                peril: Peril::WindstormAtlantic,
+                severity: 800_000,
+            },
+        );
+        sim.run();
+
+        // net_loss = min(800_000, 1_000_000) - 100_000 = 700_000
+        // s1_loss  = 700_000 * 6000 / 10_000 = 420_000
+        // s2_loss  = 700_000 * 4000 / 10_000 = 280_000
+
+        // Primary assertions: event log (ground truth per event-sourcing design)
+        assert_eq!(sim.log.len(), 3, "expected exactly 3 events: 1 LossEvent + 2 ClaimSettled");
+
+        let has_loss = sim
+            .log
+            .iter()
+            .any(|e| matches!(&e.event, Event::LossEvent { severity, .. } if *severity == 800_000));
+        assert!(has_loss, "log missing LossEvent with severity=800_000");
+
+        let find_claim = |sid: SyndicateId| {
+            sim.log.iter().find_map(|e| match &e.event {
+                Event::ClaimSettled { syndicate_id, amount, .. } if *syndicate_id == sid => {
+                    Some(*amount)
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(find_claim(SyndicateId(1)), Some(420_000), "wrong claim amount for syndicate 1");
+        assert_eq!(find_claim(SyndicateId(2)), Some(280_000), "wrong claim amount for syndicate 2");
+
+        // Secondary assertions: derived capital confirms dispatch applied the events
+        let s1 = sim.syndicates.iter().find(|s| s.id == SyndicateId(1)).unwrap();
+        let s2 = sim.syndicates.iter().find(|s| s.id == SyndicateId(2)).unwrap();
+        assert_eq!(s1.capital, 9_580_000);
+        assert_eq!(s2.capital, 9_720_000);
+    }
+
+    #[test]
     fn panel_claims_sum_to_net_loss() {
         // Directly test on_loss_event: for a known severity the sum of
         // ClaimSettled.amount across all panel entries == min(severity, limit) - attachment.

@@ -317,6 +317,53 @@ mod tests {
     }
 
     #[test]
+    fn per_syndicate_loss_allocation_matches_share() {
+        use crate::types::{PolicyId, SubmissionId};
+
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000,
+            territory: "US-SE".to_string(),
+            limit: 1_000_000,
+            attachment: 100_000,
+            perils_covered: vec![Peril::WindstormAtlantic],
+        };
+        let panel = Panel {
+            entries: vec![
+                PanelEntry { syndicate_id: SyndicateId(1), share_bps: 6_000, premium: 0 },
+                PanelEntry { syndicate_id: SyndicateId(2), share_bps: 4_000, premium: 0 },
+            ],
+        };
+
+        let mut market = Market::new();
+        let policy_id = PolicyId(0);
+        market.policies.insert(
+            policy_id,
+            BoundPolicy { policy_id, submission_id: SubmissionId(1), risk, panel },
+        );
+
+        let events =
+            market.on_loss_event(crate::types::Day(0), "US-SE", Peril::WindstormAtlantic, 800_000);
+
+        // net_loss = min(800_000, 1_000_000) - 100_000 = 700_000
+        // s1_loss  = 700_000 * 6000 / 10_000 = 420_000
+        // s2_loss  = 700_000 * 4000 / 10_000 = 280_000
+        let find = |sid: SyndicateId| {
+            events
+                .iter()
+                .find_map(|(_, e)| match e {
+                    Event::ClaimSettled { syndicate_id, amount, .. } if *syndicate_id == sid => {
+                        Some(*amount)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no ClaimSettled for {sid:?}"))
+        };
+        assert_eq!(find(SyndicateId(1)), 420_000);
+        assert_eq!(find(SyndicateId(2)), 280_000);
+    }
+
+    #[test]
     fn market_registers_policy_on_bound() {
         let mut market = Market::new();
         let sid = SubmissionId(1);
