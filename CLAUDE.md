@@ -46,6 +46,8 @@ Prefer agents with complex internal logic over decomposing that logic into sub-a
 
 Market mechanics — the structural rules and institutional invariants governing how the market operates — are documented in `docs/market-mechanics.md`. The document describes *what* the market does, not how the simulation implements it; implementation choices and calibration values belong in code and calibration notes, not here.
 
+**`docs/event-flow.md` must be kept in sync.** Update it whenever you add, remove, or rename an event variant in `src/events.rs`, change which agent produces or consumes an event, or alter the day-offset logic in `src/simulation.rs`, `src/market.rs`, or any agent handler.
+
 ## Performance
 
 Criterion benchmarks are in `benches/simulation_perf.rs`. Baselines, findings, and
