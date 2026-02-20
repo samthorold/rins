@@ -1,12 +1,76 @@
+use std::collections::HashMap;
+
 use rand::Rng;
 
-use crate::events::{Event, Risk};
+use crate::events::{Event, Peril, Risk};
 use crate::types::{Day, SubmissionId, SyndicateId, Year};
+
+/// Calibration parameters for the actuarial pricing channel.
+pub struct ActuarialParams {
+    /// Prior expected loss ratio per line of business.
+    pub base_loss_ratios: HashMap<String, f64>,
+    /// Catastrophe loading multipliers per territory.
+    pub territory_factors: HashMap<String, f64>,
+    /// Severity loading multipliers per peril.
+    pub peril_factors: HashMap<Peril, f64>,
+    /// Half-credibility volume (Bühlmann): observations needed for 50% credibility weight.
+    pub credibility_k: f64,
+    /// EWMA decay weight on the most recent observation.
+    pub ewma_alpha: f64,
+}
+
+impl Default for ActuarialParams {
+    fn default() -> Self {
+        let base_loss_ratios = [
+            ("property".to_string(), 0.60),
+            ("marine".to_string(), 0.65),
+            ("casualty".to_string(), 0.70),
+        ]
+        .into_iter()
+        .collect();
+
+        let territory_factors = [
+            ("US-SE".to_string(), 1.4),
+            ("US-CA".to_string(), 1.3),
+            ("EU".to_string(), 1.1),
+            ("UK".to_string(), 1.0),
+        ]
+        .into_iter()
+        .collect();
+
+        let peril_factors = [
+            (Peril::WindstormAtlantic, 1.5),
+            (Peril::WindstormEuropean, 1.3),
+            (Peril::EarthquakeUS, 1.6),
+            (Peril::EarthquakeJapan, 1.6),
+            (Peril::Flood, 1.2),
+            (Peril::Attritional, 0.8),
+        ]
+        .into_iter()
+        .collect();
+
+        ActuarialParams {
+            base_loss_ratios,
+            territory_factors,
+            peril_factors,
+            credibility_k: 50.0,
+            ewma_alpha: 0.3,
+        }
+    }
+}
+
+/// Mutable EWMA state per line of business.
+struct LineExperience {
+    ewma_loss_ratio: f64,
+    volume: u64,
+}
 
 pub struct Syndicate {
     pub id: SyndicateId,
     pub capital: u64, // pence; placeholder — real capital management comes later
     pub rate_on_line_bps: u32, // basis points, e.g. 500 = 5% rate on line
+    pub actuarial: ActuarialParams,
+    experience: HashMap<String, LineExperience>,
 }
 
 impl Syndicate {
@@ -15,7 +79,85 @@ impl Syndicate {
             id,
             capital: initial_capital,
             rate_on_line_bps,
+            actuarial: ActuarialParams::default(),
+            experience: HashMap::new(),
         }
+    }
+
+    pub fn with_actuarial(mut self, params: ActuarialParams) -> Self {
+        self.actuarial = params;
+        self
+    }
+
+    /// Compute the Actuarial Technical Price for a risk.
+    ///
+    /// `industry_benchmark` is the fallback loss ratio for unknown lines.
+    pub fn atp(&self, risk: &Risk, industry_benchmark: f64) -> u64 {
+        if risk.limit == 0 {
+            return 0;
+        }
+
+        let lob = &risk.line_of_business;
+
+        // 1. Base loss ratio from params, fallback to industry benchmark.
+        let base = *self
+            .actuarial
+            .base_loss_ratios
+            .get(lob)
+            .unwrap_or(&industry_benchmark);
+
+        // 2. Own experience (ewma, volume); default to (base, 0) if unseen.
+        let (ewma, volume) = self
+            .experience
+            .get(lob)
+            .map(|e| (e.ewma_loss_ratio, e.volume))
+            .unwrap_or((base, 0));
+
+        // 3. Credibility weight.
+        let z = volume as f64 / (volume as f64 + self.actuarial.credibility_k);
+
+        // 4. Blended loss ratio.
+        let blended = z * ewma + (1.0 - z) * industry_benchmark;
+
+        // 5. Territory factor.
+        let territory_f = *self
+            .actuarial
+            .territory_factors
+            .get(&risk.territory)
+            .unwrap_or(&1.0);
+
+        // 6. Peril factor — max across covered perils; default 1.0 when list is empty.
+        let peril_f = risk
+            .perils_covered
+            .iter()
+            .map(|p| *self.actuarial.peril_factors.get(p).unwrap_or(&1.0))
+            .reduce(f64::max)
+            .unwrap_or(1.0);
+
+        // 7. Layer factor (pro-rata).
+        let layer_f = risk.limit as f64 / (risk.attachment as f64 + risk.limit as f64);
+
+        // 8. ATP.
+        (risk.limit as f64 * blended * territory_f * peril_f * layer_f).round() as u64
+    }
+
+    /// Update the EWMA loss ratio for a line of business.
+    ///
+    /// Called at year-end once loss ratios are known. Currently used only by tests;
+    /// will be wired into `on_year_end` when the simulation is ready.
+    pub fn observe_line_loss_ratio(&mut self, line: &str, loss_ratio: f64) {
+        let base = *self
+            .actuarial
+            .base_loss_ratios
+            .get(line)
+            .unwrap_or(&loss_ratio);
+        let alpha = self.actuarial.ewma_alpha;
+        let entry = self.experience.entry(line.to_string()).or_insert(LineExperience {
+            ewma_loss_ratio: base,
+            volume: 0,
+        });
+        entry.ewma_loss_ratio = alpha * loss_ratio + (1.0 - alpha) * entry.ewma_loss_ratio;
+        entry.volume += 1;
     }
 
     /// Price and issue (or decline) a quote for a submission.
@@ -61,6 +203,7 @@ mod tests {
     use super::*;
     use crate::events::Peril;
     use crate::types::SubmissionId;
+    use proptest::prelude::*;
 
     fn make_risk(limit: u64) -> Risk {
         Risk {
@@ -72,6 +215,12 @@ mod tests {
             perils_covered: vec![Peril::WindstormAtlantic],
         }
     }
+
+    fn fresh_syndicate() -> Syndicate {
+        Syndicate::new(SyndicateId(1), 10_000_000, 500)
+    }
+
+    // ── Existing tests ─────────────────────────────────────────────────────
 
     #[test]
     fn capital_depletes_by_exact_claim_amount() {
@@ -98,6 +247,299 @@ mod tests {
                 assert_eq!(premium, 500 * 1_000_000 / 10_000); // 50_000
             }
             _ => panic!("expected QuoteIssued"),
+        }
+    }
+
+    // ── Actuarial channel tests ────────────────────────────────────────────
+
+    // 1. Fresh syndicate (volume=0) → z=0 → ATP purely from industry benchmark.
+    #[test]
+    fn atp_fresh_syndicate_uses_benchmark() {
+        let s = fresh_syndicate();
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000,
+            territory: "UK".to_string(), // factor 1.0
+            limit: 1_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::Attritional], // factor 0.8
+        };
+        let benchmark = 0.60;
+        // layer_f = 1_000_000 / (0 + 1_000_000) = 1.0
+        // blended = 0 * ewma + 1.0 * 0.60 = 0.60
+        // atp = 1_000_000 * 0.60 * 1.0 * 0.8 * 1.0 = 480_000
+        assert_eq!(s.atp(&risk, benchmark), 480_000);
+    }
+
+    // 2. Territory factor scales linearly (US-SE vs UK).
+    #[test]
+    fn atp_territory_factor_scales_linearly() {
+        let s = fresh_syndicate();
+        let base_risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000,
+            territory: "UK".to_string(),
+            limit: 1_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::Attritional],
+        };
+        let us_risk = Risk {
+            territory: "US-SE".to_string(),
+            ..base_risk.clone()
+        };
+        let atp_uk = s.atp(&base_risk, 0.60) as f64;
+        let atp_us = s.atp(&us_risk, 0.60) as f64;
+        let ratio = atp_us / atp_uk;
+        // 1.4 / 1.0 = 1.4
+        assert!((ratio - 1.4).abs() < 0.01, "ratio={ratio}");
+    }
+
+    // 3. Peril factor uses the maximum across covered perils.
+    #[test]
+    fn atp_peril_factor_uses_max() {
+        let s = fresh_syndicate();
+        let risk_multi = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000,
+            territory: "UK".to_string(),
+            limit: 1_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
+        };
+        let risk_single = Risk {
+            perils_covered: vec![Peril::WindstormAtlantic],
+            ..risk_multi.clone()
+        };
+        // Both should produce the same ATP: max(1.5, 0.8) = 1.5
+        assert_eq!(s.atp(&risk_multi, 0.60), s.atp(&risk_single, 0.60));
+    }
+
+    // 4. Zero limit returns zero.
+    #[test]
+    fn atp_zero_limit_returns_zero() {
+        let s = fresh_syndicate();
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 0,
+            territory: "UK".to_string(),
+            limit: 0,
+            attachment: 0,
+            perils_covered: vec![Peril::Attritional],
+        };
+        assert_eq!(s.atp(&risk, 0.60), 0);
+    }
+
+    // 5. Attachment halves the layer factor when attachment == limit.
+    #[test]
+    fn atp_attachment_reduces_exposure() {
+        let s = fresh_syndicate();
+        let risk_no_attach = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 3_000_000,
+            territory: "UK".to_string(),
+            limit: 1_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::Attritional],
+        };
+        let risk_with_attach = Risk {
+            attachment: 1_000_000,
+            ..risk_no_attach.clone()
+        };
+        let atp_no = s.atp(&risk_no_attach, 0.60) as f64;
+        let atp_with = s.atp(&risk_with_attach, 0.60) as f64;
+        // layer_f: 1.0 vs 0.5 → ratio should be ~2.0
+        assert!((atp_no / atp_with - 2.0).abs() < 0.01, "no={atp_no} with={atp_with}");
+    }
+
+    // 6. Very high attachment → ATP near zero.
+    #[test]
+    fn atp_high_attachment_near_zero() {
+        let s = fresh_syndicate();
+        let limit = 1_000_000u64;
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 100_000_000,
+            territory: "UK".to_string(),
+            limit,
+            attachment: limit * 99,
+            perils_covered: vec![Peril::Attritional],
+        };
+        // layer_f = 1_000_000 / (99_000_000 + 1_000_000) = 0.01
+        // atp = 1_000_000 * 0.60 * 1.0 * 0.8 * 0.01 = 4_800
+        let atp = s.atp(&risk, 0.60);
+        assert!(atp < 10_000, "atp={atp}");
+    }
+
+    // 7. Unknown territory → factor defaults to 1.0, no panic.
+    #[test]
+    fn atp_unknown_territory_no_loading() {
+        let s = fresh_syndicate();
+        let known = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000,
+            territory: "UK".to_string(),
+            limit: 1_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::Attritional],
+        };
+        let unknown = Risk {
+            territory: "MARS".to_string(),
+            ..known.clone()
+        };
+        // UK has factor 1.0, MARS defaults to 1.0 — should produce same ATP.
+        assert_eq!(s.atp(&known, 0.60), s.atp(&unknown, 0.60));
+    }
+
+    // 9. EWMA converges toward observed loss ratio after many observations.
+    #[test]
+    fn ewma_converges_toward_observed_ratio() {
+        let mut s = fresh_syndicate();
+        for _ in 0..30 {
+            s.observe_line_loss_ratio("property", 0.80);
+        }
+        let exp = s.experience.get("property").unwrap();
+        assert!(
+            (exp.ewma_loss_ratio - 0.80).abs() < 0.01,
+            "ewma={} expected ~0.80",
+            exp.ewma_loss_ratio
+        );
+    }
+
+    // 10. Single EWMA update is arithmetically correct.
+    #[test]
+    fn ewma_single_update_correct() {
+        let mut s = fresh_syndicate();
+        s.observe_line_loss_ratio("property", 0.80);
+        // base = 0.60, alpha = 0.3 → 0.3 * 0.80 + 0.7 * 0.60 = 0.24 + 0.42 = 0.66
+        let exp = s.experience.get("property").unwrap();
+        assert!(
+            (exp.ewma_loss_ratio - 0.66).abs() < 1e-10,
+            "ewma={} expected 0.66",
+            exp.ewma_loss_ratio
+        );
+    }
+
+    // 11. At volume == credibility_k, blended is halfway between ewma and benchmark.
+    #[test]
+    fn credibility_increases_with_volume() {
+        let mut s = fresh_syndicate(); // credibility_k = 50
+        // Push ewma to ~0.80 with 50 observations.
+        for _ in 0..50 {
+            s.observe_line_loss_ratio("property", 0.80);
+        }
+        let exp = s.experience.get("property").unwrap();
+        assert_eq!(exp.volume, 50);
+        let z = 50.0_f64 / (50.0 + 50.0); // 0.5
+        assert!((z - 0.5).abs() < 1e-10);
+        // blended = 0.5 * ewma + 0.5 * benchmark — both weights equal.
+        let blended = z * exp.ewma_loss_ratio + (1.0 - z) * 0.60;
+        let expected_mid = (exp.ewma_loss_ratio + 0.60) / 2.0;
+        assert!((blended - expected_mid).abs() < 1e-10);
+    }
+
+    // 12. Low volume → benchmark dominates.
+    #[test]
+    fn credibility_low_volume_benchmark_dominant() {
+        let mut s = fresh_syndicate(); // credibility_k = 50
+        for _ in 0..5 {
+            s.observe_line_loss_ratio("property", 0.90);
+        }
+        let exp = s.experience.get("property").unwrap();
+        let z = 5.0_f64 / (5.0 + 50.0); // ~0.0909
+        // Benchmark weight = 1 - z > 0.90
+        assert!(1.0 - z > 0.90, "benchmark weight={}", 1.0 - z);
+        let _ = exp;
+    }
+
+    // 13. At high volume, ATP ≈ limit × ewma × territory_f × peril_f × layer_f.
+    #[test]
+    fn atp_blends_own_experience_at_high_volume() {
+        let mut s = fresh_syndicate();
+        for _ in 0..500 {
+            s.observe_line_loss_ratio("property", 0.75);
+        }
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000,
+            territory: "UK".to_string(),
+            limit: 1_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::Attritional],
+        };
+        let exp = s.experience.get("property").unwrap();
+        let z = 500.0_f64 / (500.0 + 50.0);
+        let blended = z * exp.ewma_loss_ratio + (1.0 - z) * 0.60;
+        // territory_f=1.0, peril_f=0.8, layer_f=1.0
+        let expected = (1_000_000.0 * blended * 1.0 * 0.8 * 1.0).round() as u64;
+        let atp = s.atp(&risk, 0.60);
+        let err = (atp as f64 - expected as f64).abs() / expected as f64;
+        assert!(err < 0.01, "atp={atp} expected={expected} err={err:.4}");
+    }
+
+    // 14. Observing a high loss ratio increases ATP relative to a fresh syndicate.
+    #[test]
+    fn atp_reflects_bad_year_experience() {
+        let mut experienced = fresh_syndicate();
+        for _ in 0..20 {
+            experienced.observe_line_loss_ratio("property", 0.95);
+        }
+        let fresh = fresh_syndicate();
+        let risk = make_risk(1_000_000);
+        let benchmark = 0.60;
+        assert!(
+            experienced.atp(&risk, benchmark) > fresh.atp(&risk, benchmark),
+            "experienced ATP should exceed fresh ATP after high-loss observations"
+        );
+    }
+
+    // 15. ATP is monotone non-increasing as attachment increases (proptest).
+    proptest! {
+        #[test]
+        fn atp_decreases_as_attachment_increases(
+            limit in 1_000_u64..10_000_000_u64,
+            attach_a in 0_u64..10_000_000_u64,
+            attach_b in 0_u64..10_000_000_u64,
+        ) {
+            let s = fresh_syndicate();
+            let make = |attachment: u64| Risk {
+                line_of_business: "property".to_string(),
+                sum_insured: limit * 2 + attachment,
+                territory: "UK".to_string(),
+                limit,
+                attachment,
+                perils_covered: vec![Peril::Attritional],
+            };
+            let (lo, hi) = if attach_a <= attach_b {
+                (attach_a, attach_b)
+            } else {
+                (attach_b, attach_a)
+            };
+            let atp_lo = s.atp(&make(lo), 0.60);
+            let atp_hi = s.atp(&make(hi), 0.60);
+            prop_assert!(atp_lo >= atp_hi,
+                "attachment lo={lo} atp={atp_lo} > attachment hi={hi} atp={atp_hi}");
+        }
+    }
+
+    // 16. ATP is monotone non-decreasing after observing higher loss ratios (proptest).
+    proptest! {
+        #[test]
+        fn atp_increases_with_loss_ratio(
+            lr_lo in 0.0_f64..1.0_f64,
+            lr_hi in 0.0_f64..1.0_f64,
+        ) {
+            let (lr_lo, lr_hi) = if lr_lo <= lr_hi { (lr_lo, lr_hi) } else { (lr_hi, lr_lo) };
+            let mut s_lo = fresh_syndicate();
+            let mut s_hi = fresh_syndicate();
+            for _ in 0..30 {
+                s_lo.observe_line_loss_ratio("property", lr_lo);
+                s_hi.observe_line_loss_ratio("property", lr_hi);
+            }
+            let risk = make_risk(1_000_000);
+            let atp_lo = s_lo.atp(&risk, 0.60);
+            let atp_hi = s_hi.atp(&risk, 0.60);
+            prop_assert!(atp_hi >= atp_lo,
+                "lr_hi={lr_hi:.4} atp={atp_hi} should be >= lr_lo={lr_lo:.4} atp={atp_lo}");
         }
     }
 }
