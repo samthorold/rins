@@ -909,19 +909,21 @@ mod tests {
                 sum_insured: 10_000_000,
                 territory: "US-SE".to_string(),
                 limit: 5_000_000,
-                attachment: 500_000,
+                attachment: 0, // zero attachment so all ground-up losses generate claims
                 perils_covered: vec![Peril::WindstormAtlantic],
             };
             sim.market.on_policy_bound(SubmissionId(i as u64), risk, Panel { entries }, Year(1));
         }
 
+        // With 5k policies × sum_insured=10M, total_sum_insured=50B.
+        // severity=5B → ground_up per policy = 1M, within limit of 5M, above attachment of 0.
         sim.schedule(
             Day(180),
             Event::LossEvent {
                 event_id: LossEventId(0),
                 region: "US-SE".to_string(),
                 peril: Peril::WindstormAtlantic,
-                severity: 10_000_000,
+                severity: 5_000_000_000,
             },
         );
 

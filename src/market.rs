@@ -356,8 +356,11 @@ impl Market {
     }
 
     /// Distribute a loss event across all matching bound policies.
-    /// MVP: exposure_fraction = 1 (each policy treated as fully exposed).
-    /// TODO (§7): divide total severity proportionally by sum_insured across all exposed policies.
+    ///
+    /// Each policy's ground-up loss is proportional to its `sum_insured` relative to the
+    /// total exposed sum_insured. Policy terms (attachment, limit) are then applied to that
+    /// per-insured amount. This ensures Σ(ground_up) = severity and the market invariant
+    /// holds structurally — no post-hoc rescaling is needed.
     pub fn on_loss_event(
         &self,
         day: Day,
@@ -369,9 +372,18 @@ impl Market {
         let Some(ids) = self.peril_territory_index.get(&(region.to_string(), peril)) else {
             return out;
         };
+
+        let total_sum_insured: u64 =
+            ids.iter().map(|pid| self.policies[pid].risk.sum_insured).sum();
+        if total_sum_insured == 0 {
+            return out;
+        }
+
         for policy_id in ids {
             let policy = &self.policies[policy_id];
-            let gross_loss = severity.min(policy.risk.limit);
+            let ground_up = (severity as u128 * policy.risk.sum_insured as u128
+                / total_sum_insured as u128) as u64;
+            let gross_loss = ground_up.min(policy.risk.limit);
             let net_loss = gross_loss.saturating_sub(policy.risk.attachment);
             if net_loss == 0 {
                 continue;
@@ -390,26 +402,6 @@ impl Market {
                     },
                 ));
             }
-        }
-
-        // Enforce market invariant: total claims ≤ event severity.
-        let total_uncapped: u64 = out
-            .iter()
-            .filter_map(|(_, e)| match e {
-                Event::ClaimSettled { amount, .. } => Some(*amount),
-                _ => None,
-            })
-            .sum();
-
-        if total_uncapped > severity {
-            for (_, event) in &mut out {
-                if let Event::ClaimSettled { amount, .. } = event {
-                    *amount =
-                        (*amount as u128 * severity as u128 / total_uncapped as u128) as u64;
-                }
-            }
-            // Drop claims rounded to zero by integer truncation.
-            out.retain(|(_, e)| !matches!(e, Event::ClaimSettled { amount: 0, .. }));
         }
 
         out
@@ -889,6 +881,87 @@ mod tests {
             })
             .expect("expected ClaimSettled for SyndicateId(1)");
         assert_eq!(amount, 1_000_000, "claim should be exactly limit when severity > limit");
+    }
+
+    #[test]
+    fn proportional_allocation_by_sum_insured() {
+        // Policy A: sum_insured=3M, limit=3M, attachment=0
+        // Policy B: sum_insured=1M, limit=1M, attachment=0
+        // severity=1_000_000; total_sum_insured=4M
+        // Expected: ground_up_A = 750_000, gross_A = 750_000, net_A = 750_000
+        //           ground_up_B = 250_000, gross_B = 250_000, net_B = 250_000
+        let mut market = Market::new();
+        market.on_policy_bound(
+            SubmissionId(1),
+            Risk {
+                line_of_business: "property".to_string(),
+                sum_insured: 3_000_000,
+                territory: "US-SE".to_string(),
+                limit: 3_000_000,
+                attachment: 0,
+                perils_covered: vec![Peril::WindstormAtlantic],
+            },
+            Panel {
+                entries: vec![PanelEntry {
+                    syndicate_id: SyndicateId(1),
+                    share_bps: 10_000,
+                    premium: 0,
+                }],
+            },
+            Year(1),
+        );
+        market.on_policy_bound(
+            SubmissionId(2),
+            Risk {
+                line_of_business: "property".to_string(),
+                sum_insured: 1_000_000,
+                territory: "US-SE".to_string(),
+                limit: 1_000_000,
+                attachment: 0,
+                perils_covered: vec![Peril::WindstormAtlantic],
+            },
+            Panel {
+                entries: vec![PanelEntry {
+                    syndicate_id: SyndicateId(2),
+                    share_bps: 10_000,
+                    premium: 0,
+                }],
+            },
+            Year(1),
+        );
+
+        let events =
+            market.on_loss_event(crate::types::Day(0), "US-SE", Peril::WindstormAtlantic, 1_000_000);
+
+        let claim_a = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::ClaimSettled { syndicate_id, amount, .. }
+                    if *syndicate_id == SyndicateId(1) =>
+                {
+                    Some(*amount)
+                }
+                _ => None,
+            })
+            .expect("expected ClaimSettled for policy A (SyndicateId 1)");
+
+        let claim_b = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::ClaimSettled { syndicate_id, amount, .. }
+                    if *syndicate_id == SyndicateId(2) =>
+                {
+                    Some(*amount)
+                }
+                _ => None,
+            })
+            .expect("expected ClaimSettled for policy B (SyndicateId 2)");
+
+        assert_eq!(claim_a, 750_000, "policy A (3/4 of sum_insured) should bear 750_000");
+        assert_eq!(claim_b, 250_000, "policy B (1/4 of sum_insured) should bear 250_000");
+
+        let total = claim_a + claim_b;
+        assert_eq!(total, 1_000_000, "total claims must equal severity exactly");
     }
 
     /// Only policies from the expired year are removed; later-year policies survive.
