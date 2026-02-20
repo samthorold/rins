@@ -391,6 +391,27 @@ impl Market {
                 ));
             }
         }
+
+        // Enforce market invariant: total claims ≤ event severity.
+        let total_uncapped: u64 = out
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::ClaimSettled { amount, .. } => Some(*amount),
+                _ => None,
+            })
+            .sum();
+
+        if total_uncapped > severity {
+            for (_, event) in &mut out {
+                if let Event::ClaimSettled { amount, .. } = event {
+                    *amount =
+                        (*amount as u128 * severity as u128 / total_uncapped as u128) as u64;
+                }
+            }
+            // Drop claims rounded to zero by integer truncation.
+            out.retain(|(_, e)| !matches!(e, Event::ClaimSettled { amount: 0, .. }));
+        }
+
         out
     }
 }
@@ -773,6 +794,101 @@ mod tests {
             events.is_empty(),
             "expected no ClaimSettled for expired policy, got {events:?}"
         );
+    }
+
+    // --- Pro-rata scaling tests ---
+
+    #[test]
+    fn total_claims_never_exceed_event_severity() {
+        // 3 policies with large limits; uncapped total >> severity.
+        // After fix: sum(ClaimSettled.amount) ≤ severity.
+        let severity = 1_000_000u64; // small event
+
+        let risk = |limit: u64| Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: limit * 2,
+            territory: "US-SE".to_string(),
+            limit,
+            attachment: 0,
+            perils_covered: vec![Peril::WindstormAtlantic],
+        };
+
+        let mut market = Market::new();
+        // Three 100% policies whose uncapped losses would total 3 × limit >> severity.
+        for i in 0..3u64 {
+            market.on_policy_bound(
+                SubmissionId(i),
+                risk(5_000_000), // limit=5M, each would claim 5M without cap
+                Panel {
+                    entries: vec![PanelEntry {
+                        syndicate_id: SyndicateId(i + 1),
+                        share_bps: 10_000,
+                        premium: 0,
+                    }],
+                },
+                Year(1),
+            );
+        }
+
+        let events =
+            market.on_loss_event(crate::types::Day(1), "US-SE", Peril::WindstormAtlantic, severity);
+        let total: u64 = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::ClaimSettled { amount, .. } => Some(*amount),
+                _ => None,
+            })
+            .sum();
+
+        assert!(
+            total <= severity,
+            "total claims {total} exceeded event severity {severity}"
+        );
+    }
+
+    #[test]
+    fn single_policy_claims_unchanged_when_below_severity() {
+        // 1 policy, limit=1M, attachment=0, severity=5M → uncapped=1M < severity → no scaling.
+        // amount must be exactly min(5M, 1M) - 0 = 1M.
+        let mut market = Market::new();
+        market.on_policy_bound(
+            SubmissionId(1),
+            Risk {
+                line_of_business: "property".to_string(),
+                sum_insured: 2_000_000,
+                territory: "US-SE".to_string(),
+                limit: 1_000_000,
+                attachment: 0,
+                perils_covered: vec![Peril::WindstormAtlantic],
+            },
+            Panel {
+                entries: vec![PanelEntry {
+                    syndicate_id: SyndicateId(1),
+                    share_bps: 10_000,
+                    premium: 0,
+                }],
+            },
+            Year(1),
+        );
+
+        let events = market.on_loss_event(
+            crate::types::Day(0),
+            "US-SE",
+            Peril::WindstormAtlantic,
+            5_000_000,
+        );
+        let amount = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::ClaimSettled { syndicate_id, amount, .. }
+                    if *syndicate_id == SyndicateId(1) =>
+                {
+                    Some(*amount)
+                }
+                _ => None,
+            })
+            .expect("expected ClaimSettled for SyndicateId(1)");
+        assert_eq!(amount, 1_000_000, "claim should be exactly limit when severity > limit");
     }
 
     /// Only policies from the expired year are removed; later-year policies survive.
