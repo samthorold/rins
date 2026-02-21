@@ -34,6 +34,7 @@ impl Default for ActuarialParams {
             ("US-CA".to_string(), 1.3),
             ("EU".to_string(), 1.1),
             ("UK".to_string(), 1.0),
+            ("JP".to_string(), 1.5), // earthquake-prone, high loading
         ]
         .into_iter()
         .collect();

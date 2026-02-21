@@ -1,8 +1,8 @@
 use rand::Rng;
 use rand_distr::{Distribution, LogNormal, Pareto, Poisson};
 
-use crate::events::{Event, Peril};
-use crate::types::{Day, LossEventId, Year};
+use crate::events::{Event, Panel, Peril, Risk};
+use crate::types::{Day, LossEventId, PolicyId, Year};
 
 pub enum SeverityModel {
     /// Log-normal severity; ln-space params.
@@ -81,34 +81,81 @@ pub fn default_peril_configs() -> Vec<PerilConfig> {
             annual_frequency: 1.5, // PLACEHOLDER
             severity: SeverityModel::Pareto { scale: 800_000_000.0, shape: 3.0 }, // E[X] ≈ £12M
         },
-        // ── Attritional losses — LogNormal severity, moderate tail ───────────
-        // mu=18.4, sigma=1.2 → E[X] ≈ 200_000_000 pence (£2M) per event
-        // mu=11.5 + ln(1000) ≈ 11.5 + 6.9 = 18.4
-        PerilConfig {
-            peril: Peril::Attritional,
-            region: "US-SE",
-            annual_frequency: 12.0, // PLACEHOLDER ≈ monthly batch
-            severity: SeverityModel::LogNormal { mu: 18.4, sigma: 1.2 }, // PLACEHOLDER
-        },
-        PerilConfig {
-            peril: Peril::Attritional,
-            region: "US-CA",
-            annual_frequency: 12.0, // PLACEHOLDER
-            severity: SeverityModel::LogNormal { mu: 18.4, sigma: 1.2 }, // PLACEHOLDER
-        },
-        PerilConfig {
-            peril: Peril::Attritional,
-            region: "EU",
-            annual_frequency: 12.0, // PLACEHOLDER
-            severity: SeverityModel::LogNormal { mu: 18.4, sigma: 1.2 }, // PLACEHOLDER
-        },
-        PerilConfig {
-            peril: Peril::Attritional,
-            region: "UK",
-            annual_frequency: 12.0, // PLACEHOLDER
-            severity: SeverityModel::LogNormal { mu: 18.4, sigma: 1.2 }, // PLACEHOLDER
-        },
     ]
+}
+
+/// Per-territory attritional claim configuration for per-policy Poisson scheduling.
+pub struct AttritionalConfig {
+    /// Expected number of claims per policy per year.
+    pub annual_rate: f64,
+    /// Per-occurrence severity distribution.
+    pub severity: SeverityModel,
+}
+
+/// Per-territory attritional claim rates and severities.
+/// These are PLACEHOLDER calibration values — tune against desired LR targets.
+///
+/// mu=15.5, sigma=1.0 → E[X] ≈ exp(16.0) ≈ £89K per claim.
+/// With rate=3.0 and uk_property attachment=£200K, penetration is low;
+/// attritional LR ~7%. US rates are higher given frequency exposure.
+pub fn default_attritional_configs() -> std::collections::HashMap<&'static str, AttritionalConfig> {
+    [
+        ("UK",    AttritionalConfig { annual_rate: 3.0, severity: SeverityModel::LogNormal { mu: 15.5, sigma: 1.0 } }),
+        ("EU",    AttritionalConfig { annual_rate: 3.0, severity: SeverityModel::LogNormal { mu: 15.5, sigma: 1.0 } }),
+        ("US-SE", AttritionalConfig { annual_rate: 4.0, severity: SeverityModel::LogNormal { mu: 16.0, sigma: 1.0 } }),
+        ("US-CA", AttritionalConfig { annual_rate: 4.0, severity: SeverityModel::LogNormal { mu: 16.0, sigma: 1.0 } }),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// Generate attritional `ClaimSettled` events for one newly bound policy.
+///
+/// Called at `PolicyBound` time. Draws a Poisson count from the territory's
+/// `annual_rate`, then for each claim draws a random day and severity. Claims
+/// below attachment or in unknown territories produce no events.
+pub fn schedule_attritional_claims_for_policy(
+    policy_id: PolicyId,
+    risk: &Risk,
+    panel: &Panel,
+    year: Year,
+    rng: &mut impl Rng,
+    configs: &std::collections::HashMap<&'static str, AttritionalConfig>,
+) -> Vec<(Day, Event)> {
+    if !risk.perils_covered.contains(&Peril::Attritional) {
+        return vec![];
+    }
+    let Some(config) = configs.get(risk.territory.as_str()) else {
+        return vec![];
+    };
+    let year_start = Day::year_start(year);
+    let poisson = Poisson::new(config.annual_rate).expect("invalid Poisson rate");
+    let n = poisson.sample(rng) as u64;
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let day = year_start.offset(rng.random_range(1_u64..360));
+        let severity = config.severity.sample(rng);
+        let gross = severity.min(risk.limit);
+        let net = gross.saturating_sub(risk.attachment);
+        if net == 0 {
+            continue;
+        }
+        for entry in &panel.entries {
+            let amount = net * entry.share_bps as u64 / 10_000;
+            if amount == 0 {
+                continue;
+            }
+            out.push((
+                day,
+                Event::ClaimSettled {
+                    policy_id,
+                    syndicate_id: entry.syndicate_id,
+                    amount,
+                },
+            ));
+        }
+    }
+    out
 }
 
 /// Schedule `LossEvent`s for `year` across all `configs`.
@@ -303,21 +350,22 @@ mod tests {
         }
     }
 
-    /// Injecting an Attritional LossEvent into a Market with a matching policy
-    /// must produce at least one ClaimSettled event.
+    /// Per-policy attritional scheduler must produce ClaimSettled events with
+    /// amounts bounded by (limit − attachment) × share_bps / 10_000.
     #[test]
-    fn attritional_loss_event_flows_to_claim_settled() {
-        use crate::events::{Panel, PanelEntry, Risk};
-        use crate::market::Market;
-        use crate::types::{SubmissionId, SyndicateId};
+    fn schedule_attritional_claims_for_policy_produces_bounded_claims() {
+        use std::collections::HashMap;
 
-        let mut market = Market::new();
+        use crate::events::{Panel, PanelEntry, Risk};
+        use crate::types::{PolicyId, SyndicateId};
+
+        let mut rng = rng();
         let risk = Risk {
             line_of_business: "property".to_string(),
-            sum_insured: 2_000_000,
-            territory: "US-SE".to_string(),
-            limit: 1_000_000,
-            attachment: 0,
+            sum_insured: 2_000_000_000,
+            territory: "UK".to_string(),
+            limit: 200_000_000,
+            attachment: 0, // zero attachment ensures all claims penetrate
             perils_covered: vec![Peril::Attritional],
         };
         let panel = Panel {
@@ -327,12 +375,85 @@ mod tests {
                 premium: 50_000,
             }],
         };
-        market.on_policy_bound(SubmissionId(0), risk, panel, crate::types::Year(1));
+        // Use a very high rate so we reliably get claims in a single test run.
+        let configs: HashMap<&'static str, AttritionalConfig> = [(
+            "UK",
+            AttritionalConfig {
+                annual_rate: 50.0,
+                severity: SeverityModel::LogNormal { mu: 15.5, sigma: 1.0 },
+            },
+        )]
+        .into_iter()
+        .collect();
 
-        let events = market.on_loss_event(Day(10), "US-SE", Peril::Attritional, 500_000);
-        assert!(
-            events.iter().any(|(_, e)| matches!(e, Event::ClaimSettled { .. })),
-            "expected ClaimSettled for Attritional loss against matching policy"
+        let events = schedule_attritional_claims_for_policy(
+            PolicyId(0),
+            &risk,
+            &panel,
+            Year(1),
+            &mut rng,
+            &configs,
         );
+
+        assert!(!events.is_empty(), "expected ClaimSettled events with rate=50.0");
+
+        let max_per_claim = risk.limit - risk.attachment; // attachment=0
+        for (_, e) in &events {
+            match e {
+                Event::ClaimSettled { amount, .. } => {
+                    assert!(
+                        *amount <= max_per_claim,
+                        "amount {amount} exceeds limit−attachment {max_per_claim}"
+                    );
+                }
+                _ => panic!("unexpected event type {e:?}"),
+            }
+        }
+    }
+
+    /// Attritional scheduler returns empty vec when policy does not cover Attritional.
+    #[test]
+    fn schedule_attritional_no_events_for_non_attritional_policy() {
+        use std::collections::HashMap;
+
+        use crate::events::{Panel, PanelEntry, Risk};
+        use crate::types::{PolicyId, SyndicateId};
+
+        let mut rng = rng();
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000_000,
+            territory: "UK".to_string(),
+            limit: 200_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::WindstormAtlantic], // not Attritional
+        };
+        let panel = Panel {
+            entries: vec![PanelEntry {
+                syndicate_id: SyndicateId(1),
+                share_bps: 10_000,
+                premium: 0,
+            }],
+        };
+        let configs: HashMap<&'static str, AttritionalConfig> = [(
+            "UK",
+            AttritionalConfig {
+                annual_rate: 50.0,
+                severity: SeverityModel::LogNormal { mu: 15.5, sigma: 1.0 },
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let events = schedule_attritional_claims_for_policy(
+            PolicyId(0),
+            &risk,
+            &panel,
+            Year(1),
+            &mut rng,
+            &configs,
+        );
+
+        assert!(events.is_empty(), "non-Attritional policy must produce no attritional claims");
     }
 }

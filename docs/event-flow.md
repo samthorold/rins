@@ -13,7 +13,7 @@ flowchart TD
     SS_NEXT["**SimulationStart**\n{year_start: N+1}"]
 
     SS -->|"Broker.generate_submissions()\n→ spread over first 180 days"| SA
-    SS -->|"perils::schedule_loss_events\nPoisson(λ) per PerilConfig\n(cat + attritional)"| LE
+    SS -->|"perils::schedule_loss_events\nPoisson(λ) per PerilConfig\n(cat perils only)"| LE
     SS -->|"schedule day 365"| YE
 
     %% ── Quoting round ───────────────────────────────────────────────────────
@@ -53,9 +53,12 @@ flowchart TD
     %% ── Loss cascade ────────────────────────────────────────────────────────
 
     CS["**ClaimSettled**\n{policy_id, syndicate_id, amount}"]
+    ATTR["perils::schedule_attritional_claims_for_policy\nPoisson(λ/territory) per-policy\nspread across year"]
 
     LE --> LE_D
-    LE_D -->|"one ClaimSettled\nper panel entry"| CS
+    LE_D -->|"one ClaimSettled\nper panel entry\n(cat + non-attritional perils only)"| CS
+    PB -->|"risk covers Attritional?"| ATTR
+    ATTR -->|"one ClaimSettled\nper occurrence per panel entry"| CS
     CS --> CS_S
     CS -->|"accumulate ytd_claims_by_line"| STATS
 
@@ -94,9 +97,9 @@ flowchart TD
 | 5 | `QuoteIssued` | `Syndicate::on_quote_requested` | `Market::on_lead_quote_issued` / `Market::on_follower_quote_issued` |
 | 6 | `QuoteDeclined` | `Syndicate::on_quote_requested` | `Market::on_quote_declined` |
 | 7 | `SubmissionAbandoned` | `Market::on_quote_declined` (when lead declines) | none (log only) |
-| 8 | `PolicyBound` | `Market::assemble_panel` (+5 days from last follower response) | `Market::on_policy_bound` (registers policy, YTD premium) |
-| 9 | `LossEvent` | `handle_simulation_start` via `perils::schedule_loss_events` (Poisson frequency-severity) | `Market::on_loss_event` |
-| 10 | `ClaimSettled` | `Market::on_loss_event` | `Syndicate::on_claim_settled` + `Market::on_claim_settled` (YTD) |
+| 8 | `PolicyBound` | `Market::assemble_panel` (+5 days from last follower response) | `Market::on_policy_bound` (registers policy, YTD premium); `perils::schedule_attritional_claims_for_policy` (if risk covers Attritional) |
+| 9 | `LossEvent` | `handle_simulation_start` via `perils::schedule_loss_events` (Poisson frequency-severity, **cat perils only**) | `Market::on_loss_event` |
+| 10 | `ClaimSettled` | `Market::on_loss_event` (cat perils) or `perils::schedule_attritional_claims_for_policy` (Attritional, per-policy) | `Syndicate::on_claim_settled` + `Market::on_claim_settled` (YTD) |
 | 11 | `SyndicateEntered` | — | no-op |
 | 12 | `SyndicateInsolvency` | `Syndicate::on_claim_settled` (when capital < solvency floor) | `Simulation::dispatch` → sets `syndicate.is_active = false` |
 

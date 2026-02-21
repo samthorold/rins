@@ -70,6 +70,15 @@ impl SimulationConfig {
             perils_covered: vec![Peril::EarthquakeUS],
         };
 
+        let jp_property = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 3_000_000_000,  // £30M
+            territory: "JP".to_string(),
+            limit: 1_500_000_000,        // £15M — within small-syndicate £24M cap
+            attachment: 200_000_000,     // £2M
+            perils_covered: vec![Peril::EarthquakeJapan],
+        };
+
         SimulationConfig {
             seed: 42,
             years: 5,
@@ -146,6 +155,7 @@ impl SimulationConfig {
                     id: BrokerId(5),
                     submissions_per_year: 80,
                     risks: vec![
+                        jp_property.clone(),
                         us_earthquake.clone(),
                         large_us_wind.clone(),
                         eu_property.clone(),
@@ -157,6 +167,7 @@ impl SimulationConfig {
                     id: BrokerId(6),
                     submissions_per_year: 150,
                     risks: vec![
+                        jp_property,
                         large_us_wind,
                         eu_property,
                         us_earthquake,

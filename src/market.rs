@@ -302,13 +302,14 @@ impl Market {
 
     /// Register a newly bound policy. Called when `PolicyBound` fires.
     /// Accumulates gross premium into the YTD counter for the policy's line.
+    /// Returns the assigned `PolicyId` so the caller can schedule per-policy events.
     pub fn on_policy_bound(
         &mut self,
         submission_id: SubmissionId,
         risk: Risk,
         panel: Panel,
         year: Year,
-    ) {
+    ) -> PolicyId {
         let total_premium: u64 = panel.entries.iter().map(|e| e.premium).sum();
         *self
             .ytd_premiums_by_line
@@ -318,6 +319,11 @@ impl Market {
         let policy_id = PolicyId(self.next_policy_id);
         self.next_policy_id += 1;
         for &peril in &risk.perils_covered {
+            if peril == Peril::Attritional {
+                // Attritional claims are scheduled per-policy at bind time;
+                // no global LossEvent routing needed.
+                continue;
+            }
             self.peril_territory_index
                 .entry((risk.territory.clone(), peril))
                 .or_default()
@@ -333,6 +339,7 @@ impl Market {
                 bound_year: year,
             },
         );
+        policy_id
     }
 
     /// Remove all policies written in `year` from the active portfolio.
@@ -541,6 +548,7 @@ mod tests {
             territory: "US-SE".to_string(),
             limit: 500_000,
             attachment: 0,
+            // Both a cat peril and Attritional: only WindstormAtlantic goes in the index.
             perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
         };
         let panel = Panel {
@@ -556,14 +564,17 @@ mod tests {
             .peril_territory_index
             .get(&("US-SE".to_string(), Peril::WindstormAtlantic))
             .expect("WindstormAtlantic index entry missing");
-        let ids_attr = market
-            .peril_territory_index
-            .get(&("US-SE".to_string(), Peril::Attritional))
-            .expect("Attritional index entry missing");
         assert_eq!(ids_wind.len(), 1);
-        assert_eq!(ids_attr.len(), 1);
         assert_eq!(ids_wind[0], PolicyId(0));
-        assert_eq!(ids_attr[0], PolicyId(0));
+
+        // Attritional is handled per-policy at bind time — must NOT be in the index.
+        assert!(
+            market
+                .peril_territory_index
+                .get(&("US-SE".to_string(), Peril::Attritional))
+                .is_none(),
+            "Attritional must not be in the peril_territory_index"
+        );
     }
 
     // --- Claim-splitting tests ---

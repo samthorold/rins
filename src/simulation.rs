@@ -247,13 +247,29 @@ impl Simulation {
                     // Collect syndicate contributions before panel is moved into market.
                     let contributions: Vec<(SyndicateId, u64)> =
                         panel.entries.iter().map(|e| (e.syndicate_id, e.premium)).collect();
-                    self.market.on_policy_bound(submission_id, risk, panel, year);
+                    // Clone risk and panel: on_policy_bound consumes them, but we
+                    // also need them for the per-policy attritional scheduler below.
+                    let policy_id =
+                        self.market.on_policy_bound(submission_id, risk.clone(), panel.clone(), year);
                     for (syn_id, premium) in contributions {
                         if let Some(s) =
                             self.syndicates.iter_mut().find(|s| s.id == syn_id)
                         {
                             s.on_policy_bound_as_panelist(submission_id, premium);
                         }
+                    }
+                    // Per-policy attritional claims (independent of global LossEvent stream).
+                    let attritional_configs = perils::default_attritional_configs();
+                    let attritional_events = perils::schedule_attritional_claims_for_policy(
+                        policy_id,
+                        &risk,
+                        &panel,
+                        year,
+                        &mut self.rng,
+                        &attritional_configs,
+                    );
+                    for (d, e) in attritional_events {
+                        self.schedule(d, e);
                     }
                 }
             }
