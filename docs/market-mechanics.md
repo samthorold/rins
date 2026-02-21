@@ -75,13 +75,15 @@ All events in a quoting round share the same simulation timestamp. The ordering 
 
 ## 4. Policy Terms and Expiry
 
-All policies in this simulation are **annual contracts**: they are written at some point during a simulation year and expire at the end of that same year. This reflects the Lloyd's standard placement cycle, where the vast majority of business is placed on a 12-month basis.
+All policies in this simulation are **annual contracts** written for a 12-month period. This reflects the Lloyd's standard placement cycle. Policies renew at their inception anniversary, which concentrates at quarterly dates (see §10).
 
 **Consequences for the simulation:**
 
-- Loss events can only trigger claims against policies that are still active (i.e., bound in the current year). A loss in year N has no effect on policies written in years 1..N−1.
-- Syndicates must re-underwrite their entire book each year. Premiums earned in year N do not carry forward; each year starts with zero gross written premium.
-- Total industry exposure (and therefore potential claims) is bounded by the policies written in a single year, not by accumulation across years.
+- Loss events can only trigger claims against policies that are currently active (inception ≤ event day < expiry).
+- Syndicates re-underwrite their book at each renewal cycle. Premiums earned in one policy year do not carry forward.
+- Total industry exposure at any moment is bounded by the active policies — which span across annual cohorts for non-January renewals. A loss late in a calendar year can affect policies from two inception cohorts simultaneously (e.g., a January renewal policy and an October renewal policy both active in November).
+
+**Current implementation simplification:** The current implementation treats all policies as expiring at calendar year-end (`bound_year == year`). This is a deliberate simplification that avoids cross-year policy accounting while still producing realistic annual exposure and premium statistics. The full quarterly-renewal model is described in §10 and is an intended future target.
 
 **Implementation:** `Market::expire_policies(year)` is called at the close of each `YearEnd` event, after `compute_year_stats` has captured the year's loss and premium data. It removes all `bound_year == year` policies from both the policies map and the peril-territory index.
 
@@ -237,3 +239,82 @@ Statistics are a one-period-lagged signal — syndicates price for the coming ye
 ### Central Fund levy
 
 *[TBD: whether to model explicitly.]* If Central Fund (§6) expenditure is tracked, an annual levy proportional to premium income is deducted from each active syndicate at this step.
+
+---
+
+## 10. Policy Renewal Seasonality
+
+Commercial insurance policies are not spread evenly across the year. They cluster at four standard renewal dates — **1 January, 1 April, 1 July, 1 October** — inherited from the historic quarter-day calendar and reinforced by broker and insurer administrative practice. Within Lloyd's the concentration at January 1 is dominant, driven by property catastrophe reinsurance and European corporate accounts. April 1 captures Japanese and other Asia-Pacific risks. July and October account for the remainder.
+
+### Approximate renewal weight by inception date (Lloyd's commercial property)
+
+| Inception | Share | Primary drivers |
+|---|---|---|
+| 1 January | ~40% | Reinsurance, European corporate, international programmes |
+| 1 April | ~20% | Japan, South Korea, Asia-Pacific, UK mid-market |
+| 1 July | ~25% | US cat-exposed (Florida/SE wind), Australia, NZ, mid-year adjustments |
+| 1 October | ~15% | Fiscal-year-driven accounts, US inland property, residual |
+
+These weights are estimated from reinsurance renewal patterns (January is 50–55% of global cat XL by volume) and general commercial practice. Lloyd's direct-line exact data is not publicly disaggregated by inception date; the above should be treated as calibration estimates.
+
+### Structural consequences
+
+**Exposure concentration:** a catastrophe striking in Q4 (October–December) simultaneously hits active January-inception policies (in their last quarter) and active October-inception policies (in their first quarter). The market's aggregate exposure profile is not flat across the year.
+
+**Premium earning pattern:** underwriters write the majority of GWP in Q1, with progressively less in subsequent quarters. This creates a natural lumpiness in capital deployment and affects the timing of premium income relative to loss events.
+
+**Renewal negotiation dynamics:** the concentration at January 1 gives that renewal round outsized market signalling power. Rate movements agreed at January 1 by major cedants and reinsurers set pricing expectations that flow into subsequent quarterly renewals. A hard-market signal in January propagates to April and July through the follow-pricing mechanism (§2).
+
+*[TBD: implement per-policy inception and expiry dates to replace the current year-end simplification. When implemented, the peril-territory index must be keyed by active-period rather than bound-year, and `expire_policies` must run continuously rather than only at year-end.]*
+
+---
+
+## 11. Programme Structures and Insurance Towers
+
+When the total value of an insured's exposed assets is large — or more precisely, when the required limit of coverage exceeds what a single market placement can practically absorb — the risk is structured as a **programme** (also called a **tower**): a vertical stack of consecutive layers, each covering a defined tranche of ground-up loss.
+
+### Why towers arise
+
+A single Lloyd's panel can support a layer of perhaps £25–75M by aggregating syndicate lines. Above that, the required limit exceeds what one panel placement will bear, and a second layer — attaching above the first — is placed separately, typically with a different (though often overlapping) syndicate panel. Each layer is an independent contract with its own attachment, limit, premium, and panel.
+
+The deeper motivation is actuarial: different vertical positions in the loss distribution have different risk characteristics, and different classes of capital provider have different risk appetites for those characteristics. Separating the layers allows each tranche to be priced and capitalised appropriately.
+
+### Threshold heuristics
+
+These are initial calibration estimates; they should be tuned as the insured population is developed.
+
+| Insured's sum insured (proxy for asset scale) | Typical programme structure |
+|---|---|
+| < £30M | Single-layer policy; subscription panel at Lloyd's |
+| £30M – £100M | 2-layer programme: primary + 1 excess layer |
+| £100M – £400M | 3–5 layer programme |
+| £400M – £1B | 5–8 layers; may include ILS or cat bond capacity at upper layers |
+| > £1B | 8+ layers; mega-risk territory; Lloyd's typically leads on lower layers |
+
+The trigger is the **required limit**, not the sum insured directly. A risk with £200M sum insured might only require £75M limit (if maximum probable loss is ~37% of assets), and a two-layer structure would suffice. The broker advises the insured on the appropriate programme structure based on MPL estimates and the market's appetite for each layer.
+
+### Layer economics: rate on line (ROL)
+
+The **rate on line** is the premium for a layer expressed as a fraction of its limit: `ROL = premium / limit`. ROL decreases with attachment height. The mechanism is straightforward: a lower attachment means more ground-up losses penetrate the layer (higher expected loss frequency), so the premium per unit of limit must be higher to cover expected losses.
+
+Formally, for a ground-up loss distribution F(x), the expected loss in the layer [A, A+L] is:
+
+```
+E[layer loss] = ∫_A^{A+L} (1 − F(x)) dx
+```
+
+As attachment A rises, the integrand (1 − F(x)) shrinks because fewer events reach the layer. Expected loss per unit limit therefore falls, and so must the ROL in a competitive market. The *variance* of layer loss, scaled by expected loss (i.e., the coefficient of variation), rises with attachment — upper layers are hit rarely, but when hit they are hit for their full limit — but this does not overcome the lower expected loss in determining the ROL.
+
+Typical ROL ranges by layer position (Lloyd's hard-market conditions, 2022–2024):
+
+| Layer position | Description | ROL range |
+|---|---|---|
+| Primary / working layer | Low or zero attachment; hit by attritional and cat | 15–30% |
+| First excess | Attaches above working layer; rarely hit by attritionals | 5–15% |
+| Upper / remote | High attachment; cat events only | 1–8% |
+
+In soft markets all ranges compress; in hard markets (post-catastrophe) lower-layer ROLs increase more than upper-layer ROLs because attritional loss experience is directly reflected in lower-layer claims.
+
+### Per-layer panel assembly
+
+Each layer is placed independently. Syndicates that prefer high-frequency, lower-severity exposure concentrate in primary layers. Syndicates seeking low-frequency, high-severity tail risk concentrate in upper layers. This creates a natural **layer-position specialism** dimension orthogonal to the existing line-of-business specialism. The phenomena arising from this structure are described in `phenomena.md §10`.
