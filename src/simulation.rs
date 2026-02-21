@@ -91,7 +91,7 @@ impl Simulation {
             .map(|c| {
                 let insureds = c.insureds.iter().map(|ic| Insured {
                     id: ic.id,
-                    name: ic.name.to_string(),
+                    name: ic.name.clone(),
                     assets: ic.assets.clone(),
                     total_ground_up_loss_by_year: HashMap::new(),
                 }).collect();

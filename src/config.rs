@@ -9,7 +9,7 @@ pub struct SyndicateConfig {
 
 pub struct InsuredConfig {
     pub id: InsuredId,
-    pub name: &'static str,
+    pub name: String,
     pub assets: Vec<Risk>,
 }
 
@@ -85,6 +85,20 @@ impl SimulationConfig {
             perils_covered: vec![Peril::EarthquakeJapan],
         };
 
+        // ── Insured generator ─────────────────────────────────────────────────
+        // Each insured holds a single risk asset. The broker's submissions_per_year
+        // equals its insured count so every insured submits exactly once per year.
+        // IDs: broker_number * 10_000 + sequential (1-based).
+        let make_insureds = |broker_num: u32, risks: &[Risk], prefix: &str, count: usize| -> Vec<InsuredConfig> {
+            (0..count)
+                .map(|i| InsuredConfig {
+                    id: InsuredId((broker_num * 10_000 + i as u32 + 1) as u64),
+                    name: format!("{} {}", prefix, i + 1),
+                    assets: vec![risks[i % risks.len()].clone()],
+                })
+                .collect()
+        };
+
         SimulationConfig {
             seed: 42,
             years: 5,
@@ -111,76 +125,77 @@ impl SimulationConfig {
                 SyndicateConfig { id: SyndicateId(15), capital: 8_000_000_000, rate_on_line_bps: 700 },
             ],
             // ── Brokers: 6 with different specialisms ─────────────────────────
-            // 26 named insureds total; round-robin across each broker's insured
-            // assets preserves the original submission volume (800/year).
+            // 800 insureds total (one submission per insured per year).
+            // Each broker's risk mix reflects its specialism; insureds cycle
+            // through the mix so the portfolio is evenly distributed.
             brokers: vec![
-                // Broker 1: US property — large wind risks (200 subs/year, 4 insureds)
+                // Broker 1: US wind/flood — 200 insureds
                 BrokerConfig {
                     id: BrokerId(1),
                     submissions_per_year: 200,
-                    insureds: vec![
-                        InsuredConfig { id: InsuredId(101), name: "Atlantic Energy Corp",       assets: vec![large_us_wind.clone()] },
-                        InsuredConfig { id: InsuredId(102), name: "Gulf Flood Holdings",        assets: vec![medium_us_flood.clone()] },
-                        InsuredConfig { id: InsuredId(103), name: "Pacific Seismic Group",      assets: vec![us_earthquake.clone()] },
-                        InsuredConfig { id: InsuredId(104), name: "Anglo-American Properties",  assets: vec![uk_property.clone()] },
-                    ],
+                    insureds: make_insureds(1, &[
+                        large_us_wind.clone(),
+                        medium_us_flood.clone(),
+                        us_earthquake.clone(),
+                        uk_property.clone(),
+                    ], "US Property Client", 200),
                 },
-                // Broker 2: US property — mid risks (150 subs/year, 4 insureds)
+                // Broker 2: US property mid-market — 150 insureds
                 BrokerConfig {
                     id: BrokerId(2),
                     submissions_per_year: 150,
-                    insureds: vec![
-                        InsuredConfig { id: InsuredId(201), name: "Mississippi Commercial Trust",    assets: vec![medium_us_flood.clone()] },
-                        InsuredConfig { id: InsuredId(202), name: "Southern Wind Power",             assets: vec![large_us_wind.clone()] },
-                        InsuredConfig { id: InsuredId(203), name: "Thames Valley Properties",        assets: vec![uk_property.clone()] },
-                        InsuredConfig { id: InsuredId(204), name: "Continental European Holdings",   assets: vec![eu_property.clone()] },
-                    ],
+                    insureds: make_insureds(2, &[
+                        medium_us_flood.clone(),
+                        large_us_wind.clone(),
+                        uk_property.clone(),
+                        eu_property.clone(),
+                    ], "US Mid-Market Client", 150),
                 },
-                // Broker 3: European property / flood (120 subs/year, 4 insureds)
+                // Broker 3: European property / flood — 120 insureds
                 BrokerConfig {
                     id: BrokerId(3),
                     submissions_per_year: 120,
-                    insureds: vec![
-                        InsuredConfig { id: InsuredId(301), name: "Rhine Delta Industrial",      assets: vec![eu_property.clone()] },
-                        InsuredConfig { id: InsuredId(302), name: "British Retail Property",     assets: vec![uk_property.clone()] },
-                        InsuredConfig { id: InsuredId(303), name: "North Sea Flood Group",       assets: vec![medium_us_flood.clone()] },
-                        InsuredConfig { id: InsuredId(304), name: "US Atlantic Wind Portfolio",  assets: vec![large_us_wind.clone()] },
-                    ],
+                    insureds: make_insureds(3, &[
+                        eu_property.clone(),
+                        uk_property.clone(),
+                        medium_us_flood.clone(),
+                        large_us_wind.clone(),
+                    ], "European Property Client", 120),
                 },
-                // Broker 4: Casualty / liability — UK attritional book (100 subs/year, 4 insureds)
+                // Broker 4: UK attritional book — 100 insureds
                 BrokerConfig {
                     id: BrokerId(4),
                     submissions_per_year: 100,
-                    insureds: vec![
-                        InsuredConfig { id: InsuredId(401), name: "London Commercial Property",  assets: vec![uk_property.clone()] },
-                        InsuredConfig { id: InsuredId(402), name: "European Property Alliance",  assets: vec![eu_property.clone()] },
-                        InsuredConfig { id: InsuredId(403), name: "US Flood Risk Partners",      assets: vec![medium_us_flood.clone()] },
-                        InsuredConfig { id: InsuredId(404), name: "Pacific Seismic Holdings",    assets: vec![us_earthquake.clone()] },
-                    ],
+                    insureds: make_insureds(4, &[
+                        uk_property.clone(),
+                        eu_property.clone(),
+                        medium_us_flood.clone(),
+                        us_earthquake.clone(),
+                    ], "UK Commercial Client", 100),
                 },
-                // Broker 5: Marine / specialist — earthquake-heavy (80 subs/year, 5 insureds)
+                // Broker 5: Marine / specialist — earthquake-heavy, 80 insureds
                 BrokerConfig {
                     id: BrokerId(5),
                     submissions_per_year: 80,
-                    insureds: vec![
-                        InsuredConfig { id: InsuredId(501), name: "Osaka Manufacturing Hub",   assets: vec![jp_property.clone()] },
-                        InsuredConfig { id: InsuredId(502), name: "Silicon Valley Industrial", assets: vec![us_earthquake.clone()] },
-                        InsuredConfig { id: InsuredId(503), name: "Gulf States Energy Corp",   assets: vec![large_us_wind.clone()] },
-                        InsuredConfig { id: InsuredId(504), name: "Hamburg Port Authority",    assets: vec![eu_property.clone()] },
-                        InsuredConfig { id: InsuredId(505), name: "New Orleans Logistics",     assets: vec![medium_us_flood.clone()] },
-                    ],
+                    insureds: make_insureds(5, &[
+                        jp_property.clone(),
+                        us_earthquake.clone(),
+                        large_us_wind.clone(),
+                        eu_property.clone(),
+                        medium_us_flood.clone(),
+                    ], "Specialist Risk Client", 80),
                 },
-                // Broker 6: Mixed / global (150 subs/year, 5 insureds)
+                // Broker 6: Mixed / global — 150 insureds
                 BrokerConfig {
                     id: BrokerId(6),
                     submissions_per_year: 150,
-                    insureds: vec![
-                        InsuredConfig { id: InsuredId(601), name: "Tokyo Commercial Holdings",   assets: vec![jp_property] },
-                        InsuredConfig { id: InsuredId(602), name: "Gulf Energy Group",           assets: vec![large_us_wind] },
-                        InsuredConfig { id: InsuredId(603), name: "Northern Europe Properties",  assets: vec![eu_property] },
-                        InsuredConfig { id: InsuredId(604), name: "West Coast Seismic Trust",    assets: vec![us_earthquake] },
-                        InsuredConfig { id: InsuredId(605), name: "British Industrial Portfolio", assets: vec![uk_property] },
-                    ],
+                    insureds: make_insureds(6, &[
+                        jp_property,
+                        large_us_wind,
+                        eu_property,
+                        us_earthquake,
+                        uk_property,
+                    ], "Global Portfolio Client", 150),
                 },
             ],
         }
