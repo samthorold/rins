@@ -324,7 +324,7 @@ impl Simulation {
                     }
                 }
                 // 2. Apply policy terms → ClaimSettled events.
-                let claim_events = self.market.on_insured_loss(day, policy_id, insured_id, ground_up_loss);
+                let claim_events = self.market.on_insured_loss(day, policy_id, insured_id, ground_up_loss, peril);
                 for (d, e) in claim_events {
                     self.schedule(d, e);
                 }
@@ -333,6 +333,7 @@ impl Simulation {
                 policy_id,
                 syndicate_id,
                 amount,
+                ..
             } => {
                 if let Some(s) = self.syndicates.iter_mut().find(|s| s.id == syndicate_id && s.is_active)
                     && s.on_claim_settled(amount)
@@ -751,7 +752,7 @@ mod tests {
     fn panel_claims_sum_to_net_loss() {
         // Directly test on_insured_loss: for a known ground_up_loss the sum of
         // ClaimSettled.amount across all panel entries == min(ground_up, limit) - attachment.
-        use crate::events::{Panel, PanelEntry};
+        use crate::events::{Panel, PanelEntry, Peril};
         use crate::market::Market;
         use crate::types::{SubmissionId, SyndicateId, Year};
 
@@ -777,7 +778,7 @@ mod tests {
         let mut market = Market::new();
         market.on_policy_bound(SubmissionId(1), risk, panel, Year(1));
 
-        let events = market.on_insured_loss(Day(0), Some(crate::types::PolicyId(0)), crate::types::InsuredId(0), ground_up_loss);
+        let events = market.on_insured_loss(Day(0), Some(crate::types::PolicyId(0)), crate::types::InsuredId(0), ground_up_loss, Peril::Attritional);
 
         let total_claimed: u64 = events
             .iter()
@@ -1011,7 +1012,7 @@ mod tests {
 
     #[test]
     fn insolvent_syndicate_excluded_from_submissions() {
-        use crate::events::{Panel, PanelEntry};
+        use crate::events::{Panel, PanelEntry, Peril};
         use crate::types::{BrokerId, PolicyId, SubmissionId};
 
         let mut sim = Simulation::new(42);
@@ -1040,6 +1041,7 @@ mod tests {
                 policy_id: PolicyId(0),
                 syndicate_id: SyndicateId(1),
                 amount: 900,
+                peril: Peril::Attritional,
             },
         );
         sim.schedule(

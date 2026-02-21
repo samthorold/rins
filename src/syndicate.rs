@@ -699,7 +699,7 @@ mod tests {
         let policy_id = market.on_policy_bound(SubmissionId(1), risk, panel, crate::types::Year(1));
 
         // Apply an insured loss directly: ground_up=600_000 → gross=600_000 → net=500_000.
-        let claim_events = market.on_insured_loss(Day(0), Some(policy_id), crate::types::InsuredId(0), 600_000);
+        let claim_events = market.on_insured_loss(Day(0), Some(policy_id), crate::types::InsuredId(0), 600_000, Peril::Attritional);
 
         // Apply ClaimSettled events to the syndicate.
         let mut syn = fresh_syndicate(); // SyndicateId(1), capital = 10_000_000

@@ -14,19 +14,6 @@ def year(day): return day // 360 + 1
 def etype(e): return next(iter(e['event'])) if isinstance(e['event'], dict) else e['event']
 def loss_type(peril): return 'Attritional' if peril == 'Attritional' else 'Cat'
 
-# Pre-pass: classify each (day, policy_id) as 'Attritional' or 'Cat'
-# Cat wins when both fire on the same day (rare but possible).
-_il_perils: dict[tuple, set] = collections.defaultdict(set)
-for e in events:
-    ev = e['event']
-    if isinstance(ev, dict) and 'InsuredLoss' in ev:
-        v = ev['InsuredLoss']
-        _il_perils[(e['day'], v['policy_id'])].add(v['peril'])
-il_type: dict[tuple, str] = {
-    k: ('Attritional' if ps == {'Attritional'} else 'Cat')
-    for k, ps in _il_perils.items()
-}
-
 # --- event type counts ---
 type_counts = collections.Counter(etype(e) for e in events)
 
@@ -99,7 +86,7 @@ for e in events:
         insured_gul_split[y][v['insured_id']][lt] += v['ground_up_loss']
     elif k == 'ClaimSettled':
         claims[y][v['syndicate_id']] += v['amount']
-        ct = il_type.get((d, v['policy_id']), 'Unknown')
+        ct = loss_type(v['peril'])
         claims_split[y][ct] += v['amount']
         claims_split_syn[y][v['syndicate_id']][ct] += v['amount']
     elif k == 'SyndicateEntered':

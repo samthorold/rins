@@ -511,6 +511,7 @@ impl Market {
         policy_id: Option<PolicyId>,
         insured_id: InsuredId,
         ground_up_loss: u64,
+        peril: Peril,
     ) -> Vec<(Day, Event)> {
         let effective_pid = match policy_id {
             Some(pid) => pid,
@@ -542,6 +543,7 @@ impl Market {
                         policy_id: effective_pid,
                         syndicate_id: entry.syndicate_id,
                         amount: syndicate_loss,
+                        peril,
                     },
                 ))
             })
@@ -597,7 +599,7 @@ mod tests {
         }, Year(1));
 
         // ground_up_loss (50_000) < attachment (100_000) → net = 0
-        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 50_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 50_000, Peril::Attritional);
         assert!(
             events.is_empty(),
             "expected no ClaimSettled when ground_up_loss <= attachment, got {events:?}"
@@ -619,7 +621,7 @@ mod tests {
 
         // ground_up_loss = sum_insured = 2_000_000 → gross = min(2M, 1M) = 1M
         // net = 1M - 100K = 900K
-        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 2_000_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 2_000_000, Peril::Attritional);
         let amount = events.iter().find_map(|(_, e)| match e {
             Event::ClaimSettled { amount, .. } => Some(*amount),
             _ => None,
@@ -652,7 +654,7 @@ mod tests {
 
         // ground_up_loss = 800_000; gross = min(800K, 1M) = 800K; net = 800K - 100K = 700K
         // s1 = 700K * 6000/10000 = 420K; s2 = 700K * 4000/10000 = 280K
-        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 800_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 800_000, Peril::WindstormAtlantic);
 
         let find = |sid: SyndicateId| {
             events
@@ -904,7 +906,7 @@ mod tests {
             Year(1),
         );
         // ground_up_loss (50_000) < attachment (100_000) → net_loss = 0
-        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 50_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 50_000, Peril::Attritional);
         assert!(
             events.is_empty(),
             "expected no ClaimSettled when ground_up_loss <= attachment, got {events:?}"
@@ -923,7 +925,7 @@ mod tests {
         );
         // ground_up = 5_000_000 > limit 1_000_000
         // gross = 1_000_000; net = 900_000; amount = 900_000
-        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 5_000_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 5_000_000, Peril::Attritional);
         let amount = events.iter().find_map(|(_, e)| match e {
             Event::ClaimSettled { syndicate_id, amount, .. } if *syndicate_id == SyndicateId(1) => Some(*amount),
             _ => None,
@@ -947,7 +949,7 @@ mod tests {
             Year(1),
         );
         // ground_up = 600_000; gross = 600_000; net = 600_000 - 100_000 = 500_000
-        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 600_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 600_000, Peril::Attritional);
         let net_loss = 500_000u64;
 
         let find = |sid: SyndicateId| {
@@ -1041,8 +1043,8 @@ mod tests {
 
         let mut claim_count = 0;
         for (_, e) in &insured_events {
-            if let Event::InsuredLoss { policy_id, insured_id, ground_up_loss, .. } = e {
-                let claims = market.on_insured_loss(Day(1), *policy_id, *insured_id, *ground_up_loss);
+            if let Event::InsuredLoss { policy_id, insured_id, ground_up_loss, peril, .. } = e {
+                let claims = market.on_insured_loss(Day(1), *policy_id, *insured_id, *ground_up_loss, *peril);
                 claim_count += claims.len();
                 for (_, ce) in &claims {
                     if let Event::ClaimSettled { amount, .. } = ce {
@@ -1098,8 +1100,8 @@ mod tests {
         let mut claim_a = None;
         let mut claim_b = None;
         for (_, e) in &insured_events {
-            if let Event::InsuredLoss { policy_id, insured_id, ground_up_loss, .. } = e {
-                let claims = market.on_insured_loss(Day(0), *policy_id, *insured_id, *ground_up_loss);
+            if let Event::InsuredLoss { policy_id, insured_id, ground_up_loss, peril, .. } = e {
+                let claims = market.on_insured_loss(Day(0), *policy_id, *insured_id, *ground_up_loss, *peril);
                 for (_, ce) in claims {
                     if let Event::ClaimSettled { syndicate_id, amount, .. } = ce {
                         if syndicate_id == SyndicateId(1) { claim_a = Some(amount); }
@@ -1144,8 +1146,8 @@ mod tests {
         // Only year-2 policy (Syn 2) should be hit.
         let mut hit_syndicates: Vec<u64> = vec![];
         for (_, e) in &insured_events {
-            if let Event::InsuredLoss { policy_id, insured_id, ground_up_loss, .. } = e {
-                let claims = market.on_insured_loss(Day(360), *policy_id, *insured_id, *ground_up_loss);
+            if let Event::InsuredLoss { policy_id, insured_id, ground_up_loss, peril, .. } = e {
+                let claims = market.on_insured_loss(Day(360), *policy_id, *insured_id, *ground_up_loss, *peril);
                 for (_, ce) in claims {
                     if let Event::ClaimSettled { syndicate_id, .. } = ce {
                         hit_syndicates.push(syndicate_id.0);
@@ -1227,7 +1229,7 @@ mod tests {
         // After on_policy_bound, insured_active_policies[InsuredId(0)] = PolicyId(0).
 
         // loss above attachment (100_000): should settle
-        let events = market.on_insured_loss(Day(0), None, InsuredId(0), 500_000);
+        let events = market.on_insured_loss(Day(0), None, InsuredId(0), 500_000, Peril::Attritional);
         assert!(!events.is_empty(), "expected ClaimSettled when active policy exists");
         assert!(events.iter().any(|(_, e)| matches!(e, Event::ClaimSettled { .. })));
     }
@@ -1237,7 +1239,7 @@ mod tests {
     fn on_insured_loss_none_policy_id_without_active_policy_produces_no_claim() {
         let market = Market::new();
         // No policy bound — uninsured.
-        let events = market.on_insured_loss(Day(0), None, InsuredId(99), 1_000_000);
+        let events = market.on_insured_loss(Day(0), None, InsuredId(99), 1_000_000, Peril::Attritional);
         assert!(events.is_empty(), "expected no events for uninsured insured");
     }
 

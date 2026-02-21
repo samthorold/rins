@@ -88,6 +88,7 @@ pub enum Event {
         policy_id: PolicyId,
         syndicate_id: SyndicateId,
         amount: u64,
+        peril: Peril,
     },
     SyndicateEntered {
         syndicate_id: SyndicateId,
