@@ -22,7 +22,9 @@ policies      = collections.Counter()
 declines      = collections.Counter()
 quote_req     = collections.Counter()
 premiums      = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> syn_id -> sum
-losses        = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> (peril,region) -> sum
+loss_counts   = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> (peril,region) -> count
+insured_losses= collections.defaultdict(lambda: collections.defaultdict(int))  # year -> peril -> total GUL
+insured_gul   = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insured_id -> total GUL
 claims        = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> syn_id -> sum
 
 # lead/follower quoting funnel
@@ -70,7 +72,10 @@ for e in events:
         else:
             foll_iss[y] += 1
     elif k == 'LossEvent':
-        losses[y][(v['peril'], v['region'])] += v['severity']
+        loss_counts[y][(v['peril'], v['region'])] += 1
+    elif k == 'InsuredLoss':
+        insured_losses[y][v['peril']] += v['ground_up_loss']
+        insured_gul[y][v['insured_id']] += v['ground_up_loss']
     elif k == 'ClaimSettled':
         claims[y][v['syndicate_id']] += v['amount']
     elif k == 'SyndicateEntered':
@@ -99,10 +104,48 @@ for y in years:
     row = f"  {y:>2}" + "".join(f"  {premiums[y].get(s,0):>6}" for s in all_syns)
     print(row)
 
-print("\n=== Loss severity by (peril, territory) per year ===")
-all_perils = sorted({pk for yy in losses.values() for pk in yy})
+print("\n=== Loss events by (peril, territory) per year ===")
+all_perils = sorted({pk for yy in loss_counts.values() for pk in yy})
 for pk in all_perils:
-    row = f"  {pk[0]:<22} {pk[1]:<8}" + "".join(f"  Y{y}:{losses[y].get(pk,0):>9}" for y in years)
+    row = f"  {pk[0]:<22} {pk[1]:<8}" + "".join(f"  Y{y}:{loss_counts[y].get(pk,0):>4}ev" for y in years)
+    print(row)
+
+print("\n=== Ground-up insured loss by peril per year (pence) ===")
+all_il_perils = sorted({p for yy in insured_losses.values() for p in yy})
+for p in all_il_perils:
+    row = f"  {p:<22}" + "".join(f"  Y{y}:{insured_losses[y].get(p,0):>14}" for y in years)
+    print(row)
+
+print("\n=== Insured GUL summary per year ===")
+print(f"{'Year':>4}  {'Insureds':>8}  {'TotalGUL':>16}  {'TopInsured':>10}  {'TopGUL':>16}  {'Top%':>6}  {'GUL-HHI':>8}")
+for y in years:
+    ig = insured_gul[y]
+    if not ig:
+        print(f"  {y:>2}         n/a")
+        continue
+    total_gul = sum(ig.values())
+    top_id, top_gul = max(ig.items(), key=lambda x: x[1])
+    top_pct = 100 * top_gul / total_gul if total_gul else 0
+    hhi_gul = sum((v / total_gul * 100) ** 2 for v in ig.values()) if total_gul else 0
+    print(f"  {y:>2}    {len(ig):>8}  {total_gul:>16}  {top_id:>10}  {top_gul:>16}  {top_pct:>6.1f}  {hhi_gul:>8.0f}")
+
+print("\n=== Top 10 insureds by total GUL (all years) ===")
+all_insured_gul: dict[int, int] = collections.defaultdict(int)
+for yy in insured_gul.values():
+    for ins_id, gul in yy.items():
+        all_insured_gul[ins_id] += gul
+print(f"  {'InsuredId':>10}  {'TotalGUL':>16}  {'Share%':>7}")
+total_all_gul = sum(all_insured_gul.values())
+for ins_id, gul in sorted(all_insured_gul.items(), key=lambda x: -x[1])[:10]:
+    share = 100 * gul / total_all_gul if total_all_gul else 0
+    print(f"  {ins_id:>10}  {gul:>16}  {share:>7.1f}")
+
+print("\n=== Per-insured GUL by year (top 10 by lifetime GUL) ===")
+top_insureds = [i for i, _ in sorted(all_insured_gul.items(), key=lambda x: -x[1])[:10]]
+hdr_ins = f"  {'InsuredId':>10}" + "".join(f"  {'Y'+str(y):>16}" for y in years)
+print(hdr_ins)
+for ins_id in top_insureds:
+    row = f"  {ins_id:>10}" + "".join(f"  {insured_gul[y].get(ins_id,0):>16}" for y in years)
     print(row)
 
 print("\n=== Claims settled by syndicate per year (pence) ===")
