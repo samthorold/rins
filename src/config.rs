@@ -101,7 +101,7 @@ impl SimulationConfig {
 
         SimulationConfig {
             seed: 42,
-            years: 5,
+            years: 10,
             // ── Syndicates: 3 size tiers ──────────────────────────────────────
             // Capital in pence. Large: ~£500M, Medium: ~£200M, Small: ~£80M.
             syndicates: vec![

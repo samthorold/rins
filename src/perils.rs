@@ -127,6 +127,7 @@ pub fn default_attritional_configs() -> std::collections::HashMap<&'static str, 
 }
 
 /// Generate attritional `InsuredLoss` events for one newly bound policy.
+#[allow(dead_code)]
 ///
 /// Called at `PolicyBound` time. Draws a Poisson count from the territory's
 /// `annual_rate`, then for each occurrence draws a random day and damage fraction.
@@ -161,7 +162,51 @@ pub fn schedule_attritional_claims_for_policy(
         out.push((
             day,
             Event::InsuredLoss {
-                policy_id,
+                policy_id: Some(policy_id),
+                insured_id,
+                peril: Peril::Attritional,
+                ground_up_loss,
+            },
+        ));
+    }
+    out
+}
+
+/// Generate attritional `InsuredLoss` events for one insured's asset, independent of
+/// whether a policy is bound.
+///
+/// Called at `SimulationStart` for ALL insured assets. Emits
+/// `InsuredLoss { policy_id: None, ... }`; the dispatcher looks up
+/// `insured_active_policies` at fire time to decide whether a ClaimSettled follows.
+/// Claims in unknown territories produce no events.
+pub fn schedule_attritional_claims_for_insured(
+    insured_id: InsuredId,
+    risk: &Risk,
+    year: Year,
+    rng: &mut impl Rng,
+    configs: &std::collections::HashMap<&'static str, AttritionalConfig>,
+) -> Vec<(Day, Event)> {
+    if !risk.perils_covered.contains(&Peril::Attritional) {
+        return vec![];
+    }
+    let Some(config) = configs.get(risk.territory.as_str()) else {
+        return vec![];
+    };
+    let year_start = Day::year_start(year);
+    let poisson = Poisson::new(config.annual_rate).expect("invalid Poisson rate");
+    let n = poisson.sample(rng) as u64;
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let day = year_start.offset(rng.random_range(1_u64..360));
+        let damage_fraction = config.damage_fraction.sample(rng);
+        let ground_up_loss = (damage_fraction * risk.sum_insured as f64) as u64;
+        if ground_up_loss == 0 {
+            continue;
+        }
+        out.push((
+            day,
+            Event::InsuredLoss {
+                policy_id: None,
                 insured_id,
                 peril: Peril::Attritional,
                 ground_up_loss,
@@ -428,7 +473,7 @@ mod tests {
         for (_, e) in &events {
             match e {
                 Event::InsuredLoss { ground_up_loss, policy_id, insured_id, peril, .. } => {
-                    assert_eq!(*policy_id, PolicyId(0));
+                    assert_eq!(*policy_id, Some(PolicyId(0)));
                     assert_eq!(*insured_id, InsuredId(1));
                     assert_eq!(*peril, Peril::Attritional);
                     assert!(
@@ -580,5 +625,138 @@ mod tests {
                 "scheduler must only emit InsuredLoss, got {e:?}"
             );
         }
+    }
+
+    // ── schedule_attritional_claims_for_insured tests ─────────────────────────
+
+    /// Per-insured attritional scheduler must emit `InsuredLoss { policy_id: None }` with
+    /// `ground_up_loss ≤ sum_insured`.
+    #[test]
+    fn schedule_attritional_claims_for_insured_produces_bounded_insured_losses() {
+        use std::collections::HashMap;
+
+        use crate::events::Risk;
+        use crate::types::InsuredId;
+
+        let mut rng = rng();
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000_000,
+            territory: "UK".to_string(),
+            limit: 200_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::Attritional],
+        };
+        let configs: HashMap<&'static str, AttritionalConfig> = [(
+            "UK",
+            AttritionalConfig {
+                annual_rate: 50.0,
+                damage_fraction: DamageFractionModel::LogNormal { mu: -4.0, sigma: 1.0 },
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let events = schedule_attritional_claims_for_insured(
+            InsuredId(7),
+            &risk,
+            Year(1),
+            &mut rng,
+            &configs,
+        );
+
+        assert!(!events.is_empty(), "expected InsuredLoss events with rate=50.0");
+
+        for (_, e) in &events {
+            match e {
+                Event::InsuredLoss { policy_id, insured_id, peril, ground_up_loss } => {
+                    assert_eq!(*policy_id, None, "per-insured scheduler must emit policy_id: None");
+                    assert_eq!(*insured_id, InsuredId(7));
+                    assert_eq!(*peril, Peril::Attritional);
+                    assert!(
+                        *ground_up_loss <= risk.sum_insured,
+                        "ground_up_loss {ground_up_loss} exceeds sum_insured {}",
+                        risk.sum_insured
+                    );
+                }
+                _ => panic!("unexpected event type {e:?}"),
+            }
+        }
+    }
+
+    /// Attritional-insured scheduler returns empty vec when risk does not cover Attritional.
+    #[test]
+    fn schedule_attritional_claims_for_insured_no_events_for_non_attritional_risk() {
+        use std::collections::HashMap;
+
+        use crate::events::Risk;
+        use crate::types::InsuredId;
+
+        let mut rng = rng();
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 2_000_000_000,
+            territory: "UK".to_string(),
+            limit: 200_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::WindstormAtlantic], // not Attritional
+        };
+        let configs: HashMap<&'static str, AttritionalConfig> = [(
+            "UK",
+            AttritionalConfig {
+                annual_rate: 50.0,
+                damage_fraction: DamageFractionModel::LogNormal { mu: -4.0, sigma: 1.0 },
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let events = schedule_attritional_claims_for_insured(
+            InsuredId(1),
+            &risk,
+            Year(1),
+            &mut rng,
+            &configs,
+        );
+
+        assert!(events.is_empty(), "non-Attritional risk must produce no events");
+    }
+
+    /// Attritional-insured scheduler returns empty vec for unknown territory.
+    #[test]
+    fn schedule_attritional_claims_for_insured_unknown_territory_produces_no_events() {
+        use std::collections::HashMap;
+
+        use crate::events::Risk;
+        use crate::types::InsuredId;
+
+        let mut rng = rng();
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 1_000_000,
+            territory: "JP".to_string(), // not in configs
+            limit: 500_000,
+            attachment: 0,
+            perils_covered: vec![Peril::Attritional],
+        };
+        let configs: HashMap<&'static str, AttritionalConfig> = [(
+            "UK",
+            AttritionalConfig {
+                annual_rate: 50.0,
+                damage_fraction: DamageFractionModel::LogNormal { mu: -4.0, sigma: 1.0 },
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let events = schedule_attritional_claims_for_insured(
+            InsuredId(1),
+            &risk,
+            Year(1),
+            &mut rng,
+            &configs,
+        );
+
+        assert!(events.is_empty(), "unknown territory must produce no events");
     }
 }

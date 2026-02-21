@@ -22,13 +22,13 @@ flowchart TD
         SA["**SubmissionArrived**\n{submission_id, broker_id, insured_id, risk}"]
     end
 
-    subgraph Market["Market (Coordinator)"]
+    subgraph Market["Market (Coordinator)\nregister_insured → insured_exposure_index\ninsured_active_policies: insured → active PolicyId"]
         QR_L["**QuoteRequested**\n{is_lead: true}\n+2 days"]
         QR_F["**QuoteRequested**\n{is_lead: false}\n+3 days"]
         PB["**PolicyBound**\n{submission_id, panel}\n+5 days"]
         ABANDON_EVENT["**SubmissionAbandoned**\n{submission_id}\n(log only)"]
-        LE_D["on_loss_event\nmatches territory + peril\nsamples damage_fraction per policy\n→ ground_up_loss = df × sum_insured"]
-        IL_D["on_insured_loss\napplies policy terms\ngross = min(ground_up, limit)\nnet = gross − attachment"]
+        LE_D["on_loss_event\nfirst pass: bound policies → InsuredLoss(Some)\nsecond pass: insured_exposure_index → InsuredLoss(None)\nsamples damage_fraction × sum_insured"]
+        IL_D["on_insured_loss\npolicy_id=Some → direct lookup\npolicy_id=None → insured_active_policies\napplies policy terms\ngross = min(ground_up, limit)\nnet = gross − attachment"]
         STATS["compute_year_stats\n→ industry_loss_ratio\n→ YTD reset\n→ expire year policies"]
     end
 
@@ -57,17 +57,19 @@ flowchart TD
 
     %% ── Loss cascade ────────────────────────────────────────────────────────
 
-    IL["**InsuredLoss**\n{policy_id, insured_id, peril, ground_up_loss}"]
+    IL["**InsuredLoss**\n{policy_id: Option, insured_id, peril, ground_up_loss}"]
     CS["**ClaimSettled**\n{policy_id, syndicate_id, amount}"]
-    ATTR["perils::schedule_attritional_claims_for_policy\nPoisson(λ/territory) per-policy\nsamples damage_fraction × sum_insured\nspread across year"]
+    ATTR["perils::schedule_attritional_claims_for_insured\nPoisson(λ/territory) per-insured asset\nsamples damage_fraction × sum_insured\nspread across year\npolicy_id: None"]
 
     LE --> LE_D
-    LE_D -->|"one InsuredLoss per matching policy\n(cat + non-attritional perils only)"| IL
+    LE_D -->|"one InsuredLoss(Some) per matching policy\n(first pass: insured policies)"| IL
+    LE_D -->|"one InsuredLoss(None) per exposed-but-uninsured insured\n(second pass: insured_exposure_index)"| IL
     IL --> INS_H
     IL --> IL_D
-    IL_D -->|"one ClaimSettled\nper panel entry\n(net > 0 only)"| CS
-    PB -->|"risk covers Attritional?"| ATTR
-    ATTR -->|"one InsuredLoss\nper occurrence"| IL
+    IL_D -->|"policy_id=Some → direct policy lookup\npolicy_id=None → insured_active_policies lookup"| IL_D
+    IL_D -->|"one ClaimSettled\nper panel entry\n(net > 0 and policy found only)"| CS
+    SS -->|"schedule_attritional_claims_for_insured\nper insured asset (all years, no market guard)"| ATTR
+    ATTR -->|"one InsuredLoss(None)\nper occurrence"| IL
     CS --> CS_S
     CS -->|"accumulate ytd_claims_by_line"| STATS
 
@@ -106,9 +108,9 @@ flowchart TD
 | 5 | `QuoteIssued` | `Syndicate::on_quote_requested` | `Market::on_lead_quote_issued` / `Market::on_follower_quote_issued` |
 | 6 | `QuoteDeclined` | `Syndicate::on_quote_requested` | `Market::on_quote_declined` |
 | 7 | `SubmissionAbandoned` | `Market::on_quote_declined` (when lead declines) | none (log only) |
-| 8 | `PolicyBound` | `Market::assemble_panel` (+5 days from last follower response) | `Market::on_policy_bound` (registers policy, YTD premium); `perils::schedule_attritional_claims_for_policy` (if risk covers Attritional, emits `InsuredLoss`) |
-| 9 | `LossEvent` | `handle_simulation_start` via `perils::schedule_loss_events` (Poisson frequency, **cat perils only**; no severity field) | `Market::on_loss_event` → samples `damage_fraction` per policy → emits `InsuredLoss` |
-| 10 | `InsuredLoss` {policy_id, insured_id, peril, ground_up_loss} | `Market::on_loss_event` (cat perils) or `perils::schedule_attritional_claims_for_policy` (Attritional, per-policy) | `Insured::on_insured_loss` (accumulate stats) + `Market::on_insured_loss` → applies policy terms → emits `ClaimSettled` |
+| 8 | `PolicyBound` | `Market::assemble_panel` (+5 days from last follower response) | `Market::on_policy_bound` (registers policy, YTD premium, populates `insured_active_policies`) |
+| 9 | `LossEvent` | `handle_simulation_start` via `perils::schedule_loss_events` (Poisson frequency, **cat perils only**; no severity field) | `Market::on_loss_event` → first pass: `InsuredLoss(Some)` per bound policy; second pass: `InsuredLoss(None)` per exposed-but-uninsured insured via `insured_exposure_index` |
+| 10 | `InsuredLoss` {policy_id: **Option**, insured_id, peril, ground_up_loss} | `Market::on_loss_event` (cat, both paths) or `perils::schedule_attritional_claims_for_insured` (Attritional, per-insured at SimulationStart, always `policy_id: None`) | `Insured::on_insured_loss` (accumulate stats) + `Market::on_insured_loss` → if policy_id=None resolves via `insured_active_policies`; applies policy terms → emits `ClaimSettled` (or nothing if uninsured) |
 | 11 | `ClaimSettled` | `Market::on_insured_loss` | `Syndicate::on_claim_settled` + `Market::on_claim_settled` (YTD) |
 | 12 | `SyndicateEntered` | — | no-op |
 | 13 | `SyndicateInsolvency` | `Syndicate::on_claim_settled` (when capital < solvency floor) | `Simulation::dispatch` → sets `syndicate.is_active = false` |

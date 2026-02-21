@@ -2,17 +2,27 @@
 """
 verify_claims.py — event-stream verifier for rins claim correctness.
 
-With the grounded loss model, the full chain is:
-  LossEvent → InsuredLoss {ground_up_loss} → ClaimSettled
+With the grounded loss model + decoupled GUL, the full chain is:
+  LossEvent → InsuredLoss {ground_up_loss, policy_id: Option} → ClaimSettled?
 
-Two checks are performed:
+InsuredLoss.policy_id may be:
+  - Some(pid) : insured has a bound policy; ClaimSettled events follow if net > 0
+  - None       : uninsured or attritional without pre-known policy; on_insured_loss
+                 resolves via insured_active_policies at fire time — may produce
+                 ClaimSettled with the resolved effective policy_id
+
+Three checks are performed:
   1. InsuredLoss.ground_up_loss ≤ sum_insured for every InsuredLoss event.
-  2. For each InsuredLoss, the ClaimSettled amounts on the same day for the same
-     policy_id satisfy: sum(amounts) == min(ground_up_loss, limit) − attachment
-     (with minor integer-rounding tolerance).
-
-Both cat and attritional losses now flow through InsuredLoss, so a single pass
-covers both.
+     For null policy_id, sum_insured is bounded by max across all SubmissionArrived
+     for that insured.
+  2. For each InsuredLoss with a non-null policy_id, the ClaimSettled amounts
+     on the same day satisfy: sum(amounts) == min(ground_up_loss, limit) − attachment
+     (with minor integer-rounding tolerance). InsuredLoss(None) events: skip.
+  3. Every ClaimSettled must have a matching InsuredLoss on the same day. A match
+     is either:
+       (a) InsuredLoss { policy_id: Some(pid) } for the same pid, OR
+       (b) InsuredLoss { policy_id: None } for the insured of that policy
+           (resolved path via insured_active_policies).
 
 Run from the project root after `cargo run`:
     python3 scripts/verify_claims.py
@@ -24,17 +34,26 @@ from pathlib import Path
 events_path = Path("events.ndjson")
 events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
 
-# ── Build policy metadata from SubmissionArrived + PolicyBound ───────────────
+# ── Build metadata from SubmissionArrived + PolicyBound ──────────────────────
 
 submission_risk = {}
+submission_insured = {}  # submission_id → insured_id
+insured_max_sum_insured = defaultdict(int)  # insured_id → max sum_insured seen
+
 for e in events:
     ev = e["event"]
     if not isinstance(ev, dict): continue
     k = next(iter(ev)); v = ev[k]
     if k == "SubmissionArrived":
         submission_risk[v["submission_id"]] = v["risk"]
+        submission_insured[v["submission_id"]] = v["insured_id"]
+        si = v["risk"]["sum_insured"]
+        iid = v["insured_id"]
+        if si > insured_max_sum_insured[iid]:
+            insured_max_sum_insured[iid] = si
 
-policies = {}
+policies = {}       # policy_counter → policy dict
+policy_insured = {} # policy_counter → insured_id
 policy_counter = 0
 for e in events:
     ev = e["event"]
@@ -55,64 +74,94 @@ for e in events:
             "entries": v["panel"]["entries"],
             "bound_day": e["day"],
         }
+        iid = submission_insured.get(sid)
+        if iid is not None:
+            policy_insured[policy_counter] = iid
         policy_counter += 1
 
 print(f"Policies loaded: {len(policies)}")
 
 # ── Index InsuredLoss and ClaimSettled events ─────────────────────────────────
 
-# (day, policy_id) → [ground_up_loss, ...] (from InsuredLoss; list because multiple events
-# can share the same (day, policy) — e.g. same-day attritional + cat collision)
+# Key: (day, policy_id_or_"null", insured_id) → [ground_up_loss, ...]
 insured_loss_index = defaultdict(list)
-# (day, policy_id) → {syndicate_id: total_amount} (from ClaimSettled)
+# (day, policy_id) → {syndicate_id: total_amount} for non-null policy_id only
 claim_index = defaultdict(lambda: defaultdict(int))
+# Set of (day, policy_id) pairs from InsuredLoss with non-null policy_id
+insured_loss_with_pid = set()
+# Set of (day, insured_id) pairs from InsuredLoss(None)
+null_loss_by_day_insured = set()
 
 insured_loss_count = 0
+null_policy_count = 0
 for e in events:
     ev = e["event"]
     if not isinstance(ev, dict): continue
     k = next(iter(ev)); v = ev[k]; day = e["day"]
     if k == "InsuredLoss":
-        insured_loss_index[(day, v["policy_id"])].append(v["ground_up_loss"])
+        pid = v["policy_id"]
+        iid = v["insured_id"]
+        if pid is None:
+            insured_loss_index[(day, "null", iid)].append(v["ground_up_loss"])
+            null_loss_by_day_insured.add((day, iid))
+            null_policy_count += 1
+        else:
+            insured_loss_index[(day, pid, iid)].append(v["ground_up_loss"])
+            insured_loss_with_pid.add((day, pid))
         insured_loss_count += 1
     elif k == "ClaimSettled":
         claim_index[(day, v["policy_id"])][v["syndicate_id"]] += v["amount"]
 
-print(f"InsuredLoss events: {insured_loss_count}")
+print(f"InsuredLoss events: {insured_loss_count} ({null_policy_count} with policy_id=null)")
 
 mismatches = []
 ground_up_checks = 0
 claim_checks = 0
 
-# ── Check 1: ground_up_loss ≤ sum_insured (per individual InsuredLoss event) ───
+# ── Check 1: ground_up_loss ≤ sum_insured ────────────────────────────────────
 
-for (day, pid), losses in insured_loss_index.items():
-    policy = policies.get(pid)
-    if policy is None:
-        mismatches.append(f"  FAIL day={day}: InsuredLoss references unknown policy_id {pid}")
-        continue
-    for ground_up_loss in losses:
-        if ground_up_loss > policy["sum_insured"]:
+for (day, pid, iid), losses in insured_loss_index.items():
+    if pid == "null":
+        max_si = insured_max_sum_insured.get(iid)
+        if max_si is None:
             mismatches.append(
-                f"  FAIL day={day} policy={pid}: ground_up_loss={ground_up_loss} "
-                f"> sum_insured={policy['sum_insured']}"
+                f"  FAIL day={day}: InsuredLoss(None) for insured_id={iid} "
+                f"has no SubmissionArrived to bound sum_insured"
             )
-        ground_up_checks += 1
+            continue
+        for ground_up_loss in losses:
+            if ground_up_loss > max_si:
+                mismatches.append(
+                    f"  FAIL day={day} insured={iid}: uninsured ground_up_loss={ground_up_loss} "
+                    f"> max_sum_insured={max_si}"
+                )
+            ground_up_checks += 1
+    else:
+        policy = policies.get(pid)
+        if policy is None:
+            mismatches.append(f"  FAIL day={day}: InsuredLoss references unknown policy_id {pid}")
+            continue
+        for ground_up_loss in losses:
+            if ground_up_loss > policy["sum_insured"]:
+                mismatches.append(
+                    f"  FAIL day={day} policy={pid}: ground_up_loss={ground_up_loss} "
+                    f"> sum_insured={policy['sum_insured']}"
+                )
+            ground_up_checks += 1
 
 print(f"Ground-up checks (ground_up ≤ sum_insured): {ground_up_checks}")
 
-# ── Check 2: ClaimSettled amounts match policy terms applied to ground_up_loss ─
-# Each InsuredLoss event independently produces ClaimSettled events via on_insured_loss,
-# so expected total = sum of net amounts across all same-day InsuredLoss events.
+# ── Check 2: ClaimSettled amounts match policy terms ─────────────────────────
+# Only for InsuredLoss events with a non-null policy_id.
 
-for (day, pid), losses in insured_loss_index.items():
+for (day, pid, iid), losses in insured_loss_index.items():
+    if pid == "null":
+        continue  # Uninsured: ClaimSettled may or may not follow; verify via Check 3.
+
     policy = policies.get(pid)
     if policy is None:
         continue  # already reported above
 
-    # Expected per-syndicate amounts: mirror Rust exactly — each InsuredLoss event
-    # independently calls on_insured_loss, which applies net * share_bps / 10_000
-    # (integer division) per panel entry. Sum those independently to avoid ±1 drift.
     expected_by_syn = defaultdict(int)
     total_net = 0
     for ground_up_loss in losses:
@@ -125,7 +174,6 @@ for (day, pid), losses in insured_loss_index.items():
                 expected_by_syn[entry["syndicate_id"]] += amount
 
     if total_net == 0:
-        # No claim expected; ensure no ClaimSettled exists for this (day, pid).
         actual = claim_index.get((day, pid), {})
         if actual:
             mismatches.append(
@@ -148,12 +196,23 @@ for (day, pid), losses in insured_loss_index.items():
         claim_checks += 1
 
 # ── Check 3: No ClaimSettled without a matching InsuredLoss ───────────────────
+# A ClaimSettled(day, pid) is valid if:
+#   (a) There is an explicit InsuredLoss(Some(pid)) on the same day, OR
+#   (b) The insured of policy pid has an InsuredLoss(None) on the same day
+#       (the None event resolved to this policy via insured_active_policies).
 
 for (day, pid) in claim_index:
-    if not insured_loss_index[(day, pid)]:
-        mismatches.append(
-            f"  FAIL day={day} policy={pid}: ClaimSettled with no matching InsuredLoss"
-        )
+    if (day, pid) in insured_loss_with_pid:
+        continue  # (a) direct explicit match
+
+    # (b) check if the insured of this policy had an InsuredLoss(None) on the same day
+    insured_for_policy = policy_insured.get(pid)
+    if insured_for_policy is not None and (day, insured_for_policy) in null_loss_by_day_insured:
+        continue  # (b) resolved via None path
+
+    mismatches.append(
+        f"  FAIL day={day} policy={pid}: ClaimSettled with no matching InsuredLoss"
+    )
 
 print(f"Claim amount checks (ClaimSettled vs policy terms): {claim_checks}")
 

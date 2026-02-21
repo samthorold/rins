@@ -79,7 +79,7 @@ pub enum Event {
         peril: Peril,
     },
     InsuredLoss {
-        policy_id: PolicyId,
+        policy_id: Option<PolicyId>,
         insured_id: InsuredId,
         peril: Peril,
         ground_up_loss: u64, // damage_fraction × sum_insured, pence

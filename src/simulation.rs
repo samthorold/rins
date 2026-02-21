@@ -98,9 +98,17 @@ impl Simulation {
                 Broker::new(c.id, c.submissions_per_year, insureds)
             })
             .collect();
-        Simulation::new(config.seed)
+        let mut sim = Simulation::new(config.seed)
             .until(Day::year_end(Year(config.years)))
-            .with_agents(syndicates, brokers)
+            .with_agents(syndicates, brokers);
+        // Register all insureds in the market's exposure index so that
+        // on_loss_event can emit InsuredLoss(None) for uninsured exposures.
+        for broker in &sim.brokers {
+            for insured in &broker.insureds {
+                sim.market.register_insured(insured.id, &insured.assets);
+            }
+        }
+        sim
     }
 
     /// Schedule an event to fire at the given day.
@@ -270,31 +278,13 @@ impl Simulation {
                     // Collect syndicate contributions before panel is moved into market.
                     let contributions: Vec<(SyndicateId, u64)> =
                         panel.entries.iter().map(|e| (e.syndicate_id, e.premium)).collect();
-                    // Clone risk and panel: on_policy_bound consumes them, but we
-                    // also need them for the per-policy attritional scheduler below.
-                    let policy_id =
-                        self.market.on_policy_bound(submission_id, risk.clone(), panel.clone(), year);
+                    self.market.on_policy_bound(submission_id, risk, panel, year);
                     for (syn_id, premium) in contributions {
                         if let Some(s) =
                             self.syndicates.iter_mut().find(|s| s.id == syn_id)
                         {
                             s.on_policy_bound_as_panelist(submission_id, premium);
                         }
-                    }
-                    // Retrieve insured_id from the newly bound policy.
-                    let insured_id = self.market.policies[&policy_id].insured_id;
-                    // Per-policy attritional claims (independent of global LossEvent stream).
-                    let attritional_configs = perils::default_attritional_configs();
-                    let attritional_events = perils::schedule_attritional_claims_for_policy(
-                        policy_id,
-                        insured_id,
-                        &risk,
-                        year,
-                        &mut self.rng,
-                        &attritional_configs,
-                    );
-                    for (d, e) in attritional_events {
-                        self.schedule(d, e);
                     }
                 }
             }
@@ -334,7 +324,7 @@ impl Simulation {
                     }
                 }
                 // 2. Apply policy terms → ClaimSettled events.
-                let claim_events = self.market.on_insured_loss(day, policy_id, ground_up_loss);
+                let claim_events = self.market.on_insured_loss(day, policy_id, insured_id, ground_up_loss);
                 for (d, e) in claim_events {
                     self.schedule(d, e);
                 }
@@ -396,6 +386,28 @@ impl Simulation {
             for (d, e) in loss_events {
                 self.schedule(d, e);
             }
+        }
+
+        // Schedule attritional claims for ALL insureds each year — regardless of market state.
+        // Insureds face losses even when no syndicates are active; on_insured_loss resolves
+        // whether to emit ClaimSettled based on insured_active_policies at fire time.
+        let attritional_configs = perils::default_attritional_configs();
+        let mut att_events: Vec<(Day, Event)> = vec![];
+        for broker in &self.brokers {
+            for insured in &broker.insureds {
+                for risk in &insured.assets {
+                    att_events.extend(perils::schedule_attritional_claims_for_insured(
+                        insured.id,
+                        risk,
+                        year_start,
+                        &mut self.rng,
+                        &attritional_configs,
+                    ));
+                }
+            }
+        }
+        for (d, e) in att_events {
+            self.schedule(d, e);
         }
 
         self.schedule(
@@ -765,7 +777,7 @@ mod tests {
         let mut market = Market::new();
         market.on_policy_bound(SubmissionId(1), risk, panel, Year(1));
 
-        let events = market.on_insured_loss(Day(0), crate::types::PolicyId(0), ground_up_loss);
+        let events = market.on_insured_loss(Day(0), Some(crate::types::PolicyId(0)), crate::types::InsuredId(0), ground_up_loss);
 
         let total_claimed: u64 = events
             .iter()
@@ -1288,5 +1300,83 @@ mod tests {
         if let (Some(il), Some(cs)) = (insured_loss_idx, claim_settled_idx) {
             assert!(il < cs, "InsuredLoss (idx {il}) must precede ClaimSettled (idx {cs}) in log");
         }
+    }
+
+    // ── Uninsured GUL tests ────────────────────────────────────────────────────
+
+    /// A LossEvent in an insolvent year (no active policies) must still produce
+    /// InsuredLoss { policy_id: None } for registered insureds.
+    #[test]
+    fn gul_recorded_for_uninsured_insured_in_insolvent_year() {
+        use crate::events::Risk;
+        use crate::types::{InsuredId, LossEventId};
+
+        let mut sim = Simulation::new(0);
+        sim.syndicates = vec![];
+
+        // Register an insured with a WindstormAtlantic exposure directly.
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 5_000_000,
+            territory: "US-SE".to_string(),
+            limit: 5_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::WindstormAtlantic],
+        };
+        sim.market.register_insured(InsuredId(1), &[risk]);
+
+        // No policies bound — no active syndicates.
+        // Fire a LossEvent; second pass should emit InsuredLoss(None).
+        sim.schedule(Day(10), Event::LossEvent {
+            event_id: LossEventId(0),
+            region: "US-SE".to_string(),
+            peril: Peril::WindstormAtlantic,
+        });
+        sim.run();
+
+        let uninsured_loss = sim.log.iter().find(|e| matches!(
+            &e.event,
+            Event::InsuredLoss { policy_id: None, insured_id, .. } if *insured_id == InsuredId(1)
+        ));
+        assert!(
+            uninsured_loss.is_some(),
+            "expected InsuredLoss {{ policy_id: None }} for registered insured with no policy"
+        );
+
+        // No ClaimSettled expected (no policy).
+        let has_claim = sim.log.iter().any(|e| matches!(&e.event, Event::ClaimSettled { .. }));
+        assert!(!has_claim, "no ClaimSettled expected when insured has no policy");
+
+        // GUL accumulates on the insured object via the dispatch path.
+        // (insured_id tracking in brokers is not exercised here since we used
+        //  sim.market.register_insured directly, not broker.insureds)
+    }
+
+    /// With all syndicates disabled (no submissions accepted), attritional InsuredLoss
+    /// events with policy_id: null appear but no ClaimSettled events follow.
+    #[test]
+    fn attritional_gul_recorded_even_when_no_policy_bound() {
+        let risk = make_risk("UK", vec![Peril::Attritional]);
+        // Use a broker with Attritional risk so handle_simulation_start schedules claims.
+        let broker = make_broker(1, risk);
+
+        // No syndicates at all → no policies will bind.
+        let mut sim = Simulation::new(42)
+            .until(Day::year_end(Year(1)))
+            .with_agents(vec![], vec![broker]);
+        sim.schedule(Day::year_start(Year(1)), Event::SimulationStart { year_start: Year(1) });
+        sim.run();
+
+        let uninsured_attritional = sim.log.iter().filter(|e| matches!(
+            &e.event,
+            Event::InsuredLoss { policy_id: None, peril: Peril::Attritional, .. }
+        )).count();
+        assert!(
+            uninsured_attritional > 0,
+            "expected attritional InsuredLoss(None) events when no syndicates; got 0"
+        );
+
+        let has_claim = sim.log.iter().any(|e| matches!(&e.event, Event::ClaimSettled { .. }));
+        assert!(!has_claim, "no ClaimSettled expected when no policies are bound");
     }
 }

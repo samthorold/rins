@@ -56,6 +56,13 @@ pub struct Market {
     /// Inverted index: (territory, peril) → policy IDs. Populated in
     /// `on_policy_bound`; used by `on_loss_event` to skip non-matching policies.
     pub peril_territory_index: HashMap<(String, Peril), Vec<PolicyId>>,
+    /// insured_id → the active PolicyId for this year. Populated at `PolicyBound`,
+    /// cleared at `expire_policies`. Used by `on_insured_loss` when policy_id is None.
+    pub insured_active_policies: HashMap<InsuredId, PolicyId>,
+    /// (territory, peril) → [(insured_id, sum_insured)] for cat perils.
+    /// Built once at init via `register_insured`; used by `on_loss_event` for
+    /// the second pass that emits InsuredLoss(None) for uninsured exposures.
+    pub insured_exposure_index: HashMap<(String, Peril), Vec<(InsuredId, u64)>>,
     /// Risk stashed at panel-assembly time, consumed when `PolicyBound` fires.
     risk_cache: HashMap<SubmissionId, Risk>,
     /// InsuredId stashed at panel-assembly time alongside `risk_cache`.
@@ -79,10 +86,31 @@ impl Market {
             pending: HashMap::new(),
             policies: HashMap::new(),
             peril_territory_index: HashMap::new(),
+            insured_active_policies: HashMap::new(),
+            insured_exposure_index: HashMap::new(),
             risk_cache: HashMap::new(),
             insured_cache: HashMap::new(),
             ytd_premiums_by_line: HashMap::new(),
             ytd_claims_by_line: HashMap::new(),
+        }
+    }
+
+    /// Register an insured's assets in the exposure index.
+    ///
+    /// Called once at simulation init for every insured across all brokers.
+    /// Builds `insured_exposure_index[(territory, peril)] → [(insured_id, sum_insured)]`
+    /// for all cat perils; Attritional is excluded (handled separately per-insured).
+    pub fn register_insured(&mut self, insured_id: InsuredId, assets: &[Risk]) {
+        for risk in assets {
+            for &peril in &risk.perils_covered {
+                if peril == Peril::Attritional {
+                    continue;
+                }
+                self.insured_exposure_index
+                    .entry((risk.territory.clone(), peril))
+                    .or_default()
+                    .push((insured_id, risk.sum_insured));
+            }
         }
     }
 
@@ -363,6 +391,8 @@ impl Market {
                 bound_year: year,
             },
         );
+        // Track active policy per insured so on_insured_loss(None) can resolve it.
+        self.insured_active_policies.insert(insured_id, policy_id);
         policy_id
     }
 
@@ -390,16 +420,21 @@ impl Market {
         self.peril_territory_index.retain(|_, ids| !ids.is_empty());
 
         self.policies.retain(|_, p| p.bound_year != year);
+
+        // Clear the insured → active_policy map for expired policies.
+        self.insured_active_policies.retain(|_, pid| !expired.contains(pid));
     }
 
-    /// Distribute a loss event to all matching bound policies.
+    /// Distribute a loss event to all matching bound policies and exposed-but-uninsured insureds.
     ///
-    /// For each policy that covers `peril` in `region`, samples a damage fraction
-    /// from `damage_models` and computes:
-    ///   `ground_up_loss = damage_fraction × sum_insured` (naturally ≤ sum_insured).
+    /// **First pass** — for each bound policy covering `peril` in `region`: samples a damage
+    /// fraction and emits `InsuredLoss { policy_id: Some(...) }`.
     ///
-    /// Emits one `InsuredLoss` per matching policy. The caller dispatches each
-    /// `InsuredLoss` to `on_insured_loss` to produce `ClaimSettled` events.
+    /// **Second pass** — for each insured registered in `insured_exposure_index` for
+    /// `(region, peril)` that was NOT already covered by a bound policy: samples a damage
+    /// fraction and emits `InsuredLoss { policy_id: None }`.
+    ///
+    /// Returns an empty vec when no damage model exists for the peril.
     pub fn on_loss_event(
         &self,
         day: Day,
@@ -408,31 +443,54 @@ impl Market {
         damage_models: &HashMap<Peril, DamageFractionModel>,
         rng: &mut impl Rng,
     ) -> Vec<(Day, Event)> {
-        let Some(ids) = self.peril_territory_index.get(&(region.to_string(), peril)) else {
-            return vec![];
-        };
-
         let Some(model) = damage_models.get(&peril) else {
             return vec![];
         };
 
-        ids.iter()
-            .map(|policy_id| {
+        let mut out = Vec::new();
+        let mut covered_insureds: HashSet<InsuredId> = HashSet::new();
+
+        // First pass: emit InsuredLoss(Some) for each bound policy matching (region, peril).
+        if let Some(ids) = self.peril_territory_index.get(&(region.to_string(), peril)) {
+            for policy_id in ids {
                 let policy = &self.policies[policy_id];
                 let damage_fraction = model.sample(rng);
                 // ground_up_loss ≤ sum_insured because damage_fraction ∈ [0, 1].
                 let ground_up_loss = (damage_fraction * policy.risk.sum_insured as f64) as u64;
-                (
+                covered_insureds.insert(policy.insured_id);
+                out.push((
                     day,
                     Event::InsuredLoss {
-                        policy_id: *policy_id,
+                        policy_id: Some(*policy_id),
                         insured_id: policy.insured_id,
                         peril,
                         ground_up_loss,
                     },
-                )
-            })
-            .collect()
+                ));
+            }
+        }
+
+        // Second pass: emit InsuredLoss(None) for exposed-but-uninsured insureds.
+        if let Some(exposures) = self.insured_exposure_index.get(&(region.to_string(), peril)) {
+            for &(insured_id, sum_insured) in exposures {
+                if covered_insureds.contains(&insured_id) {
+                    continue;
+                }
+                let damage_fraction = model.sample(rng);
+                let ground_up_loss = (damage_fraction * sum_insured as f64) as u64;
+                out.push((
+                    day,
+                    Event::InsuredLoss {
+                        policy_id: None,
+                        insured_id,
+                        peril,
+                        ground_up_loss,
+                    },
+                ));
+            }
+        }
+
+        out
     }
 
     /// Apply policy terms to a ground-up loss and emit `ClaimSettled` events.
@@ -441,15 +499,27 @@ impl Market {
     ///   `gross = min(ground_up_loss, limit)`
     ///   `net   = gross − attachment`
     ///
+    /// When `policy_id` is `None`, the effective policy is resolved from
+    /// `insured_active_policies[insured_id]`. If no active policy is found, no
+    /// events are emitted (the insured bears the loss uninsured).
+    ///
     /// Emits one `ClaimSettled` per panel entry. Policies whose net loss is zero
-    /// (ground_up_loss ≤ attachment, or policy not found) produce no events.
+    /// (ground_up_loss ≤ attachment, or no active policy) produce no events.
     pub fn on_insured_loss(
         &self,
         day: Day,
-        policy_id: PolicyId,
+        policy_id: Option<PolicyId>,
+        insured_id: InsuredId,
         ground_up_loss: u64,
     ) -> Vec<(Day, Event)> {
-        let Some(policy) = self.policies.get(&policy_id) else {
+        let effective_pid = match policy_id {
+            Some(pid) => pid,
+            None => match self.insured_active_policies.get(&insured_id) {
+                Some(&pid) => pid,
+                None => return vec![], // uninsured: bear loss without claim
+            },
+        };
+        let Some(policy) = self.policies.get(&effective_pid) else {
             return vec![];
         };
         let gross = ground_up_loss.min(policy.risk.limit);
@@ -469,7 +539,7 @@ impl Market {
                 Some((
                     day,
                     Event::ClaimSettled {
-                        policy_id,
+                        policy_id: effective_pid,
                         syndicate_id: entry.syndicate_id,
                         amount: syndicate_loss,
                     },
@@ -527,7 +597,7 @@ mod tests {
         }, Year(1));
 
         // ground_up_loss (50_000) < attachment (100_000) → net = 0
-        let events = market.on_insured_loss(Day(0), PolicyId(0), 50_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 50_000);
         assert!(
             events.is_empty(),
             "expected no ClaimSettled when ground_up_loss <= attachment, got {events:?}"
@@ -549,7 +619,7 @@ mod tests {
 
         // ground_up_loss = sum_insured = 2_000_000 → gross = min(2M, 1M) = 1M
         // net = 1M - 100K = 900K
-        let events = market.on_insured_loss(Day(0), PolicyId(0), 2_000_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 2_000_000);
         let amount = events.iter().find_map(|(_, e)| match e {
             Event::ClaimSettled { amount, .. } => Some(*amount),
             _ => None,
@@ -582,7 +652,7 @@ mod tests {
 
         // ground_up_loss = 800_000; gross = min(800K, 1M) = 800K; net = 800K - 100K = 700K
         // s1 = 700K * 6000/10000 = 420K; s2 = 700K * 4000/10000 = 280K
-        let events = market.on_insured_loss(Day(0), PolicyId(0), 800_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 800_000);
 
         let find = |sid: SyndicateId| {
             events
@@ -834,7 +904,7 @@ mod tests {
             Year(1),
         );
         // ground_up_loss (50_000) < attachment (100_000) → net_loss = 0
-        let events = market.on_insured_loss(Day(0), PolicyId(0), 50_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 50_000);
         assert!(
             events.is_empty(),
             "expected no ClaimSettled when ground_up_loss <= attachment, got {events:?}"
@@ -853,7 +923,7 @@ mod tests {
         );
         // ground_up = 5_000_000 > limit 1_000_000
         // gross = 1_000_000; net = 900_000; amount = 900_000
-        let events = market.on_insured_loss(Day(0), PolicyId(0), 5_000_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 5_000_000);
         let amount = events.iter().find_map(|(_, e)| match e {
             Event::ClaimSettled { syndicate_id, amount, .. } if *syndicate_id == SyndicateId(1) => Some(*amount),
             _ => None,
@@ -877,7 +947,7 @@ mod tests {
             Year(1),
         );
         // ground_up = 600_000; gross = 600_000; net = 600_000 - 100_000 = 500_000
-        let events = market.on_insured_loss(Day(0), PolicyId(0), 600_000);
+        let events = market.on_insured_loss(Day(0), Some(PolicyId(0)), InsuredId(0), 600_000);
         let net_loss = 500_000u64;
 
         let find = |sid: SyndicateId| {
@@ -971,12 +1041,12 @@ mod tests {
 
         let mut claim_count = 0;
         for (_, e) in &insured_events {
-            if let Event::InsuredLoss { policy_id, ground_up_loss, .. } = e {
-                let claims = market.on_insured_loss(Day(1), *policy_id, *ground_up_loss);
+            if let Event::InsuredLoss { policy_id, insured_id, ground_up_loss, .. } = e {
+                let claims = market.on_insured_loss(Day(1), *policy_id, *insured_id, *ground_up_loss);
                 claim_count += claims.len();
                 for (_, ce) in &claims {
                     if let Event::ClaimSettled { amount, .. } = ce {
-                        let expected = (sum_insured.min(limit) - attachment);
+                        let expected = sum_insured.min(limit) - attachment;
                         assert_eq!(*amount, expected, "wrong claim amount");
                     }
                 }
@@ -1028,8 +1098,8 @@ mod tests {
         let mut claim_a = None;
         let mut claim_b = None;
         for (_, e) in &insured_events {
-            if let Event::InsuredLoss { policy_id, ground_up_loss, .. } = e {
-                let claims = market.on_insured_loss(Day(0), *policy_id, *ground_up_loss);
+            if let Event::InsuredLoss { policy_id, insured_id, ground_up_loss, .. } = e {
+                let claims = market.on_insured_loss(Day(0), *policy_id, *insured_id, *ground_up_loss);
                 for (_, ce) in claims {
                     if let Event::ClaimSettled { syndicate_id, amount, .. } = ce {
                         if syndicate_id == SyndicateId(1) { claim_a = Some(amount); }
@@ -1074,8 +1144,8 @@ mod tests {
         // Only year-2 policy (Syn 2) should be hit.
         let mut hit_syndicates: Vec<u64> = vec![];
         for (_, e) in &insured_events {
-            if let Event::InsuredLoss { policy_id, ground_up_loss, .. } = e {
-                let claims = market.on_insured_loss(Day(360), *policy_id, *ground_up_loss);
+            if let Event::InsuredLoss { policy_id, insured_id, ground_up_loss, .. } = e {
+                let claims = market.on_insured_loss(Day(360), *policy_id, *insured_id, *ground_up_loss);
                 for (_, ce) in claims {
                     if let Event::ClaimSettled { syndicate_id, .. } = ce {
                         hit_syndicates.push(syndicate_id.0);
@@ -1085,5 +1155,122 @@ mod tests {
         }
         assert!(hit_syndicates.contains(&2), "year-2 policy (Syn 2) should be hit");
         assert!(!hit_syndicates.contains(&1), "expired year-1 policy (Syn 1) must not be hit");
+    }
+
+    // ── insured_exposure_index and uninsured GUL tests ────────────────────────
+
+    /// register_insured populates insured_exposure_index for cat perils only.
+    #[test]
+    fn market_register_insured_populates_exposure_index() {
+        let mut market = Market::new();
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 5_000_000,
+            territory: "US-SE".to_string(),
+            limit: 2_000_000,
+            attachment: 100_000,
+            perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
+        };
+        market.register_insured(InsuredId(3), &[risk.clone()]);
+
+        let entry = market
+            .insured_exposure_index
+            .get(&("US-SE".to_string(), Peril::WindstormAtlantic))
+            .expect("WindstormAtlantic entry missing from insured_exposure_index");
+        assert_eq!(entry.len(), 1);
+        assert_eq!(entry[0], (InsuredId(3), 5_000_000));
+
+        // Attritional must NOT be indexed.
+        assert!(
+            market.insured_exposure_index.get(&("US-SE".to_string(), Peril::Attritional)).is_none(),
+            "Attritional must not appear in insured_exposure_index"
+        );
+    }
+
+    /// on_loss_event emits InsuredLoss(None) for an insured with no bound policy.
+    #[test]
+    fn on_loss_event_emits_uninsured_insured_loss_when_no_policy() {
+        let mut market = Market::new();
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 3_000_000,
+            territory: "US-SE".to_string(),
+            limit: 1_500_000,
+            attachment: 0,
+            perils_covered: vec![Peril::WindstormAtlantic],
+        };
+        market.register_insured(InsuredId(5), &[risk]);
+
+        // No policy bound — second pass should fire for InsuredId(5).
+        let events = market.on_loss_event(
+            Day(0), "US-SE", Peril::WindstormAtlantic, &full_damage_models(), &mut rng(),
+        );
+
+        assert_eq!(events.len(), 1, "expected one InsuredLoss for uninsured insured");
+        match &events[0].1 {
+            Event::InsuredLoss { policy_id, insured_id, .. } => {
+                assert_eq!(*policy_id, None, "uninsured InsuredLoss must have policy_id: None");
+                assert_eq!(*insured_id, InsuredId(5));
+            }
+            e => panic!("expected InsuredLoss, got {e:?}"),
+        }
+    }
+
+    /// on_insured_loss(None, insured_id) settles a claim when an active policy exists.
+    #[test]
+    fn on_insured_loss_none_policy_id_with_active_policy_settles_claim() {
+        let mut market = Market::new();
+        // Bind policy: insured_id defaults to InsuredId(0) from empty insured_cache.
+        market.on_policy_bound(SubmissionId(1), make_risk(), Panel {
+            entries: vec![PanelEntry { syndicate_id: SyndicateId(1), share_bps: 10_000, premium: 0 }],
+        }, Year(1));
+        // After on_policy_bound, insured_active_policies[InsuredId(0)] = PolicyId(0).
+
+        // loss above attachment (100_000): should settle
+        let events = market.on_insured_loss(Day(0), None, InsuredId(0), 500_000);
+        assert!(!events.is_empty(), "expected ClaimSettled when active policy exists");
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::ClaimSettled { .. })));
+    }
+
+    /// on_insured_loss(None, insured_id) produces no events when no active policy.
+    #[test]
+    fn on_insured_loss_none_policy_id_without_active_policy_produces_no_claim() {
+        let market = Market::new();
+        // No policy bound — uninsured.
+        let events = market.on_insured_loss(Day(0), None, InsuredId(99), 1_000_000);
+        assert!(events.is_empty(), "expected no events for uninsured insured");
+    }
+
+    /// on_policy_bound populates insured_active_policies.
+    #[test]
+    fn on_policy_bound_populates_insured_active_policies() {
+        let mut market = Market::new();
+        market.on_policy_bound(SubmissionId(1), make_risk(), Panel {
+            entries: vec![PanelEntry { syndicate_id: SyndicateId(1), share_bps: 10_000, premium: 0 }],
+        }, Year(1));
+        // insured_id defaults to InsuredId(0) from empty insured_cache.
+        assert_eq!(
+            market.insured_active_policies.get(&InsuredId(0)),
+            Some(&PolicyId(0)),
+            "insured_active_policies should map InsuredId(0) → PolicyId(0)"
+        );
+    }
+
+    /// expire_policies clears insured_active_policies for the expired year.
+    #[test]
+    fn expire_policies_clears_insured_active_policies() {
+        let mut market = Market::new();
+        market.on_policy_bound(SubmissionId(1), make_risk(), Panel {
+            entries: vec![PanelEntry { syndicate_id: SyndicateId(1), share_bps: 10_000, premium: 0 }],
+        }, Year(1));
+
+        assert!(market.insured_active_policies.contains_key(&InsuredId(0)));
+
+        market.expire_policies(Year(1));
+
+        assert!(
+            market.insured_active_policies.is_empty(),
+            "insured_active_policies must be cleared after policy expiry"
+        );
     }
 }
