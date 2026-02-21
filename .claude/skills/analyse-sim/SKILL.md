@@ -12,16 +12,19 @@ Follow these steps exactly. Do not skip regeneration.
 Run `cargo run` in /Users/sam/Projects/rins to produce a fresh events.ndjson.
 Report any build or runtime errors and stop if the run fails.
 
-## Step 2 — Analyse
+## Step 2 — Analyse and verify
 
 From /Users/sam/Projects/rins, run:
 
 ```
 python3 scripts/analyse_sim.py
 python3 scripts/verify_claims.py
+python3 scripts/verify_insolvency.py
+python3 scripts/verify_panel_integrity.py
+python3 scripts/verify_quoting_flow.py
 ```
 
-Report any FAIL lines from `verify_claims.py` before the Step 3 analysis.
+Report any FAIL lines from each verifier before the Step 3 analysis.
 
 ## Step 3 — Report
 
