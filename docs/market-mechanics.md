@@ -142,30 +142,80 @@ This section describes the institutional backstop that handles insolvent syndica
 
 ## 8. Loss Event Mechanics
 
-Losses fall into two structurally distinct classes. Each has different correlation properties across syndicates and different implications for capital and cycle dynamics.
+Insurance is risk transfer: an Insured holds assets with economic value; a peril event converts some of that value into a loss; a policy transfers a defined tranche of that loss to the market. Three conceptual layers govern every claim:
 
-### Attritional losses
+| Layer | What it represents | Quantity |
+|---|---|---|
+| Asset value | Total economic value exposed to a peril | `sum_insured` |
+| Ground-up loss (GUL) | Physical damage, independent of insurance | `damage_fraction × sum_insured` |
+| Insured loss | Market's share after policy terms | `min(GUL, limit) − attachment` |
 
-- Arise from individual policy claims — fire, theft, liability, etc. — statistically independent across policies.
-- A policy may generate zero or more claims over its term. Frequency and severity vary by line of business; both are calibration inputs.
-- Claims are distributed to subscribing syndicates proportional to their line shares and reduce capital immediately.
+The GUL is a real-world fact. The insured loss is the contractual consequence. Tracking them separately enables experience rating, validates that policy terms are applied correctly, and makes visible how much damage an insured absorbs versus how much the market absorbs.
 
-### Catastrophe losses
+### §8.1 Asset-value model
 
-- Arise from events that simultaneously affect all policies with exposure in the relevant region-peril (hurricane, earthquake, flood, etc.).
-- Each affected policy's loss is proportional to its contribution to total regional exposure, capped at its policy limit.
-- Losses are correlated across syndicates not by design but because brokers route similar risks to similar panels (§3, §4) — the cross-syndicate exposure overlap is an emergent property of the placement network.
-- The simultaneous capital impact is the mechanism behind catastrophe-amplified capital crises (phenomena.md §2). *[TBD: severity distribution — heavy-tailed, but exact form and parameters are calibration work.]*
+Each Insured holds one or more risks, each with a `sum_insured` representing the total exposed asset value for a given peril and territory. When a peril event fires, a damage fraction ∈ [0, 1] is sampled for each affected policy:
 
-### Claims payment and knock-on effects
+```
+GUL = damage_fraction × sum_insured
+```
 
-- Capital depletion below the solvency floor triggers §5 insolvency processing.
-- Syndicate non-performance following a loss (late settlement, dispute) feeds back into broker relationship scores (§4).
+GUL ≤ sum_insured is a hard invariant: a peril event cannot destroy more value than exists. The GUL is emitted as an `InsuredLoss` event and accumulated by the Insured agent, giving a ground-up view of physical damage before policy terms are applied.
 
-### Actuarial feedback (closing the §1 loop)
+### §8.2 Policy terms — layer mechanics
 
-- Each loss updates the syndicate's accumulated loss experience and revises its actuarial estimate — the primary input to §1.
-- Syndicates learn from the full loss on a policy, not their proportional share. All syndicates on the same risk therefore converge toward the same long-run estimate regardless of line size. This is a structural rule, not a calibration choice.
+The policy covers the layer [attachment, attachment + limit]:
+
+```
+gross = min(GUL, limit)
+net   = gross − attachment   →  insured loss (0 if GUL ≤ attachment)
+```
+
+The insured retains losses below the attachment (the deductible) and losses above attachment + limit (the uncovered excess). The market's obligation is exactly the net amount.
+
+**Panel splitting:** the net insured loss is pro-rated by each syndicate's share of the risk (expressed in basis points). Each panel entry receives a separate `ClaimSettled` event. The sum of all `ClaimSettled` amounts equals the net insured loss, up to integer rounding no larger than the panel size.
+
+Capital depletion below the solvency floor triggers insolvency processing (§6). Syndicate non-performance following a loss feeds back into broker relationship scores (§5).
+
+### §8.3 Attritional loss class
+
+Attritional losses model the background rate of independent small losses: slips, minor fires, everyday property damage. They are statistically independent across policies — no shared triggering event.
+
+**Mechanics:**
+- At `PolicyBound`, a per-policy Poisson scheduler samples the expected number of attritional claims for the year and schedules each individual occurrence as a future `InsuredLoss` event, spread across the policy year.
+- Each occurrence draws an independent damage fraction from the attritional distribution; small fractions (order of a few percent) are expected in every policy year.
+- Attritional `InsuredLoss` events have no `LossEvent` ancestor. They enter the loss cascade at the `InsuredLoss` stage and follow the same policy-terms path (§8.2) from that point.
+
+**Correlation properties:** attritional losses are uncorrelated across policies and across syndicates. A bad attritional year for one syndicate carries no information about other syndicates' experience.
+
+### §8.4 Catastrophe loss class
+
+A catastrophe event is a single physical occurrence — hurricane, earthquake, flood — that simultaneously affects all assets exposed in its region.
+
+**Mechanics:**
+- Cat events are Poisson-scheduled globally at `SimulationStart`, with frequency calibrated to return-period targets. No severity field is carried on the `LossEvent`; severity is determined per-policy at fire time.
+- When a `LossEvent` fires, the coordinator fans it out to all active policies in the matching (region, peril) index. Each affected policy draws an independent damage fraction from the peril's `DamageFractionModel` (LogNormal or Pareto, clipped to [0, 1]).
+- Each affected policy produces one `InsuredLoss` event, which then follows the standard policy-terms path (§8.2).
+
+**Correlation mechanism:** spatial correlation within a single cat event is represented by the *shared occurrence*, not by correlating damage fractions across policies. Every syndicate writing risks in the struck region is hit in the same event year; the severity per policy is still independent. Diversification across perils and territories reduces cat exposure; diversification within a single territory does not. This is the mechanism behind catastrophe-amplified capital crises (phenomena.md §2).
+
+**Cross-syndicate correlation** is not hardcoded: it is an emergent property of broker routing. Because brokers channel similar risks to similar panels (§§3–5), syndicates accumulate overlapping regional books, and a single cat event strikes many of them simultaneously.
+
+### §8.5 Actuarial feedback (closing the §1 loop)
+
+Each loss updates the syndicate's accumulated loss experience and revises its actuarial estimate — the primary input to §1.
+
+Syndicates learn from the full loss on a policy, not their proportional share. All syndicates on the same risk therefore converge toward the same long-run estimate regardless of line size. This is a structural rule, not a calibration choice.
+
+### §8.6 Invariants
+
+The following invariants hold in every simulation run:
+
+1. **GUL ≤ sum_insured** — damage fraction is clipped to [0, 1] before multiplication.
+2. **Insured loss = 0 if GUL ≤ attachment** — below-deductible losses produce no `ClaimSettled`.
+3. **Insured loss ≤ limit** — the policy cap is enforced in `on_insured_loss`.
+4. **Sum of `ClaimSettled` amounts = insured loss** — up to integer rounding ≤ panel size.
+5. **Expired policies cannot generate claims** — removed from the peril-territory index at year-end before the next year's events are processed.
 
 ---
 
