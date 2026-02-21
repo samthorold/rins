@@ -12,6 +12,20 @@ events = [json.loads(l) for l in Path("events.ndjson").read_text().splitlines() 
 
 def year(day): return day // 360 + 1
 def etype(e): return next(iter(e['event'])) if isinstance(e['event'], dict) else e['event']
+def loss_type(peril): return 'Attritional' if peril == 'Attritional' else 'Cat'
+
+# Pre-pass: classify each (day, policy_id) as 'Attritional' or 'Cat'
+# Cat wins when both fire on the same day (rare but possible).
+_il_perils: dict[tuple, set] = collections.defaultdict(set)
+for e in events:
+    ev = e['event']
+    if isinstance(ev, dict) and 'InsuredLoss' in ev:
+        v = ev['InsuredLoss']
+        _il_perils[(e['day'], v['policy_id'])].add(v['peril'])
+il_type: dict[tuple, str] = {
+    k: ('Attritional' if ps == {'Attritional'} else 'Cat')
+    for k, ps in _il_perils.items()
+}
 
 # --- event type counts ---
 type_counts = collections.Counter(etype(e) for e in events)
@@ -25,7 +39,11 @@ premiums      = collections.defaultdict(lambda: collections.defaultdict(int))  #
 loss_counts   = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> (peril,region) -> count
 insured_losses= collections.defaultdict(lambda: collections.defaultdict(int))  # year -> peril -> total GUL
 insured_gul   = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insured_id -> total GUL
+insured_gul_split = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(int)))  # year -> insured_id -> type -> GUL
+gul_split     = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> type -> GUL
 claims        = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> syn_id -> sum
+claims_split  = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> type -> amount
+claims_split_syn = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(int)))  # year -> syn_id -> type -> amount
 
 # lead/follower quoting funnel
 lead_req      = collections.Counter()   # year -> count
@@ -76,8 +94,14 @@ for e in events:
     elif k == 'InsuredLoss':
         insured_losses[y][v['peril']] += v['ground_up_loss']
         insured_gul[y][v['insured_id']] += v['ground_up_loss']
+        lt = loss_type(v['peril'])
+        gul_split[y][lt] += v['ground_up_loss']
+        insured_gul_split[y][v['insured_id']][lt] += v['ground_up_loss']
     elif k == 'ClaimSettled':
         claims[y][v['syndicate_id']] += v['amount']
+        ct = il_type.get((d, v['policy_id']), 'Unknown')
+        claims_split[y][ct] += v['amount']
+        claims_split_syn[y][v['syndicate_id']][ct] += v['amount']
     elif k == 'SyndicateEntered':
         entries[y] += 1
     elif k == 'SyndicateInsolvency':
@@ -116,6 +140,16 @@ for p in all_il_perils:
     row = f"  {p:<22}" + "".join(f"  Y{y}:{insured_losses[y].get(p,0):>14}" for y in years)
     print(row)
 
+print("\n=== GUL split: Attritional vs Cat per year ===")
+print(f"{'Year':>4}  {'AttrGUL':>16}  {'CatGUL':>16}  {'TotalGUL':>16}  {'Attr%':>6}  {'Cat%':>6}")
+for y in years:
+    ag = gul_split[y].get('Attritional', 0)
+    cg = gul_split[y].get('Cat', 0)
+    tg = ag + cg
+    ap = f"{100*ag/tg:.1f}" if tg else "-"
+    cp = f"{100*cg/tg:.1f}" if tg else "-"
+    print(f"  {y:>2}    {ag:>16}  {cg:>16}  {tg:>16}  {ap:>6}  {cp:>6}")
+
 print("\n=== Insured GUL summary per year ===")
 print(f"{'Year':>4}  {'Insureds':>8}  {'TotalGUL':>16}  {'TopInsured':>10}  {'TopGUL':>16}  {'Top%':>6}  {'GUL-HHI':>8}")
 for y in years:
@@ -148,6 +182,16 @@ for ins_id in top_insureds:
     row = f"  {ins_id:>10}" + "".join(f"  {insured_gul[y].get(ins_id,0):>16}" for y in years)
     print(row)
 
+print("\n=== Per-insured Attritional vs Cat GUL (top 10, all years) ===")
+print(f"  {'InsuredId':>10}  {'AttrGUL':>16}  {'CatGUL':>16}  {'Attr%':>6}  {'Cat%':>6}")
+for ins_id in top_insureds:
+    ag = sum(insured_gul_split[y][ins_id].get('Attritional', 0) for y in years)
+    cg = sum(insured_gul_split[y][ins_id].get('Cat', 0) for y in years)
+    tg = ag + cg
+    ap = f"{100*ag/tg:.1f}" if tg else "-"
+    cp = f"{100*cg/tg:.1f}" if tg else "-"
+    print(f"  {ins_id:>10}  {ag:>16}  {cg:>16}  {ap:>6}  {cp:>6}")
+
 print("\n=== Claims settled by syndicate per year (pence) ===")
 all_csyn = sorted({s for yy in claims.values() for s in yy})
 hdr2 = f"{'Year':>4}" + "".join(f"  Syn{s:>2}" for s in all_csyn)
@@ -155,6 +199,18 @@ print(hdr2)
 for y in years:
     row2 = f"  {y:>2}" + "".join(f"  {claims[y].get(s,0):>9}" for s in all_csyn)
     print(row2)
+
+print("\n=== Claims split: Attritional vs Cat per year ===")
+print(f"{'Year':>4}  {'AttrClaims':>16}  {'CatClaims':>16}  {'TotalClaims':>16}  {'Attr%':>6}  {'Cat%':>6}")
+for y in years:
+    ac = claims_split[y].get('Attritional', 0)
+    cc = claims_split[y].get('Cat', 0)
+    uc = claims_split[y].get('Unknown', 0)
+    tc = ac + cc + uc
+    ap = f"{100*ac/tc:.1f}" if tc else "-"
+    cp = f"{100*cc/tc:.1f}" if tc else "-"
+    suffix = f"  (unknown={uc})" if uc else ""
+    print(f"  {y:>2}    {ac:>16}  {cc:>16}  {tc:>16}  {ap:>6}  {cp:>6}{suffix}")
 
 print("\n=== Lead vs follower quoting funnel ===")
 print(f"{'Year':>4}  {'LdReq':>6}  {'LdIss':>6}  {'LdDec':>6}  {'LdConv%':>8}  |  {'FlReq':>6}  {'FlIss':>6}  {'FlDec':>6}  {'FlConv%':>8}")
@@ -190,6 +246,17 @@ for y in years:
 if flagged:
     print()
     for w in flagged: print(w)
+
+print("\n=== Market-level Attritional vs Cat loss ratio per year ===")
+print(f"  (claims / total bound premium for all syndicates combined)")
+print(f"{'Year':>4}  {'TotalPrem':>16}  {'AttrClaims':>14}  {'AttrLR%':>8}  {'CatClaims':>14}  {'CatLR%':>8}")
+for y in years:
+    total_prem = sum(bound_premiums[y].values())
+    ac = claims_split[y].get('Attritional', 0)
+    cc = claims_split[y].get('Cat', 0)
+    alr = f"{100*ac/total_prem:.1f}" if total_prem else "-"
+    clr = f"{100*cc/total_prem:.1f}" if total_prem else "-"
+    print(f"  {y:>2}    {total_prem:>16}  {ac:>14}  {alr:>8}  {cc:>14}  {clr:>8}")
 
 print("\n=== Syndicate capacity (entries / insolvencies / active) ===")
 print(f"{'Year':>4}  {'Entered':>7}  {'Insolvent':>9}  {'ActiveEoY':>9}")

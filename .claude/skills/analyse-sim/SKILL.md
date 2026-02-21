@@ -44,4 +44,11 @@ Present the analysis output with brief interpretation:
 - Note the count of distinct insureds generating losses each year; a shrinking count in later years may indicate capacity withdrawal or portfolio narrowing
 - Compare year-over-year GUL per insured to identify whether loss growth is broad-based or concentrated in repeat high-loss names
 
+**Attritional vs Cat splits:**
+- Comment on the GUL split: attritional typically dominates (>70%) in benign years; a rising Cat% signals an active cat year
+- Flag Y3-style mixed years where cat GUL approaches or exceeds attritional — these stress the market differently
+- In the per-insured split, flag insureds that are 100% attritional (pure frequency risk) vs those with significant cat exposure (tail risk); mixed insureds like 102 or 303 are the ones most likely to destabilise syndicates in bad cat years
+- In the market-level LR split, comment on whether the combined LR is driven by attritional drift (high AttrLR% in quiet cat years) or cat spikes (high CatLR% in event years) — both paths to syndicate stress have different policy implications
+- Note if cat claims as a share of total claims is rising over time — could indicate adverse portfolio selection or under-priced cat risk
+
 - Suggest one follow-up question or area to investigate based on the data
