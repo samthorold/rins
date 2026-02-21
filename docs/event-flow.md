@@ -12,7 +12,7 @@ flowchart TD
     LE["**LossEvent**\n{event_id, region, peril, severity}"]
     SS_NEXT["**SimulationStart**\n{year_start: N+1}"]
 
-    SS -->|"Broker.generate_submissions()\n→ spread over first 30 days"| SA
+    SS -->|"Broker.generate_submissions()\n→ spread over first 180 days"| SA
     SS -->|"perils::schedule_loss_events\nPoisson(λ) per PerilConfig\n(cat + attritional)"| LE
     SS -->|"schedule day 365"| YE
 
@@ -23,9 +23,10 @@ flowchart TD
     end
 
     subgraph Market["Market (Coordinator)"]
-        QR_L["**QuoteRequested**\n{is_lead: true}"]
-        QR_F["**QuoteRequested**\n{is_lead: false}\n+1 day"]
-        PB["**PolicyBound**\n{submission_id, panel}\n+2 days"]
+        QR_L["**QuoteRequested**\n{is_lead: true}\n+2 days"]
+        QR_F["**QuoteRequested**\n{is_lead: false}\n+3 days"]
+        PB["**PolicyBound**\n{submission_id, panel}\n+5 days"]
+        ABANDON_EVENT["**SubmissionAbandoned**\n{submission_id}\n(log only)"]
         LE_D["on_loss_event\nmatches territory + peril\napplies attachment/limit"]
         STATS["compute_year_stats\n→ industry_loss_ratio\n→ YTD reset\n→ expire year policies"]
     end
@@ -43,7 +44,7 @@ flowchart TD
     QR_L --> QI_L
     QR_L --> QD_L
     QI_L -->|"record lead premium\ninvite all other syndicates"| QR_F
-    QD_L -->|"no followers if lead declines\n(submission abandoned)"| ABANDON(["submission abandoned\n(silent)"])
+    QD_L -->|"lead declined → emit SubmissionAbandoned\n(no followers invited)"| ABANDON_EVENT
     QR_F --> QI_F
     QR_F --> QD_F
     QI_F -->|"all followers responded"| PB
@@ -89,20 +90,23 @@ flowchart TD
 | 1 | `SimulationStart` | `handle_year_end` / external seed | `Simulation::handle_simulation_start` |
 | 2 | `YearEnd` | `handle_simulation_start` | `Simulation::dispatch` → `Market::compute_year_stats`, `Syndicate::on_year_end`, `Broker::on_year_end`, `Market::expire_policies` |
 | 3 | `SubmissionArrived` | `Broker::generate_submissions` | `Market::on_submission_arrived` |
-| 4 | `QuoteRequested` | `Market::on_submission_arrived`, `Market::on_lead_quote_issued` | `Syndicate::on_quote_requested` |
+| 4 | `QuoteRequested` | `Market::on_submission_arrived` (+2 days), `Market::on_lead_quote_issued` (+3 days) | `Syndicate::on_quote_requested` |
 | 5 | `QuoteIssued` | `Syndicate::on_quote_requested` | `Market::on_lead_quote_issued` / `Market::on_follower_quote_issued` |
 | 6 | `QuoteDeclined` | `Syndicate::on_quote_requested` | `Market::on_quote_declined` |
-| 7 | `PolicyBound` | `Market::assemble_panel` (+2 days) | `Market::on_policy_bound` (registers policy, YTD premium) |
-| 8 | `LossEvent` | `handle_simulation_start` via `perils::schedule_loss_events` (Poisson frequency-severity) | `Market::on_loss_event` |
-| 9 | `ClaimSettled` | `Market::on_loss_event` | `Syndicate::on_claim_settled` + `Market::on_claim_settled` (YTD) |
-| 10 | `SyndicateEntered` | — | no-op |
-| 11 | `SyndicateInsolvency` | `Syndicate::on_claim_settled` (when capital < solvency floor) | `Simulation::dispatch` → sets `syndicate.is_active = false` |
+| 7 | `SubmissionAbandoned` | `Market::on_quote_declined` (when lead declines) | none (log only) |
+| 8 | `PolicyBound` | `Market::assemble_panel` (+5 days from last follower response) | `Market::on_policy_bound` (registers policy, YTD premium) |
+| 9 | `LossEvent` | `handle_simulation_start` via `perils::schedule_loss_events` (Poisson frequency-severity) | `Market::on_loss_event` |
+| 10 | `ClaimSettled` | `Market::on_loss_event` | `Syndicate::on_claim_settled` + `Market::on_claim_settled` (YTD) |
+| 11 | `SyndicateEntered` | — | no-op |
+| 12 | `SyndicateInsolvency` | `Syndicate::on_claim_settled` (when capital < solvency floor) | `Simulation::dispatch` → sets `syndicate.is_active = false` |
 
 ## Day offsets
 
-- `SubmissionArrived` → `QuoteRequested` (lead): **same day**
-- Lead `QuoteIssued` → `QuoteRequested` (followers): **+1 day**
-- Last follower response → `PolicyBound`: **+2 days**
+- `SubmissionArrived` → `QuoteRequested` (lead): **+2 days**
+- Lead `QuoteIssued` → `QuoteRequested` (followers): **+3 days**
+- Last follower response → `PolicyBound`: **+5 days**
+- Total submission-to-bind cycle: **~10 days**
+- `SubmissionArrived` spread: **first 180 days** of each year (~4–5 submissions/day)
 - `LossEvent` → `ClaimSettled`: **same day**
 - `SimulationStart` → `YearEnd`: **day 365 of that year**
 - `YearEnd` → next `SimulationStart`: **day 1 of next year**

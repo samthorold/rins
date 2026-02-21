@@ -182,7 +182,7 @@ impl Simulation {
                 };
                 // Find the targeted syndicate and ask it to quote.
                 let benchmark = self.current_industry_benchmark;
-                let n_active = self.syndicates.iter().filter(|s| s.is_active).count();
+                let n_eligible = self.syndicates.iter().filter(|s| s.is_eligible_for_risk(&risk)).count();
                 if let Some(syn) = self.syndicates.iter_mut().find(|s| s.id == syndicate_id) {
                     let (d, e) = syn.on_quote_requested(
                         day,
@@ -191,7 +191,7 @@ impl Simulation {
                         is_lead,
                         lead_premium,
                         benchmark,
-                        n_active,
+                        n_eligible,
                     );
                     self.schedule(d, e);
                 }
@@ -233,6 +233,9 @@ impl Simulation {
                     self.schedule(d, e);
                 }
             }
+            Event::SubmissionAbandoned { .. } => {
+                // Paper trail only; no syndicate state to update.
+            }
             Event::PolicyBound {
                 submission_id,
                 panel,
@@ -249,7 +252,7 @@ impl Simulation {
                         if let Some(s) =
                             self.syndicates.iter_mut().find(|s| s.id == syn_id)
                         {
-                            s.on_policy_bound_as_panelist(premium);
+                            s.on_policy_bound_as_panelist(submission_id, premium);
                         }
                     }
                 }

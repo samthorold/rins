@@ -71,10 +71,10 @@ pub struct Syndicate {
     pub initial_capital: u64,
     pub is_active: bool,
     pub aggregate_written_premium: u64,
-    /// Premium reserved for in-flight quotes that have been issued but not yet bound.
-    /// Added at QuoteIssued time (by expected panel share), released at PolicyBound time.
-    /// Prevents over-commitment when many submissions are quoted on the same simulation day.
-    pub reserved_premium: u64,
+    /// Per-submission premium reserved for in-flight quotes that have been issued but not yet bound.
+    /// Keyed by SubmissionId; value = atp/n_eligible for that quote.
+    /// Released exactly at bind (on_policy_bound_as_panelist) or cleared at year-end.
+    pub quoted_exposure: HashMap<SubmissionId, u64>,
     pub solvency_floor_pct: f64,
     pub max_premium_ratio: f64,
     pub max_single_risk_pct: f64,
@@ -91,7 +91,7 @@ impl Syndicate {
             initial_capital,
             is_active: true,
             aggregate_written_premium: 0,
-            reserved_premium: 0,
+            quoted_exposure: HashMap::new(),
             solvency_floor_pct: 0.20,
             max_premium_ratio: 0.50,
             max_single_risk_pct: 0.30,
@@ -104,6 +104,16 @@ impl Syndicate {
     pub fn with_actuarial(mut self, params: ActuarialParams) -> Self {
         self.actuarial = params;
         self
+    }
+
+    /// Returns true if this syndicate is active and the risk's limit fits within
+    /// the per-risk exposure limit. Used by dispatch to compute n_eligible.
+    pub fn is_eligible_for_risk(&self, risk: &Risk) -> bool {
+        if !self.is_active {
+            return false;
+        }
+        let max_loss = (self.initial_capital as f64 * self.max_single_risk_pct) as u64;
+        risk.limit <= max_loss
     }
 
     /// Compute the Actuarial Technical Price for a risk.
@@ -188,8 +198,8 @@ impl Syndicate {
     /// Price and issue (or decline) a quote for a submission.
     /// Premium is set by the actuarial channel (ATP).
     /// `industry_benchmark` is the market-wide loss ratio from the previous year's YearStats.
-    /// `n_active_syndicates` is the number of currently active syndicates; used to estimate
-    /// the expected panel-share premium for capacity reservation.
+    /// `n_eligible` is the number of syndicates that pass the per-risk eligibility check;
+    /// used to compute the expected panel-share premium for capacity reservation.
     /// Returns QuoteDeclined if inactive or annual capacity would be breached.
     pub fn on_quote_requested(
         &mut self,
@@ -199,7 +209,7 @@ impl Syndicate {
         is_lead: bool,
         lead_premium: Option<u64>,
         industry_benchmark: f64,
-        n_active_syndicates: usize,
+        n_eligible: usize,
     ) -> (Day, Event) {
         // Belt-and-suspenders: submission filtering should exclude inactive syndicates,
         // but guard here too.
@@ -216,17 +226,18 @@ impl Syndicate {
         let atp = self.atp(risk, industry_benchmark);
 
         // Capacity check: decline if this risk would push annual premium over the cap.
-        // `reserved_premium` accounts for in-flight quotes not yet bound (prevents
-        // over-commitment when many submissions are quoted on the same simulation day).
+        // `quoted_exposure` tracks in-flight quotes not yet bound (prevents
+        // over-commitment when many submissions are quoted concurrently).
         let max_capacity = (self.initial_capital as f64 * self.max_premium_ratio) as u64;
-        if self.aggregate_written_premium + self.reserved_premium + atp > max_capacity {
+        let in_flight: u64 = self.quoted_exposure.values().sum();
+        if self.aggregate_written_premium + in_flight + atp > max_capacity {
             return (day, Event::QuoteDeclined { submission_id, syndicate_id: self.id });
         }
 
         // Reserve the expected panel-share premium for this quote.
-        // Expected share = 1/n_active (equal split across all active syndicates).
-        let n = n_active_syndicates.max(1) as u64;
-        self.reserved_premium += atp / n;
+        // Expected share = 1/n_eligible (equal split across eligible syndicates).
+        let n = n_eligible.max(1) as u64;
+        self.quoted_exposure.insert(submission_id, atp / n);
 
         // is_lead and lead_premium are inputs to the underwriter channel — deferred.
         let _ = (is_lead, lead_premium);
@@ -249,10 +260,9 @@ impl Syndicate {
     }
 
     /// Record that a policy was bound with this syndicate on the panel.
-    /// Moves the actual panel-share premium from reserved to written, maintaining the
-    /// invariant that `aggregate_written_premium + reserved_premium` tracks total commitment.
-    pub fn on_policy_bound_as_panelist(&mut self, premium: u64) {
-        self.reserved_premium = self.reserved_premium.saturating_sub(premium);
+    /// Removes the in-flight reservation for this submission and records the written premium.
+    pub fn on_policy_bound_as_panelist(&mut self, submission_id: SubmissionId, premium: u64) {
+        self.quoted_exposure.remove(&submission_id);
         self.aggregate_written_premium += premium;
     }
 
@@ -268,7 +278,7 @@ impl Syndicate {
     ) {
         // Annual policies expire at year-end; release written-premium capacity for next year.
         self.aggregate_written_premium = 0;
-        self.reserved_premium = 0;
+        self.quoted_exposure.clear();
         for (line, &loss_ratio) in line_loss_ratios {
             self.observe_line_loss_ratio(line, loss_ratio);
         }
@@ -731,13 +741,45 @@ mod tests {
 
     // ── Capacity and solvency tests ────────────────────────────────────────────
 
-    /// Verifies that reserved_premium from in-flight follower quotes prevents
-    /// over-commitment when many submissions are quoted on the same simulation day.
+    /// Verifies that quoted_exposure tracks each in-flight quote by submission ID
+    /// and that binding one quote removes it while recording written premium.
     #[test]
-    fn reserved_premium_blocks_over_commitment() {
+    fn quoted_exposure_tracks_per_submission() {
         // Syndicate with 10_000_000 capital → max_capacity = 5_000_000.
-        // Each quote with n_active=1 reserves the full ATP (~1_365_000 for make_risk(1_000_000)).
-        // After 3 quotes: reserved ≈ 4_095_000. 4th quote (≈1_365_000) must be declined.
+        // With n_eligible=3, each reservation = ATP/3. Three quotes together well under capacity.
+        let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
+        let risk = make_risk(1_000_000);
+        let day = crate::types::Day(0);
+        let benchmark = 0.65;
+
+        // Issue 3 quotes with distinct submission IDs.
+        let mut premiums = vec![];
+        for i in 1u64..=3 {
+            let (_, event) =
+                s.on_quote_requested(day, SubmissionId(i), &risk, false, None, benchmark, 3);
+            match event {
+                Event::QuoteIssued { premium, .. } => premiums.push(premium),
+                _ => panic!("expected QuoteIssued for submission {i}, got {event:?}"),
+            }
+        }
+        assert_eq!(s.quoted_exposure.len(), 3, "should track 3 in-flight quotes");
+
+        // Bind the first submission.
+        s.on_policy_bound_as_panelist(SubmissionId(1), premiums[0]);
+        assert_eq!(s.quoted_exposure.len(), 2, "binding one quote should remove it from quoted_exposure");
+        assert_eq!(
+            s.aggregate_written_premium, premiums[0],
+            "written premium should equal first policy's premium"
+        );
+    }
+
+    /// Verifies that quoted_exposure from in-flight quotes prevents over-commitment
+    /// when many submissions are quoted concurrently.
+    #[test]
+    fn quoted_exposure_blocks_over_commitment() {
+        // Syndicate with 10_000_000 capital → max_capacity = 5_000_000.
+        // Each quote with n_eligible=1 reserves the full ATP (~1_365_000 for make_risk(1_000_000)).
+        // After 3 quotes: sum(quoted_exposure) ≈ 4_095_000. 4th quote must be declined.
         let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
         let risk = make_risk(1_000_000);
         let day = crate::types::Day(0);
@@ -750,36 +792,12 @@ mod tests {
                 "quote {i} should be issued, got {event:?}"
             );
         }
-        // 4th quote should be declined due to reserved_premium.
+        // 4th quote should be declined due to quoted_exposure exhausting capacity.
         let (_, event) = s.on_quote_requested(day, SubmissionId(4), &risk, false, None, 0.65, 1);
         assert!(
             matches!(event, Event::QuoteDeclined { .. }),
-            "4th quote should be declined when reserved_premium exhausts capacity, got {event:?}"
+            "4th quote should be declined when quoted_exposure exhausts capacity, got {event:?}"
         );
-    }
-
-    /// Verifies that binding a policy releases reserved_premium, restoring capacity.
-    #[test]
-    fn policy_bound_releases_reserved_premium() {
-        let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
-        let risk = make_risk(1_000_000);
-        let day = crate::types::Day(0);
-
-        // Issue a follower quote — reserves ATP/1 in reserved_premium.
-        let (_, event) = s.on_quote_requested(day, SubmissionId(1), &risk, false, None, 0.65, 1);
-        let atp = match event {
-            Event::QuoteIssued { premium, .. } => premium,
-            _ => panic!("expected QuoteIssued"),
-        };
-        assert!(s.reserved_premium > 0, "reserved_premium should be non-zero after quote");
-
-        // Bind the policy at the full panel premium (equal to ATP when n_active=1).
-        s.on_policy_bound_as_panelist(atp);
-        // reserved_premium should be ~0 (may differ slightly due to integer division);
-        // aggregate_written_premium should equal atp.
-        assert_eq!(s.aggregate_written_premium, atp);
-        // reserved_premium released: total commitment = atp (written), not 2×atp.
-        assert_eq!(s.aggregate_written_premium + s.reserved_premium, atp);
     }
 
     #[test]
@@ -818,7 +836,7 @@ mod tests {
     #[test]
     fn policy_bound_increments_exposure() {
         let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
-        s.on_policy_bound_as_panelist(100);
+        s.on_policy_bound_as_panelist(SubmissionId(1), 100);
         assert_eq!(s.aggregate_written_premium, 100);
     }
 
@@ -826,7 +844,7 @@ mod tests {
     fn year_end_resets_exposure() {
         use rand::SeedableRng;
         let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
-        s.on_policy_bound_as_panelist(500_000);
+        s.on_policy_bound_as_panelist(SubmissionId(1), 500_000);
         assert_eq!(s.aggregate_written_premium, 500_000);
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0);
         s.on_year_end(crate::types::Year(1), &std::collections::HashMap::new(), &mut rng);

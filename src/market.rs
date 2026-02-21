@@ -155,7 +155,7 @@ impl Market {
             },
         );
         vec![(
-            day,
+            day.offset(2),
             Event::QuoteRequested {
                 submission_id,
                 syndicate_id: lead_id,
@@ -197,7 +197,7 @@ impl Market {
             .into_iter()
             .map(|follower_id| {
                 (
-                    day.offset(1),
+                    day.offset(3),
                     Event::QuoteRequested {
                         submission_id,
                         syndicate_id: follower_id,
@@ -243,7 +243,7 @@ impl Market {
         // Abandon the submission — no followers will be invited.
         if pending.lead_premium.is_none() {
             self.pending.remove(&submission_id);
-            return vec![];
+            return vec![(day, Event::SubmissionAbandoned { submission_id })];
         }
         pending.declined_count += 1;
         pending.followers_responded += 1;
@@ -292,7 +292,7 @@ impl Market {
             .collect();
 
         vec![(
-            day.offset(2),
+            day.offset(5),
             Event::PolicyBound {
                 submission_id,
                 panel: Panel { entries },

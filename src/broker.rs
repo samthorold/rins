@@ -30,7 +30,7 @@ impl Broker {
         let n = self.submissions_per_year;
         let mut events = Vec::with_capacity(n);
         for i in 0..n {
-            let offset = if n > 1 { i as u64 * 30 / n as u64 } else { 0 };
+            let offset = if n > 1 { i as u64 * 180 / n as u64 } else { 0 };
             let submission_id = SubmissionId(self.id.0 * 1_000_000 + self.next_submission_seq);
             self.next_submission_seq += 1;
             let mut risk = self.risk_catalogue[i % self.risk_catalogue.len()].clone();

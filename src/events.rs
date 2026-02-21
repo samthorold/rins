@@ -65,6 +65,9 @@ pub enum Event {
         submission_id: SubmissionId,
         syndicate_id: SyndicateId,
     },
+    SubmissionAbandoned {
+        submission_id: SubmissionId,
+    },
     PolicyBound {
         submission_id: SubmissionId,
         panel: Panel,
