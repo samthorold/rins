@@ -239,6 +239,12 @@ impl Market {
             Some(p) => p,
             None => return vec![],
         };
+        // Lead declined: lead_premium is None iff the lead has not yet quoted.
+        // Abandon the submission — no followers will be invited.
+        if pending.lead_premium.is_none() {
+            self.pending.remove(&submission_id);
+            return vec![];
+        }
         pending.declined_count += 1;
         pending.followers_responded += 1;
         if pending.followers_responded == pending.followers_invited {

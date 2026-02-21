@@ -153,7 +153,12 @@ impl Simulation {
                 broker_id,
                 risk,
             } => {
-                let available: Vec<SyndicateId> = self.syndicates.iter().map(|s| s.id).collect();
+                let available: Vec<SyndicateId> = self
+                    .syndicates
+                    .iter()
+                    .filter(|s| s.is_active)
+                    .map(|s| s.id)
+                    .collect();
                 let events = self.market.on_submission_arrived(
                     day,
                     submission_id,
@@ -201,7 +206,12 @@ impl Simulation {
                 premium,
                 is_lead,
             } => {
-                let available: Vec<SyndicateId> = self.syndicates.iter().map(|s| s.id).collect();
+                let available: Vec<SyndicateId> = self
+                    .syndicates
+                    .iter()
+                    .filter(|s| s.is_active)
+                    .map(|s| s.id)
+                    .collect();
                 let events = if is_lead {
                     self.market.on_lead_quote_issued(
                         day,
@@ -235,7 +245,17 @@ impl Simulation {
                     // Derive the policy year from the current day so that
                     // expire_policies can remove it at the correct YearEnd.
                     let year = Year((day.0 / Day::DAYS_PER_YEAR) as u32 + 1);
+                    // Collect syndicate contributions before panel is moved into market.
+                    let contributions: Vec<(SyndicateId, u64)> =
+                        panel.entries.iter().map(|e| (e.syndicate_id, e.premium)).collect();
                     self.market.on_policy_bound(submission_id, risk, panel, year);
+                    for (syn_id, premium) in contributions {
+                        if let Some(s) =
+                            self.syndicates.iter_mut().find(|s| s.id == syn_id)
+                        {
+                            s.on_policy_bound_as_panelist(premium);
+                        }
+                    }
                 }
             }
             Event::LossEvent {
@@ -255,13 +275,19 @@ impl Simulation {
                 amount,
             } => {
                 if let Some(s) = self.syndicates.iter_mut().find(|s| s.id == syndicate_id) {
-                    s.on_claim_settled(amount);
+                    if s.on_claim_settled(amount) {
+                        self.schedule(day, Event::SyndicateInsolvency { syndicate_id });
+                    }
                 }
                 // Accumulate into market YTD totals for industry loss ratio computation.
                 self.market.on_claim_settled(policy_id, amount);
             }
             Event::SyndicateEntered { syndicate_id: _ } => {}
-            Event::SyndicateInsolvency { syndicate_id: _ } => {}
+            Event::SyndicateInsolvency { syndicate_id } => {
+                if let Some(s) = self.syndicates.iter_mut().find(|s| s.id == syndicate_id) {
+                    s.is_active = false;
+                }
+            }
         }
     }
 
@@ -736,10 +762,14 @@ mod tests {
 
         let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
 
+        // Use very large capital so stochastic losses never trigger insolvency.
+        // This test is about price-response to loss history, not insolvency mechanics.
+        let large_syn = || Syndicate::new(SyndicateId(1), 100_000_000_000, 500);
+
         let build = |inject_loss: bool| {
             let mut sim = Simulation::new(42)
                 .until(Day::year_end(Year(2)))
-                .with_agents(vec![make_syndicate(1)], vec![make_broker(1, risk.clone())]);
+                .with_agents(vec![large_syn()], vec![make_broker(1, risk.clone())]);
             sim.schedule(
                 Day::year_start(Year(1)),
                 Event::SimulationStart { year_start: Year(1) },
@@ -792,9 +822,11 @@ mod tests {
         use crate::types::{LossEventId, Year};
 
         let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+        // Use very large capital so stochastic losses never trigger insolvency.
+        let large_syn = Syndicate::new(SyndicateId(1), 100_000_000_000, 500);
         let mut sim = Simulation::new(42)
             .until(Day::year_end(Year(2)))
-            .with_agents(vec![make_syndicate(1)], vec![make_broker(1, risk)]);
+            .with_agents(vec![large_syn], vec![make_broker(1, risk)]);
         sim.schedule(
             Day::year_start(Year(1)),
             Event::SimulationStart { year_start: Year(1) },
@@ -833,6 +865,90 @@ mod tests {
             p_year2 > p_year1,
             "year-2 avg lead premium ({p_year2}) should exceed year-1 ({p_year1}) after large loss"
         );
+    }
+
+    // ── Capacity and insolvency integration tests ─────────────────────────────
+
+    #[test]
+    fn insolvent_syndicate_excluded_from_submissions() {
+        use crate::events::{Panel, PanelEntry};
+        use crate::types::{BrokerId, PolicyId, SubmissionId};
+
+        // Syn 1: tiny capital so a large claim breaches the solvency floor.
+        // Syn 2: healthy capital; should remain active throughout.
+        let mut sim = Simulation::new(42);
+        sim.syndicates = vec![
+            Syndicate::new(SyndicateId(1), 1_000, 500),
+            Syndicate::new(SyndicateId(2), 50_000_000, 500),
+        ];
+
+        // Register a policy on Syn 1 so ClaimSettled resolves cleanly.
+        let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+        sim.market.on_policy_bound(
+            SubmissionId(1),
+            risk,
+            Panel {
+                entries: vec![PanelEntry {
+                    syndicate_id: SyndicateId(1),
+                    share_bps: 10_000,
+                    premium: 0,
+                }],
+            },
+            Year(1),
+        );
+
+        // A claim of 900 drops Syn 1 capital from 1_000 to 100 < floor (1_000 * 0.20 = 200).
+        sim.schedule(
+            Day(10),
+            Event::ClaimSettled {
+                policy_id: PolicyId(0),
+                syndicate_id: SyndicateId(1),
+                amount: 900,
+            },
+        );
+        // Submission arrives after insolvency has been processed.
+        sim.schedule(
+            Day(20),
+            Event::SubmissionArrived {
+                submission_id: SubmissionId(99),
+                broker_id: BrokerId(1),
+                risk: make_risk("US-SE", vec![Peril::WindstormAtlantic]),
+            },
+        );
+
+        sim.run();
+
+        // SyndicateInsolvency must appear in the log.
+        let has_insolvency = sim.log.iter().any(|e| {
+            matches!(&e.event, Event::SyndicateInsolvency { syndicate_id } if *syndicate_id == SyndicateId(1))
+        });
+        assert!(has_insolvency, "expected SyndicateInsolvency in log");
+
+        // Syn 1 must be inactive.
+        let syn1 = sim.syndicates.iter().find(|s| s.id == SyndicateId(1)).unwrap();
+        assert!(!syn1.is_active, "Syn 1 should be inactive after insolvency");
+
+        // No QuoteRequested should reach Syn 1 after day 10.
+        let bad = sim.log.iter().any(|e| {
+            e.day.0 >= 20
+                && matches!(&e.event, Event::QuoteRequested { syndicate_id, .. } if *syndicate_id == SyndicateId(1))
+        });
+        assert!(!bad, "insolvent Syn 1 must not receive QuoteRequested");
+    }
+
+    #[test]
+    fn quote_declined_in_log_when_at_capacity() {
+        // Give the syndicate a tiny max_premium_ratio so the first quote saturates capacity.
+        let mut syn = Syndicate::new(SyndicateId(1), 10_000_000, 500);
+        // capacity = 10_000_000 * 0.0001 = 1_000 pence — far below any ATP
+        syn.max_premium_ratio = 0.0001;
+
+        let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
+        let sim = run_year(vec![syn], vec![make_broker(1, risk)]);
+
+        let has_declined =
+            sim.log.iter().any(|e| matches!(e.event, Event::QuoteDeclined { .. }));
+        assert!(has_declined, "expected at least one QuoteDeclined when capacity is exhausted");
     }
 
     // ── Time-bounded integration tests ────────────────────────────────────────

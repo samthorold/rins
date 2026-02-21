@@ -67,7 +67,12 @@ struct LineExperience {
 
 pub struct Syndicate {
     pub id: SyndicateId,
-    pub capital: u64, // pence; placeholder — real capital management comes later
+    pub capital: u64,
+    pub initial_capital: u64,
+    pub is_active: bool,
+    pub aggregate_written_premium: u64,
+    pub solvency_floor_pct: f64,
+    pub max_premium_ratio: f64,
     pub rate_on_line_bps: u32, // basis points, e.g. 500 = 5% rate on line
     pub actuarial: ActuarialParams,
     experience: HashMap<String, LineExperience>,
@@ -78,6 +83,11 @@ impl Syndicate {
         Syndicate {
             id,
             capital: initial_capital,
+            initial_capital,
+            is_active: true,
+            aggregate_written_premium: 0,
+            solvency_floor_pct: 0.20,
+            max_premium_ratio: 0.50,
             rate_on_line_bps,
             actuarial: ActuarialParams::default(),
             experience: HashMap::new(),
@@ -171,7 +181,7 @@ impl Syndicate {
     /// Price and issue (or decline) a quote for a submission.
     /// Premium is set by the actuarial channel (ATP).
     /// `industry_benchmark` is the market-wide loss ratio from the previous year's YearStats.
-    /// TODO: underwriter channel (§2), capital constraint override.
+    /// Returns QuoteDeclined if inactive or annual capacity would be breached.
     pub fn on_quote_requested(
         &self,
         day: Day,
@@ -181,7 +191,20 @@ impl Syndicate {
         lead_premium: Option<u64>,
         industry_benchmark: f64,
     ) -> (Day, Event) {
-        let premium = self.atp(risk, industry_benchmark);
+        // Belt-and-suspenders: submission filtering should exclude inactive syndicates,
+        // but guard here too.
+        if !self.is_active {
+            return (day, Event::QuoteDeclined { submission_id, syndicate_id: self.id });
+        }
+
+        let atp = self.atp(risk, industry_benchmark);
+
+        // Capacity check: decline if this risk would push annual premium over the cap.
+        let max_capacity = (self.initial_capital as f64 * self.max_premium_ratio) as u64;
+        if self.aggregate_written_premium + atp > max_capacity {
+            return (day, Event::QuoteDeclined { submission_id, syndicate_id: self.id });
+        }
+
         // is_lead and lead_premium are inputs to the underwriter channel — deferred.
         let _ = (is_lead, lead_premium);
         (
@@ -189,16 +212,23 @@ impl Syndicate {
             Event::QuoteIssued {
                 submission_id,
                 syndicate_id: self.id,
-                premium,
+                premium: atp,
                 is_lead,
             },
         )
     }
 
     /// Deduct a settled claim from capital.
-    /// TODO: check solvency floor and emit SyndicateInsolvency.
-    pub fn on_claim_settled(&mut self, amount: u64) {
+    /// Returns `true` if capital has dropped below the solvency floor after deduction.
+    pub fn on_claim_settled(&mut self, amount: u64) -> bool {
         self.capital = self.capital.saturating_sub(amount);
+        self.capital < (self.initial_capital as f64 * self.solvency_floor_pct) as u64
+    }
+
+    /// Record that a policy was bound with this syndicate on the panel.
+    /// Accumulates the syndicate's share of the premium against annual capacity.
+    pub fn on_policy_bound_as_panelist(&mut self, premium: u64) {
+        self.aggregate_written_premium += premium;
     }
 
     /// Called by the coordinator at year-end.
@@ -211,6 +241,8 @@ impl Syndicate {
         line_loss_ratios: &std::collections::HashMap<String, f64>,
         _rng: &mut impl Rng,
     ) {
+        // Annual policies expire at year-end; release written-premium capacity for next year.
+        self.aggregate_written_premium = 0;
         for (line, &loss_ratio) in line_loss_ratios {
             self.observe_line_loss_ratio(line, loss_ratio);
         }
@@ -641,6 +673,59 @@ mod tests {
 
         // net_loss = 500_000; share = 10_000 / 10_000 → deduction = 500_000.
         assert_eq!(syn.capital, 9_500_000, "capital should be initial - net_loss");
+    }
+
+    // ── Capacity and solvency tests ────────────────────────────────────────────
+
+    #[test]
+    fn at_capacity_syndicate_declines_quote() {
+        let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
+        // max_capacity = 10_000_000 * 0.50 = 5_000_000
+        // ATP for this risk ≈ 1_365_000 → 4_999_999 + 1_365_000 > 5_000_000
+        s.aggregate_written_premium = 4_999_999;
+        let risk = make_risk(1_000_000);
+        let (_, event) =
+            s.on_quote_requested(crate::types::Day(0), SubmissionId(1), &risk, true, None, 0.65);
+        assert!(
+            matches!(event, Event::QuoteDeclined { .. }),
+            "expected QuoteDeclined when at capacity, got {event:?}"
+        );
+    }
+
+    #[test]
+    fn solvency_breach_returns_true() {
+        let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
+        // floor = 10_000_000 * 0.20 = 2_000_000
+        // capital after claim = 10_000_000 - 8_500_000 = 1_500_000 < 2_000_000
+        let breached = s.on_claim_settled(8_500_000);
+        assert!(breached, "should return true when capital drops below solvency floor");
+        assert_eq!(s.capital, 1_500_000);
+    }
+
+    #[test]
+    fn above_floor_returns_false() {
+        let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
+        // floor = 2_000_000; claim of 1_000_000 → capital = 9_000_000 > 2_000_000
+        let breached = s.on_claim_settled(1_000_000);
+        assert!(!breached, "should return false when capital remains above solvency floor");
+    }
+
+    #[test]
+    fn policy_bound_increments_exposure() {
+        let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
+        s.on_policy_bound_as_panelist(100);
+        assert_eq!(s.aggregate_written_premium, 100);
+    }
+
+    #[test]
+    fn year_end_resets_exposure() {
+        use rand::SeedableRng;
+        let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
+        s.on_policy_bound_as_panelist(500_000);
+        assert_eq!(s.aggregate_written_premium, 500_000);
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0);
+        s.on_year_end(crate::types::Year(1), &std::collections::HashMap::new(), &mut rng);
+        assert_eq!(s.aggregate_written_premium, 0);
     }
 
     // 16. ATP is monotone non-decreasing after observing higher loss ratios (proptest).

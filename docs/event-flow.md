@@ -35,7 +35,7 @@ flowchart TD
         QD_L["**QuoteDeclined**\n{submission_id, syndicate_id}"]
         QI_F["**QuoteIssued**\n{is_lead: false, premium}\nfollower pricing vs lead"]
         QD_F["**QuoteDeclined**\n{submission_id, syndicate_id}"]
-        CS_S["on_claim_settled\ncapital −= amount"]
+        CS_S["on_claim_settled\ncapital −= amount\n→ true if capital < solvency floor"]
         YE_S["on_year_end\nEWMA ← realised loss ratio\n(per line of business)"]
     end
 
@@ -66,10 +66,12 @@ flowchart TD
     STATS -->|"publish current_industry_benchmark\nfor next year's ATP"| YE_S
     YE -->|"schedule SimulationStart(N+1)"| SS_NEXT
 
-    %% ── Entry / insolvency (stubs) ──────────────────────────────────────────
+    %% ── Entry / insolvency ──────────────────────────────────────────────────
 
     SE(["**SyndicateEntered**\n{syndicate_id}\n(handler: no-op)"])
-    SI(["**SyndicateInsolvency**\n{syndicate_id}\n(handler: no-op)"])
+    SI["**SyndicateInsolvency**\n{syndicate_id}\nsets syndicate.is_active = false"]
+
+    CS -->|"capital < solvency floor\n(20% of initial_capital)"| SI
 ```
 
 ## Legend
@@ -94,7 +96,7 @@ flowchart TD
 | 8 | `LossEvent` | `handle_simulation_start` via `perils::schedule_loss_events` (Poisson frequency-severity) | `Market::on_loss_event` |
 | 9 | `ClaimSettled` | `Market::on_loss_event` | `Syndicate::on_claim_settled` + `Market::on_claim_settled` (YTD) |
 | 10 | `SyndicateEntered` | — | no-op |
-| 11 | `SyndicateInsolvency` | — | no-op |
+| 11 | `SyndicateInsolvency` | `Syndicate::on_claim_settled` (when capital < solvency floor) | `Simulation::dispatch` → sets `syndicate.is_active = false` |
 
 ## Day offsets
 
