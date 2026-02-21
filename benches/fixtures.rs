@@ -66,6 +66,7 @@ pub fn make_brokers(n: usize, subs_per_broker: usize) -> Vec<Broker> {
                 id: InsuredId(i as u64),
                 name: format!("Insured {i}"),
                 assets: vec![risk],
+                total_ground_up_loss_by_year: std::collections::HashMap::new(),
             };
             Broker::new(BrokerId(i as u64), subs_per_broker, vec![insured])
         })

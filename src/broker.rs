@@ -76,7 +76,12 @@ mod tests {
     use crate::types::{BrokerId, Day, InsuredId};
 
     fn make_insured(id: u64, risk: Risk) -> Insured {
-        Insured { id: InsuredId(id), name: format!("Insured {id}"), assets: vec![risk] }
+        Insured {
+            id: InsuredId(id),
+            name: format!("Insured {id}"),
+            assets: vec![risk],
+            total_ground_up_loss_by_year: std::collections::HashMap::new(),
+        }
     }
 
     #[test]

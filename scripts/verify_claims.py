@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-verify_claims.py — event-stream verifier for rins claim-splitting correctness.
+verify_claims.py — event-stream verifier for rins claim correctness.
 
-Two classes of ClaimSettled are handled separately:
-  - Cat claims: produced by on_loss_event; verified against the parent LossEvent.
-  - Attritional claims: produced by schedule_attritional_claims_for_policy at
-    bind time (no LossEvent parent); verified against policy limit/attachment bounds.
+With the grounded loss model, the full chain is:
+  LossEvent → InsuredLoss {ground_up_loss} → ClaimSettled
 
-A ClaimSettled is classified as attritional when the policy covers
-Peril::Attritional and no LossEvent with a matching territory+cat-peril exists
-on the same day.
+Two checks are performed:
+  1. InsuredLoss.ground_up_loss ≤ sum_insured for every InsuredLoss event.
+  2. For each InsuredLoss, the ClaimSettled amounts on the same day for the same
+     policy_id satisfy: sum(amounts) == min(ground_up_loss, limit) − attachment
+     (with minor integer-rounding tolerance).
+
+Both cat and attritional losses now flow through InsuredLoss, so a single pass
+covers both.
 
 Run from the project root after `cargo run`:
     python3 scripts/verify_claims.py
@@ -20,6 +23,8 @@ from pathlib import Path
 
 events_path = Path("events.ndjson")
 events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
+
+# ── Build policy metadata from SubmissionArrived + PolicyBound ───────────────
 
 submission_risk = {}
 for e in events:
@@ -42,107 +47,117 @@ for e in events:
             print(f"WARN: PolicyBound for submission {sid} has no SubmissionArrived")
             policy_counter += 1; continue
         policies[policy_counter] = {
-            "limit": risk["limit"], "attachment": risk["attachment"],
-            "territory": risk["territory"], "perils": risk["perils_covered"],
-            "entries": v["panel"]["entries"], "bound_day": e["day"],
+            "limit": risk["limit"],
+            "attachment": risk["attachment"],
+            "sum_insured": risk["sum_insured"],
+            "territory": risk["territory"],
+            "perils": risk["perils_covered"],
+            "entries": v["panel"]["entries"],
+            "bound_day": e["day"],
         }
         policy_counter += 1
 
 print(f"Policies loaded: {len(policies)}")
 
-loss_index = defaultdict(list)
-# claim_index keyed by (day, policy_id) → {syndicate_id: total_amount}
+# ── Index InsuredLoss and ClaimSettled events ─────────────────────────────────
+
+# (day, policy_id) → [ground_up_loss, ...] (from InsuredLoss; list because multiple events
+# can share the same (day, policy) — e.g. same-day attritional + cat collision)
+insured_loss_index = defaultdict(list)
+# (day, policy_id) → {syndicate_id: total_amount} (from ClaimSettled)
 claim_index = defaultdict(lambda: defaultdict(int))
+
+insured_loss_count = 0
 for e in events:
     ev = e["event"]
     if not isinstance(ev, dict): continue
     k = next(iter(ev)); v = ev[k]; day = e["day"]
-    if k == "LossEvent":
-        loss_index[day].append({"region": v["region"], "peril": v["peril"], "severity": v["severity"]})
+    if k == "InsuredLoss":
+        insured_loss_index[(day, v["policy_id"])].append(v["ground_up_loss"])
+        insured_loss_count += 1
     elif k == "ClaimSettled":
         claim_index[(day, v["policy_id"])][v["syndicate_id"]] += v["amount"]
 
+print(f"InsuredLoss events: {insured_loss_count}")
+
 mismatches = []
-checks_run = 0
+ground_up_checks = 0
+claim_checks = 0
 
-# ── Cat claim verification ────────────────────────────────────────────────────
-# For each loss day × policy, verify ClaimSettled amounts match expected values.
-# Attritional-only policies are skipped here (they have no LossEvent parent).
+# ── Check 1: ground_up_loss ≤ sum_insured (per individual InsuredLoss event) ───
 
-cat_claim_days_policies = set()  # (day, pid) pairs verified as cat claims
-
-for day in sorted(loss_index.keys()):
-    losses = loss_index[day]
-    for pid, policy in policies.items():
-        # Only check policies strictly bound before this loss day and in the same
-        # policy year — Lloyd's policies are annual and expire at YearEnd.
-        if policy["bound_day"] >= day:
-            continue
-        if policy["bound_day"] // 360 != day // 360:
-            continue
-
-        # Compute expected cat claims (excluding Attritional peril).
-        expected_by_syn = defaultdict(int)
-        total_expected_net = 0
-        for loss in losses:
-            if loss["peril"] == "Attritional": continue  # never routed via LossEvent now
-            if loss["peril"] not in policy["perils"]: continue
-            if loss["region"] != policy["territory"]: continue
-            net_loss = max(0, min(loss["severity"], policy["limit"]) - policy["attachment"])
-            if net_loss == 0: continue
-            total_expected_net += net_loss
-            for entry in policy["entries"]:
-                expected_by_syn[entry["syndicate_id"]] += net_loss * entry["share_bps"] // 10_000
-
-        if not expected_by_syn:
-            # No cat match — any claims on this day must be attritional.
-            # Skip; attritional claims for this (day, pid) are checked below.
-            continue
-
-        cat_claim_days_policies.add((day, pid))
-        actual_by_syn = claim_index.get((day, pid), {})
-        total_actual = sum(actual_by_syn.values())
-        if total_actual > total_expected_net:
-            mismatches.append(
-                f"  FAIL day={day} policy={pid}: total_actual={total_actual} > total_expected_net={total_expected_net}"
-            )
-        for syn_id in sorted(set(expected_by_syn) | set(actual_by_syn)):
-            expected = expected_by_syn.get(syn_id, 0)
-            actual = actual_by_syn.get(syn_id, 0)
-            if expected != actual:
-                mismatches.append(
-                    f"  FAIL day={day} policy={pid} syn={syn_id}: expected {expected} but got {actual}"
-                )
-            checks_run += 1
-
-# ── Attritional claim bounds verification ────────────────────────────────────
-# For each (day, policy_id) in claim_index that was NOT verified as a cat claim,
-# check that every amount is ≤ (limit − attachment) × share_bps / 10_000.
-
-attritional_checks = 0
-for (day, pid), by_syn in claim_index.items():
-    if (day, pid) in cat_claim_days_policies:
-        continue  # already verified as cat
+for (day, pid), losses in insured_loss_index.items():
     policy = policies.get(pid)
     if policy is None:
-        mismatches.append(f"  FAIL day={day}: ClaimSettled references unknown policy_id {pid}")
+        mismatches.append(f"  FAIL day={day}: InsuredLoss references unknown policy_id {pid}")
+        continue
+    for ground_up_loss in losses:
+        if ground_up_loss > policy["sum_insured"]:
+            mismatches.append(
+                f"  FAIL day={day} policy={pid}: ground_up_loss={ground_up_loss} "
+                f"> sum_insured={policy['sum_insured']}"
+            )
+        ground_up_checks += 1
+
+print(f"Ground-up checks (ground_up ≤ sum_insured): {ground_up_checks}")
+
+# ── Check 2: ClaimSettled amounts match policy terms applied to ground_up_loss ─
+# Each InsuredLoss event independently produces ClaimSettled events via on_insured_loss,
+# so expected total = sum of net amounts across all same-day InsuredLoss events.
+
+for (day, pid), losses in insured_loss_index.items():
+    policy = policies.get(pid)
+    if policy is None:
+        continue  # already reported above
+
+    # Expected per-syndicate amounts: mirror Rust exactly — each InsuredLoss event
+    # independently calls on_insured_loss, which applies net * share_bps / 10_000
+    # (integer division) per panel entry. Sum those independently to avoid ±1 drift.
+    expected_by_syn = defaultdict(int)
+    total_net = 0
+    for ground_up_loss in losses:
+        gross = min(ground_up_loss, policy["limit"])
+        net = max(0, gross - policy["attachment"])
+        total_net += net
+        for entry in policy["entries"]:
+            amount = net * entry["share_bps"] // 10_000
+            if amount > 0:
+                expected_by_syn[entry["syndicate_id"]] += amount
+
+    if total_net == 0:
+        # No claim expected; ensure no ClaimSettled exists for this (day, pid).
+        actual = claim_index.get((day, pid), {})
+        if actual:
+            mismatches.append(
+                f"  FAIL day={day} policy={pid}: total_net=0 but ClaimSettled found: {dict(actual)}"
+            )
         continue
 
-    # Build max-amount lookup from panel entries.
-    max_net = policy["limit"] - policy["attachment"]
-    share_by_syn = {entry["syndicate_id"]: entry["share_bps"] for entry in policy["entries"]}
+    actual_by_syn = claim_index.get((day, pid), {})
 
-    for syn_id, amount in by_syn.items():
-        max_allowed = max_net * share_by_syn.get(syn_id, 0) // 10_000
-        if amount > max_allowed:
+    for syn_id in sorted(set(expected_by_syn) | set(actual_by_syn)):
+        expected = expected_by_syn.get(syn_id, 0)
+        actual = actual_by_syn.get(syn_id, 0)
+        if expected != actual:
             mismatches.append(
-                f"  FAIL day={day} policy={pid} syn={syn_id}: attritional amount {amount} "
-                f"> max_allowed {max_allowed} (limit−attachment={max_net})"
+                f"  FAIL day={day} policy={pid} syn={syn_id}: "
+                f"expected {expected} but got {actual} "
+                f"(losses={losses}, limit={policy['limit']}, "
+                f"attachment={policy['attachment']}, total_net={total_net})"
             )
-        attritional_checks += 1
+        claim_checks += 1
 
-print(f"Cat claim checks: {checks_run}")
-print(f"Attritional claim bounds checks: {attritional_checks}")
+# ── Check 3: No ClaimSettled without a matching InsuredLoss ───────────────────
+
+for (day, pid) in claim_index:
+    if not insured_loss_index[(day, pid)]:
+        mismatches.append(
+            f"  FAIL day={day} policy={pid}: ClaimSettled with no matching InsuredLoss"
+        )
+
+print(f"Claim amount checks (ClaimSettled vs policy terms): {claim_checks}")
+
+# ── Result ────────────────────────────────────────────────────────────────────
 
 if mismatches:
     print(f"\nFAIL — {len(mismatches)} mismatch(es):")
@@ -150,4 +165,4 @@ if mismatches:
     if len(mismatches) > 50: print(f"  ... and {len(mismatches) - 50} more")
     sys.exit(1)
 else:
-    print("\nPASS — all claim amounts match expected values.")
+    print("\nPASS — all InsuredLoss and ClaimSettled amounts are consistent.")

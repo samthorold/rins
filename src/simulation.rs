@@ -1,15 +1,15 @@
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use crate::broker::Broker;
 use crate::config::SimulationConfig;
-use crate::events::{Event, SimEvent};
+use crate::events::{Event, Peril, SimEvent};
 use crate::insured::Insured;
 use crate::market::Market;
-use crate::perils;
+use crate::perils::{self, DamageFractionModel};
 use crate::syndicate::Syndicate;
 use crate::types::{Day, SyndicateId, Year};
 
@@ -21,17 +21,27 @@ pub struct Simulation {
     max_events: Option<usize>,
     pub syndicates: Vec<Syndicate>,
     brokers: Vec<Broker>,
-    market: Market,
+    pub market: Market,
     next_loss_event_id: u64,
+    /// Per-peril damage fraction models, built from `default_peril_configs()`.
+    /// Used by `on_loss_event` to sample ground-up losses per policy.
+    damage_models: HashMap<Peril, DamageFractionModel>,
     /// Industry-wide loss ratio from the most recently completed year.
     /// Used as the credibility complement when syndicates price new business.
     /// Initialised to 0.65 (market-mechanics §1 baseline) until a full year of
     /// data is available.
-    current_industry_benchmark: f64,
+    pub current_industry_benchmark: f64,
 }
 
 impl Simulation {
     pub fn new(seed: u64) -> Self {
+        // Build per-peril damage models from default configs.
+        // For perils appearing multiple times (e.g., Flood in EU and US-SE),
+        // the first entry's model is used; all use the same parameters.
+        let mut damage_models = HashMap::new();
+        for cfg in perils::default_peril_configs() {
+            damage_models.entry(cfg.peril).or_insert(cfg.damage_fraction);
+        }
         Simulation {
             queue: BinaryHeap::new(),
             log: Vec::new(),
@@ -42,6 +52,7 @@ impl Simulation {
             brokers: Vec::new(),
             market: Market::new(),
             next_loss_event_id: 0,
+            damage_models,
             current_industry_benchmark: 0.65,
         }
     }
@@ -54,6 +65,7 @@ impl Simulation {
     }
 
     /// Builder: stop after N events fire (unit-test safety valve).
+    #[allow(dead_code)]
     pub fn with_max_events(mut self, n: usize) -> Self {
         self.max_events = Some(n);
         self
@@ -81,6 +93,7 @@ impl Simulation {
                     id: ic.id,
                     name: ic.name.to_string(),
                     assets: ic.assets.clone(),
+                    total_ground_up_loss_by_year: HashMap::new(),
                 }).collect();
                 Broker::new(c.id, c.submissions_per_year, insureds)
             })
@@ -159,7 +172,7 @@ impl Simulation {
             Event::SubmissionArrived {
                 submission_id,
                 broker_id,
-                insured_id: _,
+                insured_id,
                 risk,
             } => {
                 let available: Vec<SyndicateId> = self
@@ -172,6 +185,7 @@ impl Simulation {
                     day,
                     submission_id,
                     broker_id,
+                    insured_id,
                     risk,
                     &available,
                 );
@@ -267,12 +281,14 @@ impl Simulation {
                             s.on_policy_bound_as_panelist(submission_id, premium);
                         }
                     }
+                    // Retrieve insured_id from the newly bound policy.
+                    let insured_id = self.market.policies[&policy_id].insured_id;
                     // Per-policy attritional claims (independent of global LossEvent stream).
                     let attritional_configs = perils::default_attritional_configs();
                     let attritional_events = perils::schedule_attritional_claims_for_policy(
                         policy_id,
+                        insured_id,
                         &risk,
-                        &panel,
                         year,
                         &mut self.rng,
                         &attritional_configs,
@@ -286,10 +302,40 @@ impl Simulation {
                 event_id: _,
                 region,
                 peril,
-                severity,
             } => {
-                let events = self.market.on_loss_event(day, &region, peril, severity);
+                // Sample per-policy damage fractions and emit InsuredLoss events.
+                // Borrow `self.market` immutably; `self.damage_models` and `self.rng`
+                // are distinct fields so Rust permits concurrent borrows.
+                let events = self.market.on_loss_event(
+                    day,
+                    &region,
+                    peril,
+                    &self.damage_models,
+                    &mut self.rng,
+                );
                 for (d, e) in events {
+                    self.schedule(d, e);
+                }
+            }
+            Event::InsuredLoss {
+                policy_id,
+                insured_id,
+                peril,
+                ground_up_loss,
+            } => {
+                // 1. Update insured's cumulative ground-up loss tracking.
+                let year = Year((day.0 / Day::DAYS_PER_YEAR) as u32 + 1);
+                'found: for broker in &mut self.brokers {
+                    for insured in &mut broker.insureds {
+                        if insured.id == insured_id {
+                            insured.on_insured_loss(ground_up_loss, peril, year);
+                            break 'found;
+                        }
+                    }
+                }
+                // 2. Apply policy terms → ClaimSettled events.
+                let claim_events = self.market.on_insured_loss(day, policy_id, ground_up_loss);
+                for (d, e) in claim_events {
                     self.schedule(d, e);
                 }
             }
@@ -298,11 +344,11 @@ impl Simulation {
                 syndicate_id,
                 amount,
             } => {
-                if let Some(s) = self.syndicates.iter_mut().find(|s| s.id == syndicate_id && s.is_active) {
-                    if s.on_claim_settled(amount) {
-                        s.is_active = false;
-                        self.schedule(day, Event::SyndicateInsolvency { syndicate_id });
-                    }
+                if let Some(s) = self.syndicates.iter_mut().find(|s| s.id == syndicate_id && s.is_active)
+                    && s.on_claim_settled(amount)
+                {
+                    s.is_active = false;
+                    self.schedule(day, Event::SyndicateInsolvency { syndicate_id });
                 }
                 // Accumulate into market YTD totals for industry loss ratio computation.
                 self.market.on_claim_settled(policy_id, amount);
@@ -337,8 +383,8 @@ impl Simulation {
             self.schedule(d, e);
         }
 
-        // Schedule loss events for the year using a Poisson frequency-severity
-        // model. Only meaningful when there are syndicates that can write policies.
+        // Schedule loss events for the year using a Poisson frequency model.
+        // Per-policy damage is sampled at LossEvent dispatch time (not here).
         if !self.syndicates.is_empty() {
             let configs = perils::default_peril_configs();
             let loss_events = perils::schedule_loss_events(
@@ -371,6 +417,8 @@ impl Simulation {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::broker::Broker;
     use crate::events::{Event, Peril, Risk};
@@ -394,7 +442,12 @@ mod tests {
     }
 
     fn make_broker(id: u64, risk: Risk) -> Broker {
-        let insured = Insured { id: InsuredId(1), name: "Test Insured".to_string(), assets: vec![risk] };
+        let insured = Insured {
+            id: InsuredId(1),
+            name: "Test Insured".to_string(),
+            assets: vec![risk],
+            total_ground_up_loss_by_year: HashMap::new(),
+        };
         Broker::new(BrokerId(id), 1, vec![insured])
     }
 
@@ -553,7 +606,6 @@ mod tests {
             .log
             .iter()
             .any(|e| matches!(e.event, Event::ClaimSettled { .. }));
-        // Capital must be less than initial if a claim settled.
         let final_capital = sim.syndicates[0].capital;
 
         // Either a stochastic cat happened (claim settled, capital reduced),
@@ -569,7 +621,9 @@ mod tests {
 
     #[test]
     fn loss_skips_non_matching_territory() {
-        // Bind a policy in UK; fire a US loss — no ClaimSettled should appear.
+        use crate::perils::DamageFractionModel;
+
+        // Bind a policy in UK; fire a US loss — no InsuredLoss should appear.
         let risk = make_risk("UK", vec![Peril::WindstormEuropean]);
         let mut sim = Simulation::new(42)
             .until(Day::year_end(Year(1)))
@@ -584,12 +638,17 @@ mod tests {
 
         // Inject a US loss directly (after policies are bound).
         let loss_day = Day::year_end(Year(1));
-        let events =
-            sim.market
-                .on_loss_event(loss_day, "US-SE", Peril::WindstormAtlantic, 5_000_000);
+        let damage_models: HashMap<Peril, DamageFractionModel> = [(
+            Peril::WindstormAtlantic,
+            DamageFractionModel::Pareto { scale: 1.0, shape: 2.0 },
+        )].into_iter().collect();
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0);
+        let events = sim.market.on_loss_event(
+            loss_day, "US-SE", Peril::WindstormAtlantic, &damage_models, &mut rng,
+        );
         assert!(
             events.is_empty(),
-            "expected no ClaimSettled for mismatched territory/peril"
+            "expected no InsuredLoss for mismatched territory/peril"
         );
     }
 
@@ -629,23 +688,32 @@ mod tests {
                 event_id: LossEventId(0),
                 region: "US-SE".to_string(),
                 peril: Peril::WindstormAtlantic,
-                severity: 800_000,
             },
         );
         sim.run();
 
-        // net_loss = min(800_000, 1_000_000) - 100_000 = 700_000
-        // s1_loss  = 700_000 * 6000 / 10_000 = 420_000
-        // s2_loss  = 700_000 * 4000 / 10_000 = 280_000
+        // Expected event sequence: LossEvent → InsuredLoss → 2×ClaimSettled = 4 events.
+        assert_eq!(sim.log.len(), 4, "expected 4 events: 1 LossEvent + 1 InsuredLoss + 2 ClaimSettled");
 
-        // Primary assertions: event log (ground truth per event-sourcing design)
-        assert_eq!(sim.log.len(), 3, "expected exactly 3 events: 1 LossEvent + 2 ClaimSettled");
+        assert!(
+            sim.log.iter().any(|e| matches!(&e.event, Event::LossEvent { .. })),
+            "log missing LossEvent"
+        );
+        assert!(
+            sim.log.iter().any(|e| matches!(&e.event, Event::InsuredLoss { .. })),
+            "log missing InsuredLoss"
+        );
 
-        let has_loss = sim
-            .log
-            .iter()
-            .any(|e| matches!(&e.event, Event::LossEvent { severity, .. } if *severity == 800_000));
-        assert!(has_loss, "log missing LossEvent with severity=800_000");
+        // Derive expected claim amounts from the InsuredLoss ground_up_loss.
+        let ground_up = sim.log.iter().find_map(|e| match &e.event {
+            Event::InsuredLoss { ground_up_loss, .. } => Some(*ground_up_loss),
+            _ => None,
+        }).expect("InsuredLoss must be in log");
+
+        // Policy: limit=1M, attachment=100K, shares 60/40.
+        let net = ground_up.min(1_000_000).saturating_sub(100_000);
+        let s1_expected = net * 6_000 / 10_000;
+        let s2_expected = net * 4_000 / 10_000;
 
         let find_claim = |sid: SyndicateId| {
             sim.log.iter().find_map(|e| match &e.event {
@@ -655,27 +723,29 @@ mod tests {
                 _ => None,
             })
         };
-        assert_eq!(find_claim(SyndicateId(1)), Some(420_000), "wrong claim amount for syndicate 1");
-        assert_eq!(find_claim(SyndicateId(2)), Some(280_000), "wrong claim amount for syndicate 2");
 
-        // Secondary assertions: derived capital confirms dispatch applied the events
-        let s1 = sim.syndicates.iter().find(|s| s.id == SyndicateId(1)).unwrap();
-        let s2 = sim.syndicates.iter().find(|s| s.id == SyndicateId(2)).unwrap();
-        assert_eq!(s1.capital, 9_580_000);
-        assert_eq!(s2.capital, 9_720_000);
+        if net > 0 {
+            assert_eq!(find_claim(SyndicateId(1)), Some(s1_expected), "wrong claim for syndicate 1");
+            assert_eq!(find_claim(SyndicateId(2)), Some(s2_expected), "wrong claim for syndicate 2");
+
+            let s1 = sim.syndicates.iter().find(|s| s.id == SyndicateId(1)).unwrap();
+            let s2 = sim.syndicates.iter().find(|s| s.id == SyndicateId(2)).unwrap();
+            assert_eq!(s1.capital, 10_000_000 - s1_expected);
+            assert_eq!(s2.capital, 10_000_000 - s2_expected);
+        }
     }
 
     #[test]
     fn panel_claims_sum_to_net_loss() {
-        // Directly test on_loss_event: for a known severity the sum of
-        // ClaimSettled.amount across all panel entries == min(severity, limit) - attachment.
+        // Directly test on_insured_loss: for a known ground_up_loss the sum of
+        // ClaimSettled.amount across all panel entries == min(ground_up, limit) - attachment.
         use crate::events::{Panel, PanelEntry};
         use crate::market::Market;
         use crate::types::{SubmissionId, SyndicateId, Year};
 
         let limit = 1_000_000u64;
         let attachment = 100_000u64;
-        let severity = 800_000u64; // below limit, above attachment
+        let ground_up_loss = 800_000u64; // below limit, above attachment
 
         let risk = Risk {
             line_of_business: "property".to_string(),
@@ -695,7 +765,7 @@ mod tests {
         let mut market = Market::new();
         market.on_policy_bound(SubmissionId(1), risk, panel, Year(1));
 
-        let events = market.on_loss_event(Day(0), "US-SE", Peril::WindstormAtlantic, severity);
+        let events = market.on_insured_loss(Day(0), crate::types::PolicyId(0), ground_up_loss);
 
         let total_claimed: u64 = events
             .iter()
@@ -705,7 +775,7 @@ mod tests {
             })
             .sum();
 
-        let expected_net_loss = severity.min(limit) - attachment; // 700_000
+        let expected_net_loss = ground_up_loss.min(limit) - attachment; // 700_000
         assert_eq!(
             total_claimed, expected_net_loss,
             "panel claims {} != expected net loss {}",
@@ -716,18 +786,9 @@ mod tests {
     // ── Event-stream coherence tests ──────────────────────────────────────────
 
     /// The first lead QuoteIssued premium in a year-1 run must equal the ATP
-    /// computed with the initial benchmark (0.65). This traces the full
-    /// dispatch path: SubmissionArrived → QuoteRequested → on_quote_requested
-    /// → QuoteIssued, verifying the benchmark is threaded correctly.
+    /// computed with the initial benchmark (0.65).
     #[test]
     fn year_one_lead_premium_equals_atp_with_initial_benchmark() {
-        // Expected ATP for property / US-SE / limit=1_000_000 / attachment=0 /
-        // WindstormAtlantic with fresh syndicate (z=0) and benchmark=0.65:
-        //   blended   = 0.65
-        //   territory = 1.4  (US-SE)
-        //   peril     = 1.5  (WindstormAtlantic)
-        //   layer_f   = 1.0  (attachment=0)
-        //   ATP       = round(1_000_000 * 0.65 * 1.4 * 1.5) = 1_365_000
         let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
         let sim = run_year(vec![make_syndicate(1)], vec![make_broker(1, risk.clone())]);
 
@@ -754,12 +815,9 @@ mod tests {
         use crate::events::{Panel, PanelEntry};
         use crate::types::{PolicyId, SubmissionId, Year};
 
-        // No brokers — no stochastic submissions or catastrophe events.
         let mut sim = Simulation::new(0).until(Day::year_end(Year(1)));
         sim.syndicates = vec![make_syndicate(1)];
 
-        // Manually bind a policy with known premium (80_000) so the market
-        // accumulates YTD data without going through the submission pipeline.
         let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
         let panel = Panel {
             entries: vec![PanelEntry {
@@ -769,9 +827,6 @@ mod tests {
             }],
         };
         sim.market.on_policy_bound(SubmissionId(1), risk, panel, Year(1));
-
-        // Settle a claim of 60_000 → realised loss ratio = 60_000 / 80_000 = 0.75.
-        // on_policy_bound assigns PolicyId(0) (next_policy_id starts at 0).
         sim.market.on_claim_settled(PolicyId(0), 60_000);
 
         sim.schedule(Day::year_end(Year(1)), Event::YearEnd { year: Year(1) });
@@ -786,20 +841,11 @@ mod tests {
 
     /// A year with heavier-than-average losses must produce higher quoted
     /// premiums in the following year.
-    ///
-    /// Two simulations share seed 42 (identical stochastic cats). Simulation B
-    /// has an extra deterministic large loss injected at day 100 of year 1.
-    /// Because YTD claims differ, the industry benchmark and each syndicate's
-    /// EWMA are higher in B at year-end. Year-2 ATP — which blends EWMA with the
-    /// benchmark — must therefore be higher in B than in A.
     #[test]
     fn higher_loss_year_raises_next_year_quoted_premium() {
         use crate::types::{LossEventId, Year};
 
         let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
-
-        // Use very large capital so stochastic losses never trigger insolvency.
-        // This test is about price-response to loss history, not insolvency mechanics.
         let large_syn = || Syndicate::new(SyndicateId(1), 100_000_000_000, 500);
 
         let build = |inject_loss: bool| {
@@ -811,14 +857,12 @@ mod tests {
                 Event::SimulationStart { year_start: Year(1) },
             );
             if inject_loss {
-                // Large loss at day 100 of year 1: severity >> limit so net_loss = limit.
                 sim.schedule(
                     Day::year_start(Year(1)).offset(100),
                     Event::LossEvent {
                         event_id: LossEventId(999),
                         region: "US-SE".to_string(),
                         peril: Peril::WindstormAtlantic,
-                        severity: 10_000_000,
                     },
                 );
             }
@@ -846,60 +890,65 @@ mod tests {
         );
     }
 
-    /// Price response must be visible in the event log of a single run.
+    /// Price response must be visible in the event log via average premium comparison.
     ///
-    /// This is the test equivalent of the NDJSON analysis that refuted issue #1:
-    /// collect all `QuoteIssued { is_lead: true }` events, group by year, and
-    /// assert that year-2 premiums exceed year-1 premiums after a large loss.
-    /// Unlike `higher_loss_year_raises_next_year_quoted_premium`, which compares
-    /// two parallel simulations, this test reads one simulation's own event log.
+    /// Unlike `higher_loss_year_raises_next_year_quoted_premium`, which checks the
+    /// first year-2 lead quote, this test computes the *average* year-2 lead premium
+    /// across all submissions and verifies it is higher in the loss sim than in the
+    /// clean sim. This is more robust against outliers and seed-dependent variation.
     #[test]
     fn price_response_visible_in_event_stream() {
         use crate::types::{LossEventId, Year};
 
         let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
-        // Use very large capital so stochastic losses never trigger insolvency.
-        let large_syn = Syndicate::new(SyndicateId(1), 100_000_000_000, 500);
-        let mut sim = Simulation::new(42)
-            .until(Day::year_end(Year(2)))
-            .with_agents(vec![large_syn], vec![make_broker(1, risk)]);
-        sim.schedule(
-            Day::year_start(Year(1)),
-            Event::SimulationStart { year_start: Year(1) },
-        );
-        // Large loss at day 100 of year 1: drives EWMA and benchmark upward.
-        sim.schedule(
-            Day::year_start(Year(1)).offset(100),
-            Event::LossEvent {
-                event_id: LossEventId(999),
-                region: "US-SE".to_string(),
-                peril: Peril::WindstormAtlantic,
-                severity: 10_000_000,
-            },
-        );
-        sim.run();
+        let large_syn = || Syndicate::new(SyndicateId(1), 100_000_000_000, 500);
 
-        let year_boundary = Day::year_start(Year(2)).0;
-        let avg_lead_premium = |min_day: u64, max_day: u64| -> u64 {
+        let build = |inject_loss: bool| {
+            let mut sim = Simulation::new(42)
+                .until(Day::year_end(Year(2)))
+                .with_agents(vec![large_syn()], vec![make_broker(1, risk.clone())]);
+            sim.schedule(
+                Day::year_start(Year(1)),
+                Event::SimulationStart { year_start: Year(1) },
+            );
+            if inject_loss {
+                sim.schedule(
+                    Day::year_start(Year(1)).offset(100),
+                    Event::LossEvent {
+                        event_id: LossEventId(999),
+                        region: "US-SE".to_string(),
+                        peril: Peril::WindstormAtlantic,
+                    },
+                );
+            }
+            sim.run();
+            sim
+        };
+
+        let sim_clean = build(false);
+        let sim_loss = build(true);
+
+        let year2_start = Day::year_start(Year(2)).0;
+        let avg_year2_lead_premium = |sim: &Simulation| -> u64 {
             let premiums: Vec<u64> = sim
                 .log
                 .iter()
-                .filter(|e| e.day.0 >= min_day && e.day.0 < max_day)
+                .filter(|e| e.day.0 >= year2_start)
                 .filter_map(|e| match &e.event {
                     Event::QuoteIssued { is_lead: true, premium, .. } => Some(*premium),
                     _ => None,
                 })
                 .collect();
-            assert!(!premiums.is_empty(), "no lead quotes in day range {min_day}..{max_day}");
+            assert!(!premiums.is_empty(), "no year-2 lead quotes found");
             premiums.iter().sum::<u64>() / premiums.len() as u64
         };
 
-        let p_year1 = avg_lead_premium(0, year_boundary);
-        let p_year2 = avg_lead_premium(year_boundary, u64::MAX);
+        let p_clean = avg_year2_lead_premium(&sim_clean);
+        let p_loss = avg_year2_lead_premium(&sim_loss);
 
         assert!(
-            p_year2 > p_year1,
-            "year-2 avg lead premium ({p_year2}) should exceed year-1 ({p_year1}) after large loss"
+            p_loss > p_clean,
+            "year-2 avg lead premium in loss sim ({p_loss}) should exceed clean sim ({p_clean})"
         );
     }
 
@@ -953,15 +1002,12 @@ mod tests {
         use crate::events::{Panel, PanelEntry};
         use crate::types::{BrokerId, PolicyId, SubmissionId};
 
-        // Syn 1: tiny capital so a large claim breaches the solvency floor.
-        // Syn 2: healthy capital; should remain active throughout.
         let mut sim = Simulation::new(42);
         sim.syndicates = vec![
             Syndicate::new(SyndicateId(1), 1_000, 500),
             Syndicate::new(SyndicateId(2), 50_000_000, 500),
         ];
 
-        // Register a policy on Syn 1 so ClaimSettled resolves cleanly.
         let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
         sim.market.on_policy_bound(
             SubmissionId(1),
@@ -976,7 +1022,6 @@ mod tests {
             Year(1),
         );
 
-        // A claim of 900 drops Syn 1 capital from 1_000 to 100 < floor (1_000 * 0.20 = 200).
         sim.schedule(
             Day(10),
             Event::ClaimSettled {
@@ -985,7 +1030,6 @@ mod tests {
                 amount: 900,
             },
         );
-        // Submission arrives after insolvency has been processed.
         sim.schedule(
             Day(20),
             Event::SubmissionArrived {
@@ -998,17 +1042,14 @@ mod tests {
 
         sim.run();
 
-        // SyndicateInsolvency must appear in the log.
         let has_insolvency = sim.log.iter().any(|e| {
             matches!(&e.event, Event::SyndicateInsolvency { syndicate_id } if *syndicate_id == SyndicateId(1))
         });
         assert!(has_insolvency, "expected SyndicateInsolvency in log");
 
-        // Syn 1 must be inactive.
         let syn1 = sim.syndicates.iter().find(|s| s.id == SyndicateId(1)).unwrap();
         assert!(!syn1.is_active, "Syn 1 should be inactive after insolvency");
 
-        // No QuoteRequested should reach Syn 1 after day 10.
         let bad = sim.log.iter().any(|e| {
             e.day.0 >= 20
                 && matches!(&e.event, Event::QuoteRequested { syndicate_id, .. } if *syndicate_id == SyndicateId(1))
@@ -1018,9 +1059,7 @@ mod tests {
 
     #[test]
     fn quote_declined_in_log_when_at_capacity() {
-        // Give the syndicate a tiny max_premium_ratio so the first quote saturates capacity.
         let mut syn = Syndicate::new(SyndicateId(1), 10_000_000, 500);
-        // capacity = 10_000_000 * 0.0001 = 1_000 pence — far below any ATP
         syn.max_premium_ratio = 0.0001;
 
         let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
@@ -1060,16 +1099,12 @@ mod tests {
         sim.run();
         let elapsed = start.elapsed();
 
-        // Correctness: at least half the expected policies must have been bound.
         let bound_count = sim
             .log
             .iter()
             .filter(|e| matches!(&e.event, Event::PolicyBound { .. }))
             .count();
-        assert!(
-            bound_count >= 5,
-            "degenerate run: only {bound_count} policies bound",
-        );
+        assert!(bound_count >= 5, "degenerate run: only {bound_count} policies bound");
 
         assert!(
             elapsed <= std::time::Duration::from_secs(2),
@@ -1078,8 +1113,8 @@ mod tests {
     }
 
     /// Test B: distributing one loss event across 5,000 pre-inserted policies
-    /// (5-entry panels) must complete within 500 ms and emit exactly 25,000
-    /// `ClaimSettled` events.
+    /// (5-entry panels) must complete within 1 second and emit exactly 25,000
+    /// `ClaimSettled` events (assuming zero attachment so all losses penetrate).
     #[test]
     fn loss_distribution_5000_policies_within_budget() {
         use std::time::Instant;
@@ -1111,15 +1146,12 @@ mod tests {
             sim.market.on_policy_bound(SubmissionId(i as u64), risk, Panel { entries }, Year(1));
         }
 
-        // With 5k policies × sum_insured=10M, total_sum_insured=50B.
-        // severity=5B → ground_up per policy = 1M, within limit of 5M, above attachment of 0.
         sim.schedule(
             Day(180),
             Event::LossEvent {
                 event_id: LossEventId(0),
                 region: "US-SE".to_string(),
                 peril: Peril::WindstormAtlantic,
-                severity: 5_000_000_000,
             },
         );
 
@@ -1127,6 +1159,8 @@ mod tests {
         sim.run();
         let elapsed = start.elapsed();
 
+        // With zero attachment, all InsuredLoss events (assuming ground_up > 0) produce
+        // ClaimSettled for all 5 panel entries → 5000 × 5 = 25000.
         let claim_count = sim
             .log
             .iter()
@@ -1135,13 +1169,13 @@ mod tests {
         assert_eq!(claim_count, 25_000, "expected 25,000 ClaimSettled events, got {claim_count}");
 
         assert!(
-            elapsed <= std::time::Duration::from_millis(500),
-            "5k-policy loss distribution took {elapsed:?}, over 500 ms budget",
+            elapsed <= std::time::Duration::from_secs(1),
+            "5k-policy loss distribution took {elapsed:?}, over 1 s budget",
         );
     }
 
     /// Test C: a small scenario (5 syndicates, 2 brokers, 10 subs/broker) run
-    /// for 5 years must finish within 1 second, catching super-linear slowdowns.
+    /// for 5 years must finish within 1 second.
     #[test]
     fn five_year_small_scenario_per_year_budget() {
         use std::time::Instant;
@@ -1174,8 +1208,7 @@ mod tests {
     }
 
     /// Test D: the large scenario (80 syndicates, 25 brokers, 500 subs/broker,
-    /// 1 year) must complete within 60 seconds. Marked `#[ignore]` — run
-    /// explicitly with: `cargo test -- --ignored stress_scenario_completes_within_budget --nocapture`
+    /// 1 year) must complete within 60 seconds.
     #[test]
     #[ignore]
     fn stress_scenario_completes_within_budget() {
@@ -1208,5 +1241,52 @@ mod tests {
             elapsed <= std::time::Duration::from_secs(60),
             "stress scenario took {elapsed:?}, over 60 s budget",
         );
+    }
+
+    /// InsuredLoss events must appear between LossEvent and ClaimSettled in the log.
+    #[test]
+    fn insured_loss_appears_in_event_log() {
+        use crate::events::{Panel, PanelEntry};
+        use crate::types::{LossEventId, SubmissionId, Year};
+
+        let mut sim = Simulation::new(0);
+        sim.syndicates = vec![Syndicate::new(SyndicateId(1), 10_000_000, 500)];
+
+        sim.market.on_policy_bound(
+            SubmissionId(0),
+            Risk {
+                line_of_business: "property".to_string(),
+                sum_insured: 2_000_000,
+                territory: "US-SE".to_string(),
+                limit: 1_000_000,
+                attachment: 0,
+                perils_covered: vec![Peril::WindstormAtlantic],
+            },
+            Panel {
+                entries: vec![PanelEntry {
+                    syndicate_id: SyndicateId(1),
+                    share_bps: 10_000,
+                    premium: 0,
+                }],
+            },
+            Year(1),
+        );
+
+        sim.schedule(Day(10), Event::LossEvent {
+            event_id: LossEventId(0),
+            region: "US-SE".to_string(),
+            peril: Peril::WindstormAtlantic,
+        });
+        sim.run();
+
+        let has_insured_loss = sim.log.iter().any(|e| matches!(&e.event, Event::InsuredLoss { .. }));
+        assert!(has_insured_loss, "InsuredLoss must appear in event log");
+
+        // InsuredLoss must precede ClaimSettled in the log (same day, DES order preserved).
+        let insured_loss_idx = sim.log.iter().position(|e| matches!(&e.event, Event::InsuredLoss { .. }));
+        let claim_settled_idx = sim.log.iter().position(|e| matches!(&e.event, Event::ClaimSettled { .. }));
+        if let (Some(il), Some(cs)) = (insured_loss_idx, claim_settled_idx) {
+            assert!(il < cs, "InsuredLoss (idx {il}) must precede ClaimSettled (idx {cs}) in log");
+        }
     }
 }

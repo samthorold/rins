@@ -77,7 +77,12 @@ pub enum Event {
         event_id: LossEventId,
         region: String,
         peril: Peril,
-        severity: u64,
+    },
+    InsuredLoss {
+        policy_id: PolicyId,
+        insured_id: InsuredId,
+        peril: Peril,
+        ground_up_loss: u64, // damage_fraction × sum_insured, pence
     },
     ClaimSettled {
         policy_id: PolicyId,
@@ -212,7 +217,6 @@ mod tests {
                     event_id: LossEventId(1),
                     region: "US-SE".to_string(),
                     peril: Peril::WindstormAtlantic,
-                    severity: 1_000_000,
                 },
             },
         ];

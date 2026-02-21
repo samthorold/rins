@@ -79,6 +79,7 @@ pub struct Syndicate {
     pub solvency_floor_pct: f64,
     pub max_premium_ratio: f64,
     pub max_single_risk_pct: f64,
+    #[allow(dead_code)]
     pub rate_on_line_bps: u32, // basis points, e.g. 500 = 5% rate on line
     pub actuarial: ActuarialParams,
     experience: HashMap<String, LineExperience>,
@@ -102,6 +103,7 @@ impl Syndicate {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_actuarial(mut self, params: ActuarialParams) -> Self {
         self.actuarial = params;
         self
@@ -202,6 +204,7 @@ impl Syndicate {
     /// `n_eligible` is the number of syndicates that pass the per-risk eligibility check;
     /// used to compute the expected panel-share premium for capacity reservation.
     /// Returns QuoteDeclined if inactive or annual capacity would be breached.
+    #[allow(clippy::too_many_arguments)]
     pub fn on_quote_requested(
         &mut self,
         day: Day,
@@ -693,11 +696,10 @@ mod tests {
         };
 
         let mut market = Market::new();
-        market.on_policy_bound(SubmissionId(1), risk, panel, crate::types::Year(1));
+        let policy_id = market.on_policy_bound(SubmissionId(1), risk, panel, crate::types::Year(1));
 
-        // Fire a loss: severity 600_000 → net_loss = 600_000 - 100_000 = 500_000.
-        let claim_events =
-            market.on_loss_event(Day(0), "US-SE", Peril::WindstormAtlantic, 600_000);
+        // Apply an insured loss directly: ground_up=600_000 → gross=600_000 → net=500_000.
+        let claim_events = market.on_insured_loss(Day(0), policy_id, 600_000);
 
         // Apply ClaimSettled events to the syndicate.
         let mut syn = fresh_syndicate(); // SyndicateId(1), capital = 10_000_000

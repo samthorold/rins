@@ -1,15 +1,27 @@
 mod fixtures;
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 
 use rins::events::{Event, Peril, SimEvent};
 use rins::market::Market;
+use rins::perils::DamageFractionModel;
 use rins::types::{Day, SyndicateId};
 
 use fixtures::{LARGE, MEDIUM, SMALL, build_simulation, prepopulate_policies};
+
+/// Build a per-peril damage models map from default configs (same as Simulation::new).
+fn default_damage_models() -> HashMap<Peril, DamageFractionModel> {
+    let mut damage_models = HashMap::new();
+    for cfg in rins::perils::default_peril_configs() {
+        damage_models.entry(cfg.peril).or_insert(cfg.damage_fraction);
+    }
+    damage_models
+}
 
 // ── Group 1: loss_distribution — policy count scaling ───────────────────────
 
@@ -26,9 +38,15 @@ fn bench_loss_distribution(c: &mut Criterion) {
                     || {
                         let mut market = Market::new();
                         prepopulate_policies(&mut market, pc, panel_size);
-                        market
+                        let damage_models = default_damage_models();
+                        let rng = ChaCha20Rng::seed_from_u64(42);
+                        (market, damage_models, rng)
                     },
-                    |market| market.on_loss_event(Day(180), "US-SE", Peril::WindstormAtlantic, 5_000_000),
+                    |(market, damage_models, mut rng)| {
+                        market.on_loss_event(
+                            Day(180), "US-SE", Peril::WindstormAtlantic, &damage_models, &mut rng,
+                        )
+                    },
                     BatchSize::LargeInput,
                 )
             },
@@ -52,9 +70,15 @@ fn bench_loss_panel_size(c: &mut Criterion) {
                     || {
                         let mut market = Market::new();
                         prepopulate_policies(&mut market, policy_count, ps);
-                        market
+                        let damage_models = default_damage_models();
+                        let rng = ChaCha20Rng::seed_from_u64(42);
+                        (market, damage_models, rng)
                     },
-                    |market| market.on_loss_event(Day(180), "US-SE", Peril::WindstormAtlantic, 5_000_000),
+                    |(market, damage_models, mut rng)| {
+                        market.on_loss_event(
+                            Day(180), "US-SE", Peril::WindstormAtlantic, &damage_models, &mut rng,
+                        )
+                    },
                     BatchSize::LargeInput,
                 )
             },
@@ -118,8 +142,6 @@ fn bench_event_queue(c: &mut Criterion) {
             |b, &n| {
                 b.iter_batched(
                     || {
-                        // Pre-build interleaved days (deterministic, no RNG) to ensure
-                        // the heap has real reordering work to do.
                         (0..n)
                             .map(|i| {
                                 let day = if i % 2 == 0 { i as u64 } else { (n - i) as u64 };
