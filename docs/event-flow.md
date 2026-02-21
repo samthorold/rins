@@ -19,7 +19,7 @@ flowchart TD
     %% ── Quoting round ───────────────────────────────────────────────────────
 
     subgraph Broker
-        SA["**SubmissionArrived**\n{submission_id, broker_id, risk}"]
+        SA["**SubmissionArrived**\n{submission_id, broker_id, insured_id, risk}"]
     end
 
     subgraph Market["Market (Coordinator)"]
@@ -92,7 +92,7 @@ flowchart TD
 |---|-------|----------|----------|
 | 1 | `SimulationStart` | `handle_year_end` / external seed | `Simulation::handle_simulation_start` |
 | 2 | `YearEnd` | `handle_simulation_start` | `Simulation::dispatch` → `Market::compute_year_stats`, `Syndicate::on_year_end`, `Broker::on_year_end`, `Market::expire_policies` |
-| 3 | `SubmissionArrived` | `Broker::generate_submissions` | `Market::on_submission_arrived` |
+| 3 | `SubmissionArrived` {submission_id, broker_id, insured_id, risk} | `Broker::generate_submissions` | `Market::on_submission_arrived` |
 | 4 | `QuoteRequested` | `Market::on_submission_arrived` (+2 days), `Market::on_lead_quote_issued` (+3 days) | `Syndicate::on_quote_requested` |
 | 5 | `QuoteIssued` | `Syndicate::on_quote_requested` | `Market::on_lead_quote_issued` / `Market::on_follower_quote_issued` |
 | 6 | `QuoteDeclined` | `Syndicate::on_quote_requested` | `Market::on_quote_declined` |

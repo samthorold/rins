@@ -1,9 +1,10 @@
 use rins::broker::Broker;
 use rins::events::{Event, Panel, PanelEntry, Peril, Risk};
+use rins::insured::Insured;
 use rins::market::Market;
 use rins::simulation::Simulation;
 use rins::syndicate::Syndicate;
-use rins::types::{BrokerId, Day, SubmissionId, SyndicateId, Year};
+use rins::types::{BrokerId, Day, InsuredId, SubmissionId, SyndicateId, Year};
 
 pub struct Scenario {
     pub syndicates: usize,
@@ -61,7 +62,12 @@ pub fn make_brokers(n: usize, subs_per_broker: usize) -> Vec<Broker> {
                 attachment: 100_000,
                 perils_covered: perils[idx].to_vec(),
             };
-            Broker::new(BrokerId(i as u64), subs_per_broker, vec![risk])
+            let insured = Insured {
+                id: InsuredId(i as u64),
+                name: format!("Insured {i}"),
+                assets: vec![risk],
+            };
+            Broker::new(BrokerId(i as u64), subs_per_broker, vec![insured])
         })
         .collect()
 }

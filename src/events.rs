@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use serde::Serialize;
 
-use crate::types::{BrokerId, Day, LossEventId, PolicyId, SubmissionId, SyndicateId, Year};
+use crate::types::{BrokerId, Day, InsuredId, LossEventId, PolicyId, SubmissionId, SyndicateId, Year};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum Peril {
@@ -48,6 +48,7 @@ pub enum Event {
     SubmissionArrived {
         submission_id: SubmissionId,
         broker_id: BrokerId,
+        insured_id: InsuredId,
         risk: Risk,
     },
     QuoteRequested {

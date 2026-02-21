@@ -1,6 +1,7 @@
 pub mod broker;
 pub mod config;
 pub mod events;
+pub mod insured;
 pub mod market;
 pub mod perils;
 pub mod simulation;

@@ -1,6 +1,7 @@
 mod broker;
 mod config;
 mod events;
+mod insured;
 mod market;
 mod perils;
 mod simulation;

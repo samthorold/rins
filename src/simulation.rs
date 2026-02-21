@@ -7,6 +7,7 @@ use rand_chacha::ChaCha20Rng;
 use crate::broker::Broker;
 use crate::config::SimulationConfig;
 use crate::events::{Event, SimEvent};
+use crate::insured::Insured;
 use crate::market::Market;
 use crate::perils;
 use crate::syndicate::Syndicate;
@@ -75,7 +76,14 @@ impl Simulation {
         let brokers = config
             .brokers
             .iter()
-            .map(|c| Broker::new(c.id, c.submissions_per_year, c.risks.clone()))
+            .map(|c| {
+                let insureds = c.insureds.iter().map(|ic| Insured {
+                    id: ic.id,
+                    name: ic.name.to_string(),
+                    assets: ic.assets.clone(),
+                }).collect();
+                Broker::new(c.id, c.submissions_per_year, insureds)
+            })
             .collect();
         Simulation::new(config.seed)
             .until(Day::year_end(Year(config.years)))
@@ -151,6 +159,7 @@ impl Simulation {
             Event::SubmissionArrived {
                 submission_id,
                 broker_id,
+                insured_id: _,
                 risk,
             } => {
                 let available: Vec<SyndicateId> = self
@@ -365,8 +374,9 @@ mod tests {
     use super::*;
     use crate::broker::Broker;
     use crate::events::{Event, Peril, Risk};
+    use crate::insured::Insured;
     use crate::syndicate::Syndicate;
-    use crate::types::{BrokerId, Day, SyndicateId, Year};
+    use crate::types::{BrokerId, Day, InsuredId, SyndicateId, Year};
 
     fn make_risk(territory: &str, perils: Vec<Peril>) -> Risk {
         Risk {
@@ -384,7 +394,8 @@ mod tests {
     }
 
     fn make_broker(id: u64, risk: Risk) -> Broker {
-        Broker::new(BrokerId(id), 1, vec![risk])
+        let insured = Insured { id: InsuredId(1), name: "Test Insured".to_string(), assets: vec![risk] };
+        Broker::new(BrokerId(id), 1, vec![insured])
     }
 
     fn base_sim(syndicates: Vec<Syndicate>, brokers: Vec<Broker>) -> Simulation {
@@ -980,6 +991,7 @@ mod tests {
             Event::SubmissionArrived {
                 submission_id: SubmissionId(99),
                 broker_id: BrokerId(1),
+                insured_id: InsuredId(1),
                 risk: make_risk("US-SE", vec![Peril::WindstormAtlantic]),
             },
         );
@@ -1033,7 +1045,7 @@ mod tests {
         let brokers: Vec<Broker> = (1..=10)
             .map(|i| {
                 let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
-                Broker::new(BrokerId(i), 100, vec![risk])
+                make_broker(i, risk)
             })
             .collect();
         let mut sim = Simulation::new(42)
@@ -1140,7 +1152,7 @@ mod tests {
         let brokers: Vec<Broker> = (1..=2)
             .map(|i| {
                 let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
-                Broker::new(BrokerId(i), 10, vec![risk])
+                make_broker(i, risk)
             })
             .collect();
         let mut sim = Simulation::new(42)
@@ -1175,7 +1187,7 @@ mod tests {
         let brokers: Vec<Broker> = (1..=25)
             .map(|i| {
                 let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
-                Broker::new(BrokerId(i), 500, vec![risk])
+                make_broker(i, risk)
             })
             .collect();
         let mut sim = Simulation::new(42)
