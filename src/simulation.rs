@@ -308,6 +308,15 @@ impl Simulation {
     }
 
     fn handle_simulation_start(&mut self, day: Day, year_start: Year) {
+        // Emit SyndicateEntered for each initial syndicate at the start of year 1.
+        // Subsequent SimulationStart events (years 2+) must not re-emit these.
+        if year_start == Year(1) {
+            let ids: Vec<_> = self.syndicates.iter().map(|s| s.id).collect();
+            for syndicate_id in ids {
+                self.schedule(day, Event::SyndicateEntered { syndicate_id });
+            }
+        }
+
         // Generate broker submissions for this year.
         // We must collect broker events without holding a mutable borrow on self.
         let mut all_broker_events: Vec<(Day, Event)> = vec![];
@@ -881,6 +890,49 @@ mod tests {
             p_year2 > p_year1,
             "year-2 avg lead premium ({p_year2}) should exceed year-1 ({p_year1}) after large loss"
         );
+    }
+
+    // ── SyndicateEntered at sim start ─────────────────────────────────────────
+
+    #[test]
+    fn initial_syndicates_emit_entered_at_day_zero() {
+        let syndicates = vec![make_syndicate(1), make_syndicate(2), make_syndicate(3)];
+        let sim = run_year(syndicates, vec![]);
+
+        let mut entered_ids: Vec<u64> = sim
+            .log
+            .iter()
+            .filter(|e| e.day == Day(0))
+            .filter_map(|e| match &e.event {
+                Event::SyndicateEntered { syndicate_id } => Some(syndicate_id.0),
+                _ => None,
+            })
+            .collect();
+        entered_ids.sort_unstable();
+
+        assert_eq!(
+            entered_ids,
+            vec![1, 2, 3],
+            "expected SyndicateEntered at day 0 for each initial syndicate"
+        );
+    }
+
+    #[test]
+    fn syndicate_entered_not_repeated_in_subsequent_years() {
+        let syndicates = vec![make_syndicate(1)];
+        let mut sim = Simulation::new(42)
+            .until(Day::year_end(Year(2)))
+            .with_agents(syndicates, vec![]);
+        sim.schedule(Day::year_start(Year(1)), Event::SimulationStart { year_start: Year(1) });
+        sim.run();
+
+        let entered_count = sim
+            .log
+            .iter()
+            .filter(|e| matches!(&e.event, Event::SyndicateEntered { syndicate_id } if syndicate_id.0 == 1))
+            .count();
+
+        assert_eq!(entered_count, 1, "SyndicateEntered should fire exactly once per syndicate");
     }
 
     // ── Capacity and insolvency integration tests ─────────────────────────────

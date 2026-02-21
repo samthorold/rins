@@ -32,8 +32,18 @@ lead_dec      = collections.Counter()
 foll_req      = collections.Counter()
 foll_iss      = collections.Counter()
 
+# lead role frequency: syn_id -> count of times acted as lead
+lead_freq     = collections.Counter()
+
 # per-syndicate premiums from PolicyBound panel entries
 bound_premiums = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> syn_id -> sum
+
+# panel size per policy
+panel_sizes   = collections.defaultdict(list)  # year -> [n_syndicates, ...]
+
+# capacity: running active syndicate count (SyndicateEntered / SyndicateInsolvency)
+entries       = collections.Counter()      # year -> count
+insolvencies  = collections.Counter()      # year -> count
 
 for e in events:
     d, ev = e['day'], e['event']
@@ -44,6 +54,7 @@ for e in events:
     if k == 'SubmissionArrived':  submissions[y] += 1
     elif k == 'PolicyBound':
         policies[y] += 1
+        panel_sizes[y].append(len(v['panel']['entries']))
         for entry in v['panel']['entries']:
             bound_premiums[y][entry['syndicate_id']] += entry['premium']
     elif k == 'QuoteDeclined':    declines[y] += 1
@@ -54,6 +65,7 @@ for e in events:
     elif k == 'QuoteIssued':
         if v.get('is_lead'):
             lead_iss[y] += 1
+            lead_freq[v['syndicate_id']] += 1
             premiums[y][v['syndicate_id']] += v['premium']
         else:
             foll_iss[y] += 1
@@ -61,6 +73,10 @@ for e in events:
         losses[y][(v['peril'], v['region'])] += v['severity']
     elif k == 'ClaimSettled':
         claims[y][v['syndicate_id']] += v['amount']
+    elif k == 'SyndicateEntered':
+        entries[y] += 1
+    elif k == 'SyndicateInsolvency':
+        insolvencies[y] += 1
 
 years = sorted(set(submissions) | set(policies))
 
@@ -131,3 +147,36 @@ for y in years:
 if flagged:
     print()
     for w in flagged: print(w)
+
+print("\n=== Syndicate capacity (entries / insolvencies / active) ===")
+print(f"{'Year':>4}  {'Entered':>7}  {'Insolvent':>9}  {'ActiveEoY':>9}")
+active = 0
+for y in years:
+    active += entries[y] - insolvencies[y]
+    print(f"  {y:>2}    {entries[y]:>7}  {insolvencies[y]:>9}  {active:>9}")
+
+print("\n=== Market share HHI per year (bound premium) ===")
+print(f"{'Year':>4}  {'HHI':>6}  (0=perfect competition, 10000=monopoly)")
+for y in years:
+    total = sum(bound_premiums[y].values())
+    if total:
+        hhi = sum((v / total * 100) ** 2 for v in bound_premiums[y].values())
+        print(f"  {y:>2}    {hhi:>6.0f}")
+    else:
+        print(f"  {y:>2}      n/a")
+
+print("\n=== Average panel size per year ===")
+print(f"{'Year':>4}  {'AvgPanel':>8}  {'MinPanel':>8}  {'MaxPanel':>8}")
+for y in years:
+    ps = panel_sizes[y]
+    if ps:
+        print(f"  {y:>2}    {sum(ps)/len(ps):>8.2f}  {min(ps):>8}  {max(ps):>8}")
+    else:
+        print(f"  {y:>2}         n/a")
+
+print("\n=== Lead role concentration (top 10 syndicates, all years) ===")
+print(f"  {'SynId':>5}  {'LeadCount':>9}  {'Share%':>7}")
+total_leads = sum(lead_freq.values())
+for syn_id, cnt in lead_freq.most_common(10):
+    share = 100 * cnt / total_leads if total_leads else 0
+    print(f"  {syn_id:>5}  {cnt:>9}  {share:>7.1f}")

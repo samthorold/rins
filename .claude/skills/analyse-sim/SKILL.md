@@ -32,4 +32,8 @@ Present the analysis output with brief interpretation:
 - Highlight any year-over-year trends (rising/falling bind rates, premium shifts, loss spikes)
 - Note any event types with zero counts that should be non-zero (potential bugs)
 - Flag if total claims significantly exceed total premiums for any syndicate in any year
+- Comment on capacity trends: are insolvency counts rising, and is the active syndicate count shrinking over time?
+- Comment on HHI trend: does market concentration surge after catastrophe years?
+- Note if average panel size is shrinking (sign of capacity withdrawal)
+- Flag if lead role is highly concentrated (top 1-2 syndicates holding >50% of leads)
 - Suggest one follow-up question or area to investigate based on the data
