@@ -182,21 +182,17 @@ impl Simulation {
                 };
                 // Find the targeted syndicate and ask it to quote.
                 let benchmark = self.current_industry_benchmark;
-                let result = self
-                    .syndicates
-                    .iter()
-                    .find(|s| s.id == syndicate_id)
-                    .map(|s| {
-                        s.on_quote_requested(
-                            day,
-                            submission_id,
-                            &risk,
-                            is_lead,
-                            lead_premium,
-                            benchmark,
-                        )
-                    });
-                if let Some((d, e)) = result {
+                let n_active = self.syndicates.iter().filter(|s| s.is_active).count();
+                if let Some(syn) = self.syndicates.iter_mut().find(|s| s.id == syndicate_id) {
+                    let (d, e) = syn.on_quote_requested(
+                        day,
+                        submission_id,
+                        &risk,
+                        is_lead,
+                        lead_premium,
+                        benchmark,
+                        n_active,
+                    );
                     self.schedule(d, e);
                 }
             }
@@ -274,8 +270,9 @@ impl Simulation {
                 syndicate_id,
                 amount,
             } => {
-                if let Some(s) = self.syndicates.iter_mut().find(|s| s.id == syndicate_id) {
+                if let Some(s) = self.syndicates.iter_mut().find(|s| s.id == syndicate_id && s.is_active) {
                     if s.on_claim_settled(amount) {
+                        s.is_active = false;
                         self.schedule(day, Event::SyndicateInsolvency { syndicate_id });
                     }
                 }

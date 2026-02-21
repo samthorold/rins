@@ -71,8 +71,13 @@ pub struct Syndicate {
     pub initial_capital: u64,
     pub is_active: bool,
     pub aggregate_written_premium: u64,
+    /// Premium reserved for in-flight quotes that have been issued but not yet bound.
+    /// Added at QuoteIssued time (by expected panel share), released at PolicyBound time.
+    /// Prevents over-commitment when many submissions are quoted on the same simulation day.
+    pub reserved_premium: u64,
     pub solvency_floor_pct: f64,
     pub max_premium_ratio: f64,
+    pub max_single_risk_pct: f64,
     pub rate_on_line_bps: u32, // basis points, e.g. 500 = 5% rate on line
     pub actuarial: ActuarialParams,
     experience: HashMap<String, LineExperience>,
@@ -86,8 +91,10 @@ impl Syndicate {
             initial_capital,
             is_active: true,
             aggregate_written_premium: 0,
+            reserved_premium: 0,
             solvency_floor_pct: 0.20,
             max_premium_ratio: 0.50,
+            max_single_risk_pct: 0.30,
             rate_on_line_bps,
             actuarial: ActuarialParams::default(),
             experience: HashMap::new(),
@@ -181,15 +188,18 @@ impl Syndicate {
     /// Price and issue (or decline) a quote for a submission.
     /// Premium is set by the actuarial channel (ATP).
     /// `industry_benchmark` is the market-wide loss ratio from the previous year's YearStats.
+    /// `n_active_syndicates` is the number of currently active syndicates; used to estimate
+    /// the expected panel-share premium for capacity reservation.
     /// Returns QuoteDeclined if inactive or annual capacity would be breached.
     pub fn on_quote_requested(
-        &self,
+        &mut self,
         day: Day,
         submission_id: SubmissionId,
         risk: &Risk,
         is_lead: bool,
         lead_premium: Option<u64>,
         industry_benchmark: f64,
+        n_active_syndicates: usize,
     ) -> (Day, Event) {
         // Belt-and-suspenders: submission filtering should exclude inactive syndicates,
         // but guard here too.
@@ -197,13 +207,26 @@ impl Syndicate {
             return (day, Event::QuoteDeclined { submission_id, syndicate_id: self.id });
         }
 
+        // Per-risk size limit: decline if the risk's limit exceeds our maximum single-risk exposure.
+        let max_single_risk_loss = (self.initial_capital as f64 * self.max_single_risk_pct) as u64;
+        if risk.limit > max_single_risk_loss {
+            return (day, Event::QuoteDeclined { submission_id, syndicate_id: self.id });
+        }
+
         let atp = self.atp(risk, industry_benchmark);
 
         // Capacity check: decline if this risk would push annual premium over the cap.
+        // `reserved_premium` accounts for in-flight quotes not yet bound (prevents
+        // over-commitment when many submissions are quoted on the same simulation day).
         let max_capacity = (self.initial_capital as f64 * self.max_premium_ratio) as u64;
-        if self.aggregate_written_premium + atp > max_capacity {
+        if self.aggregate_written_premium + self.reserved_premium + atp > max_capacity {
             return (day, Event::QuoteDeclined { submission_id, syndicate_id: self.id });
         }
+
+        // Reserve the expected panel-share premium for this quote.
+        // Expected share = 1/n_active (equal split across all active syndicates).
+        let n = n_active_syndicates.max(1) as u64;
+        self.reserved_premium += atp / n;
 
         // is_lead and lead_premium are inputs to the underwriter channel — deferred.
         let _ = (is_lead, lead_premium);
@@ -226,8 +249,10 @@ impl Syndicate {
     }
 
     /// Record that a policy was bound with this syndicate on the panel.
-    /// Accumulates the syndicate's share of the premium against annual capacity.
+    /// Moves the actual panel-share premium from reserved to written, maintaining the
+    /// invariant that `aggregate_written_premium + reserved_premium` tracks total commitment.
     pub fn on_policy_bound_as_panelist(&mut self, premium: u64) {
+        self.reserved_premium = self.reserved_premium.saturating_sub(premium);
         self.aggregate_written_premium += premium;
     }
 
@@ -243,6 +268,7 @@ impl Syndicate {
     ) {
         // Annual policies expire at year-end; release written-premium capacity for next year.
         self.aggregate_written_premium = 0;
+        self.reserved_premium = 0;
         for (line, &loss_ratio) in line_loss_ratios {
             self.observe_line_loss_ratio(line, loss_ratio);
         }
@@ -290,14 +316,15 @@ mod tests {
     // 0. on_quote_requested returns the same premium as atp() called directly.
     #[test]
     fn on_quote_requested_uses_atp() {
-        let s = fresh_syndicate();
+        let mut s = fresh_syndicate();
         let risk = make_risk(1_000_000);
         let benchmark = 0.65;
+        let atp = s.atp(&risk, benchmark);
         let (_, event) =
-            s.on_quote_requested(crate::types::Day(0), SubmissionId(1), &risk, true, None, benchmark);
+            s.on_quote_requested(crate::types::Day(0), SubmissionId(1), &risk, true, None, benchmark, 1);
         match event {
             Event::QuoteIssued { premium, .. } => {
-                assert_eq!(premium, s.atp(&risk, benchmark));
+                assert_eq!(premium, atp);
             }
             _ => panic!("expected QuoteIssued"),
         }
@@ -675,7 +702,85 @@ mod tests {
         assert_eq!(syn.capital, 9_500_000, "capital should be initial - net_loss");
     }
 
+    // ── Per-risk size limit tests ──────────────────────────────────────────────
+
+    #[test]
+    fn single_risk_limit_causes_decline() {
+        // Small syndicate: 8_000_000_000 capital, 0.30 → max single-risk = 2_400_000_000.
+        let mut s = Syndicate::new(SyndicateId(1), 8_000_000_000, 500);
+        assert_eq!(s.max_single_risk_pct, 0.30);
+
+        // Risk with limit 3_000_000_000 > 2_400_000_000 → must decline.
+        let over_limit = make_risk(3_000_000_000);
+        let (_, event) =
+            s.on_quote_requested(crate::types::Day(0), SubmissionId(1), &over_limit, false, None, 0.65, 1);
+        assert!(
+            matches!(event, Event::QuoteDeclined { .. }),
+            "expected QuoteDeclined for oversized risk, got {event:?}"
+        );
+
+        // Risk with limit 2_000_000_000 < 2_400_000_000 → must issue.
+        let under_limit = make_risk(2_000_000_000);
+        let (_, event) =
+            s.on_quote_requested(crate::types::Day(0), SubmissionId(2), &under_limit, false, None, 0.65, 1);
+        assert!(
+            matches!(event, Event::QuoteIssued { .. }),
+            "expected QuoteIssued for acceptable risk, got {event:?}"
+        );
+    }
+
     // ── Capacity and solvency tests ────────────────────────────────────────────
+
+    /// Verifies that reserved_premium from in-flight follower quotes prevents
+    /// over-commitment when many submissions are quoted on the same simulation day.
+    #[test]
+    fn reserved_premium_blocks_over_commitment() {
+        // Syndicate with 10_000_000 capital → max_capacity = 5_000_000.
+        // Each quote with n_active=1 reserves the full ATP (~1_365_000 for make_risk(1_000_000)).
+        // After 3 quotes: reserved ≈ 4_095_000. 4th quote (≈1_365_000) must be declined.
+        let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
+        let risk = make_risk(1_000_000);
+        let day = crate::types::Day(0);
+
+        // First 3 quotes should be issued.
+        for i in 1..=3 {
+            let (_, event) = s.on_quote_requested(day, SubmissionId(i), &risk, false, None, 0.65, 1);
+            assert!(
+                matches!(event, Event::QuoteIssued { .. }),
+                "quote {i} should be issued, got {event:?}"
+            );
+        }
+        // 4th quote should be declined due to reserved_premium.
+        let (_, event) = s.on_quote_requested(day, SubmissionId(4), &risk, false, None, 0.65, 1);
+        assert!(
+            matches!(event, Event::QuoteDeclined { .. }),
+            "4th quote should be declined when reserved_premium exhausts capacity, got {event:?}"
+        );
+    }
+
+    /// Verifies that binding a policy releases reserved_premium, restoring capacity.
+    #[test]
+    fn policy_bound_releases_reserved_premium() {
+        let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
+        let risk = make_risk(1_000_000);
+        let day = crate::types::Day(0);
+
+        // Issue a follower quote — reserves ATP/1 in reserved_premium.
+        let (_, event) = s.on_quote_requested(day, SubmissionId(1), &risk, false, None, 0.65, 1);
+        let atp = match event {
+            Event::QuoteIssued { premium, .. } => premium,
+            _ => panic!("expected QuoteIssued"),
+        };
+        assert!(s.reserved_premium > 0, "reserved_premium should be non-zero after quote");
+
+        // Bind the policy at the full panel premium (equal to ATP when n_active=1).
+        s.on_policy_bound_as_panelist(atp);
+        // reserved_premium should be ~0 (may differ slightly due to integer division);
+        // aggregate_written_premium should equal atp.
+        assert_eq!(s.aggregate_written_premium, atp);
+        // reserved_premium released: total commitment = atp (written), not 2×atp.
+        assert_eq!(s.aggregate_written_premium + s.reserved_premium, atp);
+    }
 
     #[test]
     fn at_capacity_syndicate_declines_quote() {
@@ -685,7 +790,7 @@ mod tests {
         s.aggregate_written_premium = 4_999_999;
         let risk = make_risk(1_000_000);
         let (_, event) =
-            s.on_quote_requested(crate::types::Day(0), SubmissionId(1), &risk, true, None, 0.65);
+            s.on_quote_requested(crate::types::Day(0), SubmissionId(1), &risk, true, None, 0.65, 1);
         assert!(
             matches!(event, Event::QuoteDeclined { .. }),
             "expected QuoteDeclined when at capacity, got {event:?}"

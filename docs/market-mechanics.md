@@ -50,6 +50,8 @@ The underwriter channel reflects non-actuarial market intelligence: the current 
 
 Before emitting the quote, the syndicate checks whether accepting the risk at that premium would breach its exposure limits, concentration limits, or solvency floor. If so, the syndicate either declines or quotes a premium high enough to make acceptance capital-neutral. The coordinator does not intervene in this decision.
 
+**Per-risk maximum line:** Before the capacity check, the syndicate checks whether the risk's limit exceeds its maximum single-risk loss tolerance (a fraction of initial capital, representing the underwriting authority limit set by the managing agent). If so, the syndicate declines regardless of available annual capacity.
+
 ---
 
 ## 3. Lead-Follow Quoting Process
