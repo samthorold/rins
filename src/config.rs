@@ -37,9 +37,6 @@ pub struct SimulationConfig {
     pub n_large_insureds: usize,
     pub attritional: AttritionalConfig,
     pub catastrophe: CatConfig,
-    /// Days before PolicyExpired that an insured seeks renewal coverage.
-    /// Must be ≥ 3 (the quoting cycle length).
-    pub renewal_lead_days: u32,
 }
 
 /// Small insured asset value: 50M USD in cents.
@@ -57,7 +54,7 @@ impl SimulationConfig {
                 .map(|i| InsurerConfig {
                     id: InsurerId(i),
                     initial_capital: 100_000_000_000, // 1B USD in cents
-                    rate: 0.02,
+                    rate: 0.1,
                 })
                 .collect(),
             n_small_insureds: 90,
@@ -72,7 +69,6 @@ impl SimulationConfig {
                 pareto_scale: 0.05,     // minimum 5% damage fraction
                 pareto_shape: 1.5,      // E[df] = 0.05 × 1.5 / 0.5 = 0.15 (unclipped)
             },
-            renewal_lead_days: 14,
         }
     }
 }
