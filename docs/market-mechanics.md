@@ -26,6 +26,18 @@ The actuarial channel produces a long-run expected loss cost estimate for a subm
 - The ATP is not the quoted premium; it is a floor and an input.
 - EWMA decay parameter controls how fast the syndicate forgets old experience. *[TBD: per-line or per-syndicate?]*
 
+**Implementation note (current simplification):** The full actuarial channel above has not yet been implemented. The formula used in the removed actuarial implementation was:
+
+```
+ATP = E[annual_loss] / target_loss_ratio
+```
+
+where `E[annual_loss]` summed two peril contributions:
+- Attritional: `annual_rate × exp(mu + σ²/2) × sum_insured`
+- Cat (WindstormAtlantic): `annual_frequency × (scale × shape / (shape − 1)) × sum_insured`
+
+The `target_loss_ratio` parameter (0.65 canonical) scaled ATP to the final premium. This was replaced by a fixed rate on line: `premium = rate × sum_insured`, where `rate` is a single config parameter per insurer (0.02 = 2% canonical).
+
 ---
 
 ## 2. Syndicate Underwriter Channel

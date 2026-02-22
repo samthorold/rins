@@ -33,7 +33,7 @@ impl Simulation {
         let insurers: Vec<Insurer> = config
             .insurers
             .iter()
-            .map(|c| Insurer::new(c.id, c.initial_capital, c.target_loss_ratio))
+            .map(|c| Insurer::new(c.id, c.initial_capital, c.rate))
             .collect();
 
         let insurer_ids: Vec<InsurerId> = insurers.iter().map(|i| i.id).collect();
@@ -159,17 +159,9 @@ impl Simulation {
             }
 
             Event::LeadQuoteRequested { submission_id, insured_id, insurer_id, risk } => {
-                let att = &self.config.attritional;
-                let cat = &self.config.catastrophe;
                 if let Some(insurer) = self.insurers.iter().find(|i| i.id == insurer_id) {
-                    let (d, e) = insurer.on_lead_quote_requested(
-                        day,
-                        submission_id,
-                        insured_id,
-                        &risk,
-                        att,
-                        cat,
-                    );
+                    let (d, e) =
+                        insurer.on_lead_quote_requested(day, submission_id, insured_id, &risk);
                     self.schedule(d, e);
                 }
             }
@@ -272,15 +264,7 @@ impl Simulation {
                 }
             }
 
-            Event::InsuredLoss { policy_id, insured_id, peril, ground_up_loss } => {
-                // Update insured's GUL tracking.
-                let year = Year((day.0 / Day::DAYS_PER_YEAR) as u32 + 1);
-                for insured in &mut self.broker.insureds {
-                    if insured.id == insured_id {
-                        insured.on_insured_loss(ground_up_loss, peril, year);
-                        break;
-                    }
-                }
+            Event::InsuredLoss { policy_id, peril, ground_up_loss, .. } => {
                 // Apply policy terms → ClaimSettled.
                 let events =
                     self.market.on_insured_loss(day, policy_id, ground_up_loss, peril);
@@ -339,14 +323,7 @@ impl Simulation {
     }
 
     fn handle_year_end(&mut self, year: Year) {
-        // Log market statistics.
-        let lr = self.market.loss_ratio();
-        let premiums = self.market.total_premiums();
-        let claims = self.market.total_claims();
-        eprintln!("Year {}: premiums={premiums} claims={claims} LR={lr:.3}", year.0);
-
-        // Reset YTD accumulators.
-        self.market.reset_ytd();
+        eprintln!("Year {} complete", year.0);
 
         // Schedule next year if within simulation horizon.
         if year.0 < self.config.years {
@@ -371,7 +348,7 @@ mod tests {
             insurers: vec![InsurerConfig {
                 id: InsurerId(1),
                 initial_capital: 100_000_000_000,
-                target_loss_ratio: 0.65,
+                rate: 0.02,
             }],
             n_small_insureds: n_small,
             n_large_insureds: n_large,
@@ -620,7 +597,7 @@ mod tests {
             .map(|i| InsurerConfig {
                 id: InsurerId(i),
                 initial_capital: 100_000_000_000,
-                target_loss_ratio: 0.65,
+                rate: 0.02,
             })
             .collect();
         let sim = run_sim(config);

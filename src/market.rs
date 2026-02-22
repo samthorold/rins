@@ -25,9 +25,6 @@ pub struct Market {
     pub policies: HashMap<PolicyId, BoundPolicy>,
     /// insured_id → active PolicyId for this year.
     pub insured_active_policies: HashMap<InsuredId, PolicyId>,
-    /// YTD accumulators for loss ratio computation.
-    ytd_premiums: u64,
-    ytd_claims: u64,
     /// Per-(policy, year) remaining insurable asset value.
     /// Initialized to sum_insured on first hit; decremented to prevent aggregate GUL > sum_insured.
     remaining_asset_value: HashMap<(PolicyId, Year), u64>,
@@ -46,8 +43,6 @@ impl Market {
             pending_policies: HashMap::new(),
             policies: HashMap::new(),
             insured_active_policies: HashMap::new(),
-            ytd_premiums: 0,
-            ytd_claims: 0,
             remaining_asset_value: HashMap::new(),
         }
     }
@@ -66,8 +61,6 @@ impl Market {
     ) -> Vec<(Day, Event)> {
         let policy_id = PolicyId(self.next_policy_id);
         self.next_policy_id += 1;
-
-        self.ytd_premiums += premium;
 
         self.pending_policies.insert(
             policy_id,
@@ -177,34 +170,12 @@ impl Market {
             return vec![];
         }
 
-        self.ytd_claims += effective_gul;
-
         vec![(
             day,
             Event::ClaimSettled { policy_id, insurer_id, amount: effective_gul, peril },
         )]
     }
 
-    pub fn loss_ratio(&self) -> f64 {
-        if self.ytd_premiums > 0 {
-            self.ytd_claims as f64 / self.ytd_premiums as f64
-        } else {
-            0.0
-        }
-    }
-
-    pub fn total_premiums(&self) -> u64 {
-        self.ytd_premiums
-    }
-
-    pub fn total_claims(&self) -> u64 {
-        self.ytd_claims
-    }
-
-    pub fn reset_ytd(&mut self) {
-        self.ytd_premiums = 0;
-        self.ytd_claims = 0;
-    }
 }
 
 #[cfg(test)]
@@ -283,21 +254,6 @@ mod tests {
         let pid = policy_id.unwrap();
         assert!(market.pending_policies.contains_key(&pid));
         assert!(!market.policies.contains_key(&pid));
-    }
-
-    #[test]
-    fn on_quote_accepted_accumulates_ytd_premiums() {
-        let mut market = Market::new();
-        market.on_quote_accepted(
-            Day(0),
-            SubmissionId(1),
-            InsuredId(1),
-            InsurerId(1),
-            80_000,
-            small_risk(),
-            Year(1),
-        );
-        assert_eq!(market.ytd_premiums, 80_000);
     }
 
     #[test]
@@ -477,15 +433,6 @@ mod tests {
     }
 
     #[test]
-    fn on_insured_loss_accumulates_ytd_claims() {
-        let mut market = Market::new();
-        let pid = bind_policy(&mut market, 1, 1);
-        market.on_insured_loss(Day(10), pid, 50_000, Peril::Attritional);
-        market.on_insured_loss(Day(20), pid, 30_000, Peril::Attritional);
-        assert!(market.ytd_claims > 0);
-    }
-
-    #[test]
     fn aggregate_annual_gul_capped_at_sum_insured() {
         let mut market = Market::new();
         let pid = bind_policy(&mut market, 1, 1);
@@ -511,35 +458,12 @@ mod tests {
         assert!(events.is_empty(), "unknown policy_id must produce no events");
     }
 
-    // ── loss ratio ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn loss_ratio_computed_correctly() {
-        let mut market = Market::new();
-        let pid = bind_policy(&mut market, 1, 1); // adds 100_000 to ytd_premiums
-        market.on_insured_loss(Day(10), pid, 50_000, Peril::Attritional);
-        let lr = market.loss_ratio();
-        assert!((lr - 0.5).abs() < 1e-6, "loss_ratio={lr:.4}, expected 0.5");
-    }
-
-    #[test]
-    fn reset_ytd_clears_accumulators() {
-        let mut market = Market::new();
-        let pid = bind_policy(&mut market, 1, 1);
-        market.on_insured_loss(Day(10), pid, 50_000, Peril::Attritional);
-        market.reset_ytd();
-        assert_eq!(market.ytd_premiums, 0);
-        assert_eq!(market.ytd_claims, 0);
-        assert_eq!(market.loss_ratio(), 0.0);
-    }
-
     // ── on_quote_rejected ─────────────────────────────────────────────────────
 
     #[test]
     fn on_quote_rejected_is_noop() {
         let mut market = Market::new();
         market.on_quote_rejected(SubmissionId(99)); // must not panic
-        assert_eq!(market.ytd_premiums, 0);
         assert!(market.policies.is_empty());
     }
 }

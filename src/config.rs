@@ -3,7 +3,8 @@ use crate::types::InsurerId;
 pub struct InsurerConfig {
     pub id: InsurerId,
     pub initial_capital: i64, // signed to allow negative (no insolvency in MVP)
-    pub target_loss_ratio: f64,
+    /// Premium as a fraction of sum_insured (e.g. 0.02 = 2% rate on line).
+    pub rate: f64,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -56,7 +57,7 @@ impl SimulationConfig {
                 .map(|i| InsurerConfig {
                     id: InsurerId(i),
                     initial_capital: 100_000_000_000, // 1B USD in cents
-                    target_loss_ratio: 0.65,
+                    rate: 0.02,
                 })
                 .collect(),
             n_small_insureds: 90,

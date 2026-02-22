@@ -1,6 +1,6 @@
 use crate::config::{LARGE_ASSET_VALUE, SMALL_ASSET_VALUE};
 use crate::events::{Event, Peril, Risk};
-use crate::types::{Day, InsuredId, InsurerId, SubmissionId, Year};
+use crate::types::{Day, InsuredId, InsurerId, SubmissionId};
 
 /// Asset size tier for an insured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,8 +16,6 @@ pub struct Insured {
     pub asset_type: AssetType,
     /// The asset this insured holds and seeks coverage for.
     pub risk: Risk,
-    /// Cumulative ground-up losses experienced, keyed by year.
-    pub total_ground_up_loss_by_year: std::collections::HashMap<Year, u64>,
 }
 
 impl Insured {
@@ -31,12 +29,7 @@ impl Insured {
             AssetType::Small => SMALL_ASSET_VALUE,
             AssetType::Large => LARGE_ASSET_VALUE,
         };
-        Self {
-            id,
-            asset_type,
-            risk: Risk { sum_insured, territory, perils_covered },
-            total_ground_up_loss_by_year: std::collections::HashMap::new(),
-        }
+        Self { id, asset_type, risk: Risk { sum_insured, territory, perils_covered } }
     }
 
     pub fn sum_insured(&self) -> u64 {
@@ -61,11 +54,6 @@ impl Insured {
                 premium,
             },
         )]
-    }
-
-    /// Accumulate a ground-up loss for this insured.
-    pub fn on_insured_loss(&mut self, ground_up_loss: u64, _peril: Peril, year: Year) {
-        *self.total_ground_up_loss_by_year.entry(year).or_insert(0) += ground_up_loss;
     }
 }
 
@@ -102,21 +90,6 @@ mod tests {
             vec![Peril::WindstormAtlantic],
         );
         assert_eq!(insured.sum_insured(), LARGE_ASSET_VALUE);
-    }
-
-    #[test]
-    fn on_insured_loss_accumulates_by_year() {
-        let mut insured = Insured::new(
-            InsuredId(1),
-            AssetType::Small,
-            "US-SE".to_string(),
-            vec![Peril::WindstormAtlantic, Peril::Attritional],
-        );
-        insured.on_insured_loss(100_000, Peril::Attritional, Year(1));
-        insured.on_insured_loss(200_000, Peril::WindstormAtlantic, Year(1));
-        insured.on_insured_loss(50_000, Peril::Attritional, Year(2));
-        assert_eq!(insured.total_ground_up_loss_by_year[&Year(1)], 300_000);
-        assert_eq!(insured.total_ground_up_loss_by_year[&Year(2)], 50_000);
     }
 
     // ── on_quote_presented ────────────────────────────────────────────────────

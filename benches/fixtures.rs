@@ -59,7 +59,7 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
             .map(|i| InsurerConfig {
                 id: InsurerId(i),
                 initial_capital: 100_000_000_000,
-                target_loss_ratio: 0.65,
+                rate: 0.02,
             })
             .collect(),
         n_small_insureds: scenario.n_small_insureds,
