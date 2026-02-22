@@ -63,24 +63,57 @@ Assess each phenomenon currently tagged `[EMERGING]` or `[PARTIAL]` in `docs/phe
 
 #### §0 Risk Pooling — `[EMERGING]`
 
-*Claim: attritional LR is stable at market scale and more volatile at insurer scale, confirming the LLN pooling benefit. Cat LR is zero in quiet years and spikes sharply in cat years — structurally different from attritional.*
+*Claim: insurance benefits insureds by exchanging uncertain individual losses (high CV) for a fixed premium. LLN makes this possible — aggregate attritional losses are predictable (CV ~ 1/√N). Cat losses are correlated; pooling within one territory provides no variance reduction (cat CV ratio ≈ 1×).*
 
-Compute from `analyse_sim.py` output:
+Run this inline snippet against the already-generated `events.ndjson`:
 
-1. **Identify pure quiet years** — years with zero `LossEvent`s (from the "Loss events per year" table).
+```python
+import json, statistics, math
+from collections import defaultdict
 
-2. **Market attritional CV** — take market-level attritional LR% for each quiet year (from "Market-level Attritional vs Cat loss ratio" table, `AttrLR%` column). Compute CV = std_dev / mean across those years.
+ASSET = 5_000_000_000
+events = [json.loads(l) for l in open("events.ndjson") if l.strip()]
+cat_years = set()
+attr_gul = defaultdict(lambda: defaultdict(int))
+cat_gul  = defaultdict(lambda: defaultdict(int))
+active   = defaultdict(set)
 
-3. **Per-insurer attritional CV** — in pure quiet years, each insurer's total LR equals their attritional LR (no cat). From the "Per-insurer loss ratio" table, take each insurer's LR for those years, compute their individual CV, then take the **median** CV across all insurers.
+for e in events:
+    day, ev = e['day'], e['event']
+    if not isinstance(ev, dict): continue
+    y = day // 360 + 1
+    if 'LossEvent'   in ev: cat_years.add(y)
+    elif 'InsuredLoss' in ev:
+        il = ev['InsuredLoss']
+        (attr_gul if il['peril'] == 'Attritional' else cat_gul)[y][il['insured_id']] += il['ground_up_loss']
+    elif 'PolicyBound' in ev:
+        active[y].add(ev['PolicyBound']['insured_id'])
 
-4. **Cat contrast** — confirm cat LR = 0% in all quiet years AND cat LR ≥ 50% in at least one cat year (from "Market-level Attritional vs Cat loss ratio" table, `CatLR%` column).
+ind_attr, mkt_attr, ind_cat, mkt_cat = [], [], [], []
+for y in sorted(active):
+    if y == 1: continue   # skip staggered startup year
+    ids = active[y]; n = len(ids)
+    for iid in ids: ind_attr.append(attr_gul[y].get(iid, 0) / ASSET * 100)
+    mkt_attr.append(sum(attr_gul[y].get(i, 0) for i in ids) / n / ASSET * 100)
+    if y in cat_years:
+        for iid in ids: ind_cat.append(cat_gul[y].get(iid, 0) / ASSET * 100)
+        mkt_cat.append(sum(cat_gul[y].get(i, 0) for i in ids) / n / ASSET * 100)
+
+def cv(v): m = statistics.mean(v); return statistics.pstdev(v) / m
+n_ins = round(statistics.mean(len(active[y]) for y in active if y != 1))
+cv_ia, cv_ma = cv(ind_attr), cv(mkt_attr)
+print(f"Attritional  ind CV={cv_ia:.2f}  mkt CV={cv_ma:.2f}  ratio={cv_ia/cv_ma:.1f}x  (LLN √{n_ins}={math.sqrt(n_ins):.0f}x)")
+if ind_cat:
+    cv_ic, cv_mc = cv(ind_cat), cv(mkt_cat)
+    print(f"Cat          ind CV={cv_ic:.2f}  mkt CV={cv_mc:.2f}  ratio={cv_ic/cv_mc:.1f}x  ({len(mkt_cat)} cat-year obs)")
+```
 
 **Verdict thresholds:**
-- **CONFIRMED** — market attritional CV < 0.35 AND market CV < median insurer CV AND cat contrast holds
-- **PARTIAL** — market attritional CV < 0.35 but market CV ≥ median insurer CV (LLN visible at market scale but scale contrast absent), OR market CV < median insurer CV but cat contrast weak
-- **NOT VISIBLE** — market attritional CV ≥ 0.35 (loss ratio too volatile at market scale to claim stability)
+- **CONFIRMED** — attritional CV ratio > 5× AND cat CV ratio < 3× (pooling works for independent losses, fails for correlated)
+- **PARTIAL** — attritional CV ratio > 5× but cat CV ratio ≥ 3× (attritional pooling visible but cat contrast weak), OR attritional CV ratio 2–5× (some pooling but below expected LLN scale)
+- **NOT VISIBLE** — attritional CV ratio < 2× (individual and market losses are similarly volatile; pooling not operating)
 
-Report: market CV, median insurer CV, the ratio (market CV / median insurer CV), and the peak cat LR year.
+Report: individual attritional CV, market attritional CV, CV ratio, LLN prediction (√N), cat CV ratio, number of cat-year observations.
 
 ---
 
@@ -90,10 +123,10 @@ Report: market CV, median insurer CV, the ratio (market CV / median insurer CV),
 
 1. Identify severe years (market LR ≥ 100%) that are cat-driven (cat GUL% > 50% of total GUL).
 2. In each such year, confirm all five insurers have LR > 100% (shared occurrence, not idiosyncratic).
-3. Note final insurer capitals from simulation stdout — confirm they are negative, reflecting unprocessed accumulated losses.
+3. Note that capital resets each YearStart, so final capitals will be positive — the crisis manifests as within-year LR breaches, not terminal insolvency.
 
 **Verdict thresholds:**
-- **PARTIAL CONFIRMED** — at least one cat-driven severe year with all insurers breaching 100% LR; final capitals negative
+- **PARTIAL CONFIRMED** — at least one cat-driven severe year with all insurers breaching 100% LR
 - **NOT VISIBLE** — no cat-driven severe year, or insurers show divergent LRs in a cat year (routing bug)
 
 ---
