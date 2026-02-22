@@ -16,6 +16,7 @@ flowchart TD
     YS -->|"per insured, spread 0–179 days"| CR
     YS -->|"perils::schedule_loss_events\nPoisson(λ) — cat only"| LE
     YS -->|"schedule day year*360−1"| YE
+    YE -->|"Insurer::on_year_end\nEWMA update per insurer"| INS_YE
     YE -->|"schedule YearStart(year+1)\nif year < config.years"| YS
 
     %% ── Coverage request chain ──────────────────────────────────────────────
@@ -34,9 +35,10 @@ flowchart TD
 
     subgraph Insurer["Insurer\n(ATP pricing + exposure tracking)"]
         LQI["**LeadQuoteIssued**\n{submission_id, insured_id, insurer_id, atp, premium,\n cat_exposure_at_quote}\n(same day as LeadQuoteRequested)"]
-        CS_I["on_claim_settled\ncapital −= amount"]
-        INS_PB["on_policy_bound\ncat_aggregate += sum_insured"]
+        CS_I["on_claim_settled\ncapital −= amount\nyear_claims += amount"]
+        INS_PB["on_policy_bound\nyear_exposure += sum_insured\ncat_aggregate += sum_insured (cat only)"]
         INS_PE["on_policy_expired\ncat_aggregate −= sum_insured"]
+        INS_YE["on_year_end\nEWMA: elf = α×realized_lf + (1-α)×elf\nreset year_claims, year_exposure"]
     end
 
     subgraph Market["Market (Coordinator)"]
@@ -80,7 +82,7 @@ flowchart TD
 |---|-------|----------|----------|------------|---------------------|
 | 1 | `SimulationStart { year_start }` | bootstrap (`main`) | `Simulation::dispatch` → schedule `YearStart` | Day 0 | — |
 | 2 | `YearStart { year }` | `SimulationStart` handler / `YearEnd` handler | `Simulation::handle_year_start`: endow capital, schedule `CoverageRequested` per insured, schedule cat, schedule `YearEnd` | `(year-1) × 360` | §7 Capital & Solvency |
-| 3 | `YearEnd { year }` | `YearStart` handler | `Simulation::handle_year_end`: log stats, reset YTD, schedule next `YearStart` | `year × 360 − 1` | §8.2 Coordinator Statistics |
+| 3 | `YearEnd { year }` | `YearStart` handler | `Simulation::handle_year_end`: call `Insurer::on_year_end` (EWMA update + YTD reset), schedule next `YearStart` | `year × 360 − 1` | §4.1 Actuarial channel, §8.2 Coordinator Statistics |
 | 4 | `CoverageRequested { insured_id, risk }` | `YearStart` handler | `Broker::on_coverage_requested` → emit `LeadQuoteRequested` | spread days 0–179 of year | §5 Placement |
 | 5 | `LeadQuoteRequested { submission_id, insured_id, insurer_id, risk }` | `Broker` | `Insurer::on_lead_quote_requested` → emit `LeadQuoteIssued` | +1 from `CoverageRequested` | §5 Placement, §4.1 Actuarial channel |
 | 6 | `LeadQuoteIssued { submission_id, insured_id, insurer_id, atp, premium, cat_exposure_at_quote }` | `Insurer` | `Broker::on_lead_quote_issued` → emit `QuotePresented` | same day as `LeadQuoteRequested` | §4 Pricing, §5 Placement |

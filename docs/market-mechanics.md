@@ -154,7 +154,13 @@ In Step 0 (technical pricing baseline), ATP is the quoted premium. The underwrit
 
 *[TBD: EWMA decay parameter — per-line or per-syndicate?]*
 
-**Current simplified implementation:** `actuarial_price()` computes `expected_loss_fraction × sum_insured / target_loss_ratio` using a fixed per-insurer prior for `expected_loss_fraction` (calibrated from peril model parameters). The ATP is logged in `LeadQuoteIssued.atp` and is also the quoted `premium` (Step 0: `underwriter_adjustment = 0`). Runtime experience (EWMA loss ratio) is not yet implemented.
+**Current simplified implementation:** `actuarial_price()` computes `expected_loss_fraction × sum_insured / target_loss_ratio`. At each `YearEnd`, each insurer updates its `expected_loss_fraction` via EWMA from its realized burning cost:
+
+```
+new_elf = α × (year_claims / year_exposure) + (1 − α) × old_elf
+```
+
+where `α = ewma_credibility` (canonical 0.3) and `year_claims`, `year_exposure` are accumulated during the year via `on_claim_settled` and `on_policy_bound`. If no exposure was written the prior is unchanged. The ATP is logged in `LeadQuoteIssued.atp` and is also the quoted `premium` (Step 0: `underwriter_adjustment = 0`). Credibility blending with an industry benchmark and per-line experience are not yet implemented.
 
 ```
 ATP = E[annual_loss] / target_loss_ratio

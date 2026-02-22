@@ -44,6 +44,7 @@ impl Simulation {
                     c.initial_capital,
                     c.expected_loss_fraction,
                     c.target_loss_ratio,
+                    c.ewma_credibility,
                     c.max_cat_aggregate,
                     c.max_line_size,
                 )
@@ -342,6 +343,11 @@ impl Simulation {
     fn handle_year_end(&mut self, year: Year) {
         eprintln!("Year {} complete", year.0);
 
+        // Update each insurer's expected_loss_fraction via EWMA from this year's experience.
+        for insurer in &mut self.insurers {
+            insurer.on_year_end();
+        }
+
         // Schedule next year if within simulation horizon.
         if year.0 < self.config.years {
             let next = Year(year.0 + 1);
@@ -367,6 +373,7 @@ mod tests {
                 initial_capital: 100_000_000_000,
                 expected_loss_fraction: 0.239,
                 target_loss_ratio: 0.70,
+                ewma_credibility: 0.3,
                 max_cat_aggregate: None,
                 max_line_size: None,
             }],
@@ -617,6 +624,7 @@ mod tests {
                 initial_capital: 100_000_000_000,
                 expected_loss_fraction: 0.239,
                 target_loss_ratio: 0.70,
+                ewma_credibility: 0.3,
                 max_cat_aggregate: None,
                 max_line_size: None,
             })

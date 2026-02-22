@@ -3,12 +3,15 @@ use crate::types::InsurerId;
 pub struct InsurerConfig {
     pub id: InsurerId,
     pub initial_capital: i64, // signed to allow negative (no insolvency in MVP)
-    /// E[annual_loss] / sum_insured, combining all perils. Used by actuarial channel.
+    /// E[annual_loss] / sum_insured, combining all perils. Initial prior; updated each year by EWMA.
     /// Canonical: E_att(0.164) + E_cat(0.075) ≈ 0.239.
     pub expected_loss_fraction: f64,
     /// Target combined loss ratio. ATP = expected_loss_fraction / target_loss_ratio.
     /// With target_loss_ratio < 1, ATP includes a profit margin above expected loss.
     pub target_loss_ratio: f64,
+    /// EWMA credibility weight α ∈ (0, 1): new_elf = α × realized_lf + (1-α) × old_elf.
+    /// Higher α = faster response to recent experience; lower α = more weight on history.
+    pub ewma_credibility: f64,
     /// Max WindstormAtlantic aggregate sum_insured across all in-force policies (None = unlimited).
     pub max_cat_aggregate: Option<u64>,
     /// Max sum_insured on any single risk (None = unlimited).
@@ -60,6 +63,7 @@ impl SimulationConfig {
                     initial_capital: 100_000_000_000, // 1B USD in cents
                     expected_loss_fraction: 0.239, // E_att(0.164) + E_cat(0.075)
                     target_loss_ratio: 0.70,
+                    ewma_credibility: 0.3,
                     max_cat_aggregate: None,
                     max_line_size: None,
                 })

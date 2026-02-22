@@ -11,10 +11,16 @@ pub struct Insurer {
     /// Current capital (signed to allow negative without panicking).
     pub capital: i64,
     pub initial_capital: i64,
-    /// Actuarial channel: E[annual_loss] / sum_insured across all perils.
+    /// Actuarial channel: live E[annual_loss] / sum_insured, updated each YearEnd via EWMA.
     expected_loss_fraction: f64,
     /// Actuarial channel: ATP = expected_loss_fraction / target_loss_ratio.
     target_loss_ratio: f64,
+    /// EWMA credibility weight α: new_elf = α × realized_lf + (1-α) × old_elf.
+    ewma_credibility: f64,
+    /// YTD settled claims (cents); accumulated by on_claim_settled; reset at YearEnd.
+    year_claims: u64,
+    /// YTD written exposure (sum_insured, cents); accumulated by on_policy_bound; reset at YearEnd.
+    year_exposure: u64,
     /// Exposure management: live WindstormAtlantic aggregate sum_insured.
     pub cat_aggregate: u64,
     /// Max WindstormAtlantic aggregate (None = unlimited).
@@ -31,6 +37,7 @@ impl Insurer {
         initial_capital: i64,
         expected_loss_fraction: f64,
         target_loss_ratio: f64,
+        ewma_credibility: f64,
         max_cat_aggregate: Option<u64>,
         max_line_size: Option<u64>,
     ) -> Self {
@@ -40,6 +47,9 @@ impl Insurer {
             initial_capital,
             expected_loss_fraction,
             target_loss_ratio,
+            ewma_credibility,
+            year_claims: 0,
+            year_exposure: 0,
             cat_aggregate: 0,
             max_cat_aggregate,
             max_line_size,
@@ -82,8 +92,9 @@ impl Insurer {
         )
     }
 
-    /// A policy has been bound. Update WindstormAtlantic aggregate if the risk covers cat.
+    /// A policy has been bound. Accumulate written exposure for EWMA; update cat aggregate.
     pub fn on_policy_bound(&mut self, policy_id: PolicyId, sum_insured: u64, perils: &[Peril]) {
+        self.year_exposure += sum_insured;
         if perils.contains(&Peril::WindstormAtlantic) {
             self.cat_aggregate += sum_insured;
             self.cat_policy_map.insert(policy_id, sum_insured);
@@ -110,9 +121,22 @@ impl Insurer {
         self.actuarial_price(risk)
     }
 
-    /// Deduct a settled claim from capital (can go negative — no insolvency logic yet).
+    /// Deduct a settled claim from capital and accumulate YTD claims for EWMA.
     pub fn on_claim_settled(&mut self, amount: u64) {
         self.capital -= amount as i64;
+        self.year_claims += amount;
+    }
+
+    /// Update expected_loss_fraction via EWMA from this year's realized burning cost,
+    /// then reset YTD accumulators. No-op if no exposure was written this year.
+    pub fn on_year_end(&mut self) {
+        if self.year_exposure > 0 {
+            let realized_lf = self.year_claims as f64 / self.year_exposure as f64;
+            self.expected_loss_fraction = self.ewma_credibility * realized_lf
+                + (1.0 - self.ewma_credibility) * self.expected_loss_fraction;
+        }
+        self.year_claims = 0;
+        self.year_exposure = 0;
     }
 }
 
@@ -131,7 +155,18 @@ mod tests {
     }
 
     fn make_insurer(id: InsurerId, capital: i64) -> Insurer {
-        Insurer::new(id, capital, 0.239, 0.70, None, None)
+        Insurer::new(id, capital, 0.239, 0.70, 0.3, None, None)
+    }
+
+    /// Helper: quote and return the ATP for a standard small_risk().
+    fn quote_atp(ins: &Insurer) -> u64 {
+        let risk = Risk {
+            sum_insured: ASSET_VALUE,
+            territory: "US-SE".to_string(),
+            perils_covered: vec![Peril::Attritional],
+        };
+        let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
+        if let Event::LeadQuoteIssued { atp, .. } = event { atp } else { panic!("expected LeadQuoteIssued") }
     }
 
     #[test]
@@ -331,5 +366,83 @@ mod tests {
         } else {
             panic!("expected LeadQuoteIssued");
         }
+    }
+
+    // ── EWMA experience update ────────────────────────────────────────────────
+
+    #[test]
+    fn on_year_end_raises_atp_after_high_loss_year() {
+        // Bind one policy; settle a claim equal to 100% of sum_insured.
+        // Realized LF = 1.0 >> prior ELF = 0.239 → ATP must increase.
+        let mut ins = make_insurer(InsurerId(1), 0);
+        let atp_before = quote_atp(&ins);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_claim_settled(ASSET_VALUE);
+        ins.on_year_end();
+        let atp_after = quote_atp(&ins);
+        assert!(atp_after > atp_before, "ATP must rise after a 100% LF year: {atp_after} vs {atp_before}");
+    }
+
+    #[test]
+    fn on_year_end_lowers_atp_after_benign_year() {
+        // Bind one policy; no claims. Realized LF = 0 < prior ELF = 0.239 → ATP must fall.
+        let mut ins = make_insurer(InsurerId(1), 0);
+        let atp_before = quote_atp(&ins);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        // no claims
+        ins.on_year_end();
+        let atp_after = quote_atp(&ins);
+        assert!(atp_after < atp_before, "ATP must fall after a 0% LF year: {atp_after} vs {atp_before}");
+    }
+
+    #[test]
+    fn ewma_formula_matches_exact_calculation() {
+        // α=0.3, realized LF = 0.5 (claim = ASSET_VALUE/2, exposure = ASSET_VALUE).
+        // New ELF = 0.3 × 0.5 + 0.7 × 0.239 = 0.15 + 0.1673 = 0.3173.
+        let mut ins = make_insurer(InsurerId(1), 0);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_claim_settled(ASSET_VALUE / 2);
+        ins.on_year_end();
+        let expected_elf = 0.3 * 0.5 + 0.7 * 0.239;
+        let expected_atp = (expected_elf * ASSET_VALUE as f64 / 0.70).round() as u64;
+        assert_eq!(quote_atp(&ins), expected_atp, "EWMA must match α × realized + (1-α) × prior");
+    }
+
+    #[test]
+    fn on_year_end_with_no_exposure_leaves_atp_unchanged() {
+        let mut ins = make_insurer(InsurerId(1), 0);
+        let atp_before = quote_atp(&ins);
+        ins.on_year_end(); // no policies bound, no claims
+        assert_eq!(quote_atp(&ins), atp_before, "ATP must not change if no exposure was written");
+    }
+
+    #[test]
+    fn on_year_end_resets_so_second_call_without_new_data_is_noop() {
+        // After on_year_end resets counters, a second on_year_end with no new
+        // policies or claims must leave ATP unchanged.
+        let mut ins = make_insurer(InsurerId(1), 0);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_claim_settled(ASSET_VALUE);
+        ins.on_year_end(); // ELF updated, counters reset
+        let atp_year1 = quote_atp(&ins);
+        ins.on_year_end(); // no new data → noop
+        assert_eq!(quote_atp(&ins), atp_year1, "second on_year_end with no data must be a noop");
+    }
+
+    #[test]
+    fn ewma_compounds_over_multiple_years() {
+        // Two consecutive high-loss years should push ELF higher than one.
+        let mut ins = make_insurer(InsurerId(1), 0);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_claim_settled(ASSET_VALUE);
+        ins.on_year_end();
+        let atp_after_year1 = quote_atp(&ins);
+
+        ins.on_policy_bound(PolicyId(2), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_claim_settled(ASSET_VALUE);
+        ins.on_year_end();
+        let atp_after_year2 = quote_atp(&ins);
+
+        assert!(atp_after_year2 > atp_after_year1, "consecutive bad years must compound ELF upward");
     }
 }

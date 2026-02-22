@@ -57,6 +57,7 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
                 initial_capital: 100_000_000_000,
                 expected_loss_fraction: 0.239,
                 target_loss_ratio: 0.70,
+                ewma_credibility: 0.3,
                 max_cat_aggregate: None,
                 max_line_size: None,
             })
