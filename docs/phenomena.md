@@ -2,9 +2,35 @@
 
 This is a living document. Phenomena are added as the literature review progresses and removed or merged when the simulation makes them redundant or subsumes them. Parameter values are not specified here — that is calibration work, not architecture.
 
+**Status badges:** `[EMERGING]` = visible and measurable in current output; `[PARTIAL]` = some aspects emergent, key drivers not yet implemented; `[PLANNED]` = designed, requires planned mechanics before it can emerge; `[TBD]` = identified but not yet specified.
+
+| # | Phenomenon | Status |
+|---|---|---|
+| 0 | Risk Pooling (Law of Large Numbers) | EMERGING |
+| 1 | Underwriting Cycle | PLANNED |
+| 2 | Catastrophe-Amplified Capital Crisis | PARTIAL |
+| 3 | Broker-Syndicate Network Herding | PLANNED |
+| 4 | Specialist vs. Generalist Divergence | PLANNED |
+| 5 | Relationship-Driven Placement Stickiness | PLANNED |
+| 6 | Counter-cyclical Capacity Supply | PLANNED |
+| 7 | Post-Catastrophe Market Concentration Surge | PLANNED |
+| 8 | Geographic and Peril Accumulation Risk | PARTIAL |
+| 9 | Experience Rating and Insured Risk Quality | PLANNED |
+| 10 | Layer-Position Premium Gradient | PLANNED |
+
 ---
 
-## 1. Underwriting Cycle (Hard/Soft Market Alternation)
+## 0. Risk Pooling (Law of Large Numbers) `[EMERGING]`
+
+**What it is:** When a pool of independent (or weakly-correlated) risks is assembled, the portfolio loss ratio becomes more predictable as pool size grows. The coefficient of variation (CV) of aggregate attritional losses declines with the square root of N independent risks — the law of large numbers. This is the mathematical basis for insurance viability. Catastrophe risk is the structural contrast: a single shared occurrence strikes all exposed risks simultaneously; adding more risks in the same territory does not reduce the CV of the cat component — only diversification across uncorrelated territories and perils does.
+
+**Why it matters:** Validates the attritional loss model and demonstrates that the cat/attritional split is not cosmetic — the two components behave structurally differently under pooling. A correct simulation will show stable attritional loss ratios year-over-year and volatile cat loss ratios that do not narrow as insured count grows (for a single-territory book). The contrast between the two is a first-principles sanity check on the entire loss architecture.
+
+**Already measurable:** With 100 insureds (90 small + 10 large), the attritional market loss ratio is stable across years while the cat loss ratio is zero in most years and spikes sharply in catastrophe years. Per-insurer loss ratios in quiet years are driven primarily by attritional variance at the syndicate scale (N≈20 policies per insurer), while market-level attritional variance is visibly tighter — demonstrating pooling at market scale vs. syndicate scale. No hardcoded smoothing produces this; it arises from the LogNormal attritional model and independent per-policy draws.
+
+---
+
+## 1. Underwriting Cycle (Hard/Soft Market Alternation) `[PLANNED]`
 
 **What it is:** Aggregate market premium rates oscillate over multi-year cycles. Hard markets follow large loss events or capital shocks; soft markets emerge as capital is rebuilt and competition intensifies. Cycles in Lloyd's have historically run 5–10 years peak-to-peak.
 
@@ -12,9 +38,11 @@ This is a living document. Phenomena are added as the literature review progress
 
 **Expected agent mechanism:** After a large loss event, syndicates reduce capacity (capital constraint), survivors raise rates. New capital enters attracted by elevated returns, capacity expands, competition drives rates down. The lag between loss, capital adjustment, and pricing response produces the oscillation. No agent targets a cycle — it emerges from individual capital management and competitive pricing responses.
 
+*Requires: pricing-response mechanism (§4.1/4.2 of market-mechanics.md).*
+
 ---
 
-## 2. Catastrophe-Amplified Capital Crisis
+## 2. Catastrophe-Amplified Capital Crisis `[PARTIAL]`
 
 **What it is:** A large catastrophe (or correlated sequence) forces simultaneous syndicate losses that exceed what normal capital buffers can absorb, producing a wave of insolvencies or forced capital calls that temporarily removes a significant fraction of market capacity.
 
@@ -24,9 +52,11 @@ This is a living document. Phenomena are added as the literature review progress
 
 **Correlation mechanism note:** within a single catastrophe event, damage fractions across policies are sampled independently. The correlation across syndicates arises entirely from the *shared occurrence*: every syndicate writing US-SE property risks is struck by the same windstorm year. Per-policy severity remains independent; diversification *within* a single territory therefore does not reduce cat exposure materially. Only diversification *across* perils and territories reduces a syndicate's probability of being hit hard in a given year. This distinction is important: a syndicate writing 500 US-SE property risks is not more protected than one writing 50 — only one writing across US-SE, EU, and JP is.
 
+*Capital losses already land correctly. Insolvency processing not yet active (market-mechanics.md §6).*
+
 ---
 
-## 3. Broker-Syndicate Network Herding
+## 3. Broker-Syndicate Network Herding `[PLANNED]`
 
 **What it is:** When syndicates on a risk panel observe a credible lead quote, followers converge on similar rates even if their own actuarial estimates differ. This produces clustered pricing and amplifies both under- and over-pricing errors across the market.
 
@@ -34,9 +64,11 @@ This is a living document. Phenomena are added as the literature review progress
 
 **Expected agent mechanism:** Broker relationship scores concentrate placement with a small number of high-relationship syndicates. Those syndicates are therefore disproportionately likely to be leads. Follower syndicates weight the lead quote heavily in their underwriter channel. When the lead misprices (either direction), the network amplifies the error. The herding strength is a function of the relationship-score concentration, which is itself an emergent property of past placement decisions.
 
+*Requires: relationship scores and lead-follow mode (market-mechanics.md §5).*
+
 ---
 
-## 4. Specialist vs. Generalist Divergence
+## 4. Specialist vs. Generalist Divergence `[PLANNED]`
 
 **What it is:** Syndicates with narrow line-of-business specialisms outperform generalists during periods of stable loss experience in their specialty but are more vulnerable to correlated catastrophe shocks within that line.
 
@@ -44,9 +76,11 @@ This is a living document. Phenomena are added as the literature review progress
 
 **Expected agent mechanism:** Specialism parameters bias syndicate risk selection toward specific lines. Brokers, through relationship routing, channel matching risks to specialists (better service, faster quotes, more competitive pricing on familiar risks). Specialists accumulate concentrated books that price well on average but have high tail correlation.
 
+*Requires: specialism parameters and relationship-score routing (market-mechanics.md §5).*
+
 ---
 
-## 5. Relationship-Driven Placement Stickiness
+## 5. Relationship-Driven Placement Stickiness `[PLANNED]`
 
 **What it is:** Despite available capacity from new or lower-priced syndicates, brokers continue routing risks to established partners. Market share adjusts slowly even when pricing differences are material.
 
@@ -54,9 +88,11 @@ This is a living document. Phenomena are added as the literature review progress
 
 **Expected agent mechanism:** Broker relationship scores decay slowly and are reinforced by successful placements. New syndicates start with low scores and must win business at disadvantaged terms to build reputation. Existing relationships are retained even when the established syndicate is not the cheapest quote, because the broker internalises service quality, panel reliability, and future reciprocity.
 
+*Requires: relationship scores (market-mechanics.md §5).*
+
 ---
 
-## 6. Counter-cyclical Capacity Supply
+## 6. Counter-cyclical Capacity Supply `[PLANNED]`
 
 **What it is:** After capital shocks and hard-market rate spikes, new syndicates enter the market attracted by elevated returns, gradually restoring capacity. During sustained soft markets or following catastrophe-driven insolvencies, syndicates exit — voluntarily or through insolvency. The aggregate effect is a lagged counter-cyclical adjustment of total market capacity that partially moderates rate spikes and prevents permanent post-catastrophe oligopolisation.
 
@@ -64,9 +100,11 @@ This is a living document. Phenomena are added as the literature review progress
 
 **Expected agent mechanism:** When industry aggregate statistics cross an entry-attractiveness threshold the coordinator creates a new Syndicate with low initial broker relationship scores. The new syndicate must compete for placements to build scores; brokers route to it slowly because it ranks below established partners. Its capacity contribution is therefore delayed. The interaction of this lag with phenomena 1 (underwriting cycle) and 7 (concentration surge) produces the full multi-year recovery arc.
 
+*Requires: syndicate entry/exit (market-mechanics.md §7).*
+
 ---
 
-## 7. Post-Catastrophe Market Concentration Surge
+## 7. Post-Catastrophe Market Concentration Surge `[PLANNED]`
 
 **What it is:** A catastrophe-amplified capital crisis removes multiple syndicates simultaneously, concentrating market share among surviving firms — disproportionately those that are larger, more diversified, or better-capitalised. Surviving syndicates temporarily dominate panel assembly, enabling above-normal pricing and deepening their broker relationships until new entrants erode their position over subsequent years.
 
@@ -74,9 +112,11 @@ This is a living document. Phenomena are added as the literature review progress
 
 **Expected agent mechanism:** Insolvency events remove syndicates from the coordinator's active set, mechanically raising surviving syndicates' market share. With fewer competitors, surviving syndicates receive more placement attempts, receive stronger relationship-score reinforcement, and can price above ATP. Elevated returns trigger entry (phenomenon 6), and entrants gradually restore competition as their scores accumulate. No agent targets concentration — the surge and its unwinding are entirely the product of capital management, insolvency processing, relationship-score dynamics, and panel assembly.
 
+*Requires: insolvency processing (market-mechanics.md §6) and syndicate entry/exit (market-mechanics.md §7).*
+
 ---
 
-## 8. Geographic and Peril Accumulation Risk
+## 8. Geographic and Peril Accumulation Risk `[PARTIAL]`
 
 **What it is:** Catastrophe losses are geographically and peril-correlated: a single event strikes all syndicates holding exposure in the affected region simultaneously. The routing patterns that emerge from relationship scores and specialism parameters produce systematic accumulation of correlated exposure within syndicates and across panels. Syndicates that fail to spread exposure across regions and perils face amplified catastrophe losses relative to the market average, increasing their insolvency probability.
 
@@ -86,9 +126,11 @@ This is a living document. Phenomena are added as the literature review progress
 
 **Accumulation at the Insured level:** accumulation risk exists on the demand side too. An Insured holding multiple risks in the same territory — a manufacturing group with plants across US-SE, for example — accumulates correlated ground-up losses across all of its assets in a single cat event. The sum of GUL across policies can far exceed any single policy limit, and the insured absorbs whatever portion falls below attachments or above limits. This creates demand-side pressure: insureds that suffer repeated large events may restructure their coverage (higher limits, lower attachments, multi-year contracts) or seek alternative risk transfer. That feedback is not yet modelled but is a future target, because it would alter the size and structure of the submission population over time.
 
+*Cat correlation visible in current output. Cross-territory contrast not yet measurable (single territory model); full divergence requires multi-territory specialism (market-mechanics.md §5).*
+
 ---
 
-## 9. Experience Rating and Insured Risk Quality
+## 9. Experience Rating and Insured Risk Quality `[PLANNED]`
 
 *Not yet implemented. This section documents the intended phenomenon so the feature can be designed against it.*
 
@@ -100,9 +142,11 @@ This is a living document. Phenomena are added as the literature review progress
 
 **Expected agent mechanism:** After each annual period, syndicates with sufficient loss history for an insured apply a credibility-weighted surcharge to the ATP for that insured's next renewal. Insureds with GUL consistently below attachment attract competition and tighter terms; those with GUL repeatedly exceeding the policy limit face higher attachments or panel defection. The coordinator does not enforce this — it emerges from individual syndicate decisions to accept or decline renewals based on accumulated experience. The emergent phenomenon: chronically high-GUL insureds face shrinking panel participation, eventually concentrating in specialist syndicates or exiting the market; low-GUL insureds attract broad panel competition and declining rates.
 
+*GUL history exists in the current model; feedback path not yet implemented.*
+
 ---
 
-## 10. Layer-Position Premium Gradient
+## 10. Layer-Position Premium Gradient `[PLANNED]`
 
 **What it is:** In a layered insurance programme, the premium per unit of limit (rate on line, ROL) decreases systematically with attachment height. Working/primary layers — hit by every moderate loss and all catastrophes — attract ROLs of 15–30%; upper/remote layers — triggered only by extreme events — attract ROLs of 1–8%. This gradient is not negotiated ad hoc: it emerges from the underlying expected loss distribution of each layer and from the competition among syndicates with different risk appetites for each position.
 
@@ -111,5 +155,9 @@ This is a living document. Phenomena are added as the literature review progress
 **Expected agent mechanism:** Syndicates specialising in lower-layer positions accumulate working losses every year (attritional and moderate cat penetration). Their loss experience is noisier but more predictable; pricing is data-rich. After a bad loss year, their EWMA-based ATP rises sharply and they increase quotes, hardening the primary-market segment. Syndicates specialising in upper layers experience long quiet periods punctuated by large single-event losses. Their ATP rises only when a large cat event actually triggers their layer; their cycle timing is therefore event-driven rather than continuous. This asynchrony between primary-layer and remote-layer hardening is a second-order cycle effect: the overall hard market rate index averages two segments that are hardening for different reasons at different speeds.
 
 **Connection to other phenomena:** Layer-position dynamics are a refinement of phenomenon 4 (Specialist vs. Generalist Divergence) — layer-position specialism adds a vertical dimension to the existing line-of-business horizontal dimension. They also modulate phenomenon 1 (Underwriting Cycle): the full-market ROL index masks the divergent dynamics in each layer segment, which can produce apparent cycle dampening in aggregate that conceals structural stress in the working-layer segment.
+
+*Requires: programme structures (market-mechanics.md §9.2).*
+
+---
 
 *Add new phenomena here as the literature review and calibration work identify them.*
