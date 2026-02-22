@@ -69,7 +69,7 @@ impl SimulationConfig {
             seed: 42,
             years: 20,
             warmup_years: 2,
-            // 5 insurers, each endowed with 1B USD capital each year.
+            // 5 insurers, each endowed with 1B USD capital at construction; persists year-over-year.
             insurers: (1..=5)
                 .map(|i| InsurerConfig {
                     id: InsurerId(i),

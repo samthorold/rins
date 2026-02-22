@@ -8,6 +8,11 @@ Run from the project root after `cargo run`:
 import json, collections
 from pathlib import Path
 
+# Capital reconstruction constants (analysis-only; simulation drives actual behaviour).
+# Update these if canonical config changes.
+EXPENSE_RATIO   = 0.344   # canonical; net_premium = gross_premium × (1 − EXPENSE_RATIO)
+INITIAL_CAPITAL = 100_000_000_000   # 1 B USD in cents per insurer (canonical)
+
 events = [json.loads(l) for l in Path("events.ndjson").read_text().splitlines() if l.strip()]
 
 def year(day): return day // 360 + 1
@@ -339,3 +344,56 @@ for y in years:
     total_caq = sum(cat_exposure_at_quote_sum[y].values())
     row_caq = f"  {y:>2}" + "".join(f"  {cat_exposure_at_quote_sum[y].get(i,0):>8}" for i in all_insurers) + f"  {total_caq:>12}"
     print(row_caq)
+
+# ── Capital evolution (reconstructed from event stream) ───────────────────────
+# Capital is internal state (not emitted as an event); we reconstruct it from
+# premiums and claims using the canonical EXPENSE_RATIO and INITIAL_CAPITAL.
+
+net_premium_by_year = {
+    y: {i: int(premiums[y].get(i, 0) * (1.0 - EXPENSE_RATIO)) for i in all_insurers}
+    for y in years
+}
+annual_pl_by_year = {
+    y: {i: net_premium_by_year[y][i] - claims[y].get(i, 0) for i in all_insurers}
+    for y in years
+}
+# Cumulative P&L from start of analysis period (delta from INITIAL_CAPITAL).
+cum_pl: dict = {}
+running = {i: 0 for i in all_insurers}
+for y in years:
+    for i in all_insurers:
+        running[i] += annual_pl_by_year[y][i]
+    cum_pl[y] = dict(running)
+
+capital_by_year = {
+    y: {i: INITIAL_CAPITAL + cum_pl[y][i] for i in all_insurers}
+    for y in years
+}
+
+hdr_cap = f"{'Year':>4}" + "".join(f"  Ins{i:>2}" for i in all_insurers)
+
+print("\n=== Annual net premium and claims flow per insurer per year (cents) ===")
+print("(net_premium = gross × (1 − EXPENSE_RATIO); P&L = net_premium − claims)")
+for y in years:
+    parts = []
+    for i in all_insurers:
+        np = net_premium_by_year[y][i]
+        cl = claims[y].get(i, 0)
+        pl = annual_pl_by_year[y][i]
+        parts.append(f"  Ins{i} NP={np:>12} Cl={cl:>12} PL={pl:>+13}")
+    print(f"  Year {y:>2}:" + "".join(parts))
+
+print("\n=== Cumulative P&L per insurer per year (delta from initial capital, cents) ===")
+print(hdr_cap)
+for y in years:
+    row = f"  {y:>2}" + "".join(f"  {cum_pl[y].get(i,0):>+14}" for i in all_insurers)
+    print(row)
+
+print("\n=== Estimated capital per insurer per year (cents) ===")
+print(f"(starting from INITIAL_CAPITAL = {INITIAL_CAPITAL:,})")
+print(hdr_cap)
+for y in years:
+    row = f"  {y:>2}" + "".join(f"  {capital_by_year[y].get(i,0):>16}" for i in all_insurers)
+    print(row)
+if any(capital_by_year[y].get(i, INITIAL_CAPITAL) < 0 for y in years for i in all_insurers):
+    print("  *** WARNING: estimated capital went negative for at least one insurer/year ***")

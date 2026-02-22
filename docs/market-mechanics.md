@@ -29,6 +29,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Quarterly renewal seasonality | PLANNED | — |
 | Programme structures / towers | PLANNED | — |
 | Experience rating (per-insured surcharge) | PLANNED | — |
+| Persistent capital (premiums accumulate, claims erode, no annual reset) | ACTIVE | `src/insurer.rs` |
 | Central Fund / managed runoff | TBD | — |
 
 ---
@@ -124,9 +125,9 @@ Canonical config: 100 uniform insureds (sum_insured = 50M USD each).
 
 ### §3.2 Insurers (Syndicates) `[ACTIVE]`
 
-Each Insurer provides capacity and prices risks. State: `id`, `capital`, `active_policies`. Capital is reset at each `YearStart`. Source: `src/insurer.rs`.
+Each Insurer provides capacity and prices risks. State: `id`, `capital`, `active_policies`. Capital is endowed once at construction and evolves with the insurer's P&L (premiums credited at bind, claims deducted at settlement). No annual re-endowment. Source: `src/insurer.rs`.
 
-Canonical config: 5 insurers, 100B USD capital each.
+Canonical config: 5 insurers, 1B USD initial capital each.
 
 ### §3.3 Broker `[ACTIVE]`
 
@@ -329,7 +330,30 @@ The following invariants hold in every simulation run:
 
 ---
 
-## 7. Capital and Solvency `[PLANNED]`
+## 7. Capital and Solvency
+
+### §7.0 Persistent capital model `[ACTIVE]`
+
+Each insurer begins with `initial_capital` (canonical: 1 B USD). Capital evolves throughout
+the simulation:
+
+- **Credit:** net premium (gross premium × (1 − expense_ratio)) credited at `PolicyBound`.
+- **Debit:** settled claim amount deducted at `ClaimSettled`.
+- **Carry-over:** capital at year-end becomes the opening balance for the next year. There is
+  no annual re-endowment.
+
+**Lloyd's context — Funds at Lloyd's (FAL):** Members lodge capital with Lloyd's as security
+for their underwriting. FAL minimum is 40% of stamp capacity (maximum NPI), with an additional
+35% Economic Capital Assessment uplift (ECA = SCR × 1.35) applied by Lloyd's above the
+Solvency II minimum. The market-wide target solvency ratio is ≥ 140% (Lloyd's actual 2024: 206%).
+
+**Calibration:** With canonical parameters (100 insureds, 5 insurers, ELF = 0.239,
+target_LR = 0.55, SI = 50 M USD), each insurer writes ≈ 434 M USD GWP per year. The
+initial capital of 1 B USD represents ≈ 230% of NPI — consistent with Lloyd's MWSCR of
+140–206%. The Lloyd's FAL minimum of 40% NPI ≈ 174 M USD; current capital is ≈ 5.7×
+that minimum, providing a realistic catastrophe buffer.
+
+Source: `src/insurer.rs`, `src/config.rs`.
 
 ### §7.1 Syndicate entry `[PLANNED]`
 

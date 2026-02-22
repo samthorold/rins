@@ -646,12 +646,13 @@ mod tests {
     // ── Capital ───────────────────────────────────────────────────────────────
 
     #[test]
-    fn insurer_capital_reset_each_year() {
+    fn insurer_capital_accessible_after_run() {
+        // Verifies capital does not panic under heavy cat load (no reset — capital persists).
         let mut config = minimal_config(2, 5);
         config.catastrophe.annual_frequency = 10.0;
         let sim = run_sim(config);
         for ins in &sim.insurers {
-            let _ = ins.capital; // verify no panic
+            let _ = ins.capital; // verify no panic (may go negative)
         }
     }
 

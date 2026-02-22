@@ -5,12 +5,11 @@ use crate::types::{Day, InsuredId, InsurerId, PolicyId, SubmissionId};
 
 /// A single insurer in the minimal property market.
 /// Writes 100% of each risk it quotes (lead-only, no follow market).
-/// Capital is re-endowed at each YearStart — no insolvency in this model.
+/// Capital is endowed once at construction and persists year-over-year; premiums add, claims deduct.
 pub struct Insurer {
     pub id: InsurerId,
     /// Current capital (signed to allow negative without panicking).
     pub capital: i64,
-    pub initial_capital: i64,
     /// Actuarial channel: live E[annual_loss] / sum_insured, updated each YearEnd via EWMA.
     expected_loss_fraction: f64,
     /// Actuarial channel: ATP = expected_loss_fraction / target_loss_ratio.
@@ -47,7 +46,6 @@ impl Insurer {
         Insurer {
             id,
             capital: initial_capital,
-            initial_capital,
             expected_loss_fraction,
             target_loss_ratio,
             ewma_credibility,
@@ -61,10 +59,8 @@ impl Insurer {
         }
     }
 
-    /// Reset capital to initial_capital at the start of each year.
-    pub fn on_year_start(&mut self) {
-        self.capital = self.initial_capital;
-    }
+    /// Called at each YearStart. Capital is NOT reset — it persists from prior year.
+    pub fn on_year_start(&mut self) {}
 
     /// Price and issue a lead quote for a risk, or decline if an exposure limit is breached.
     /// Returns a single `LeadQuoteIssued` or `LeadQuoteDeclined` event.
@@ -209,11 +205,11 @@ mod tests {
     }
 
     #[test]
-    fn on_year_start_resets_capital() {
+    fn on_year_start_preserves_capital() {
         let mut ins = make_insurer(InsurerId(1), 1_000_000);
-        ins.capital = 500_000; // depleted
+        ins.capital = 500_000; // depleted by claims
         ins.on_year_start();
-        assert_eq!(ins.capital, ins.initial_capital);
+        assert_eq!(ins.capital, 500_000, "on_year_start must not reset capital — it must persist from prior year");
     }
 
     #[test]
