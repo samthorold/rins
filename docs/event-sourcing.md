@@ -30,7 +30,7 @@ An *aggregate* is a cluster of state that changes atomically in response to a si
 
 | Aggregate | Root type | State it owns |
 |---|---|---|
-| `Insurer` | `InsurerId` | `capital`, `rate`; capital invariants |
+| `Insurer` | `InsurerId` | `capital`, `expected_loss_fraction`, `cat_aggregate`; capital and exposure invariants |
 | Policy lifecycle | `PolicyId` | `pending_policies → policies` transition; `remaining_asset_value` per (policy, year) |
 | `Broker` | *(singleton)* | `pending` submission map; round-robin cursor |
 | `Insured` | `InsuredId` | acceptance decision; future GUL accumulation |

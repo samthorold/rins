@@ -18,11 +18,11 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Catastrophe loss distribution | ACTIVE | `src/market.rs::on_loss_event` |
 | Policy terms (full-value, zero attachment) | ACTIVE (PARTIAL — full-value simplification of layer mechanics) | `src/market.rs::on_insured_loss` |
 | Annual policy expiry | ACTIVE | `src/market.rs::expire_policies` |
-| Fixed-rate pricing (underwriter channel) | ACTIVE (PARTIAL — simplification of underwriter channel) | `src/insurer.rs::underwriter_premium` |
-| Lead-follow quoting (round-robin) | ACTIVE (PARTIAL — simplification of lead-follow) | `src/broker.rs` |
-| Actuarial channel (structural scaffold) | PARTIAL — prior-based ATP, no EWMA yet | `src/insurer.rs::actuarial_price` |
-| Expense loading and broker fees | PLANNED | — |
-| Underwriter channel / cycle adjustment | PLANNED | — |
+| Actuarial channel (ATP pricing + EWMA experience update) | ACTIVE | `src/insurer.rs::actuarial_price`, `on_year_end` |
+| Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
+| Exposure management (max line size, max cat aggregate) | ACTIVE | `src/insurer.rs::on_lead_quote_requested`, `src/broker.rs::on_lead_quote_declined` |
+| Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
+| Underwriter channel / cycle adjustment | PLANNED — Step 0: premium = ATP (factor = 1.0) | `src/insurer.rs::underwriter_premium` |
 | Broker relationship scores | PLANNED | — |
 | Syndicate entry / exit | PLANNED | — |
 | Annual coordinator statistics | PLANNED | — |
@@ -120,7 +120,7 @@ All policies are **annual contracts** written for a 12-month period, reflecting 
 
 Each Insured owns one or more Assets and seeks insurance coverage each year. Insureds are active agents: they accept or reject quotes and accumulate GUL history. State: `id`, `risk` (asset description), `accepted_quotes` (pending binding), `total_ground_up_loss_by_year`. Source: `src/insured.rs`.
 
-Canonical config: 90 small (sum_insured = 50M USD) + 10 large (sum_insured = 1B USD) = 100 insureds.
+Canonical config: 100 uniform insureds (sum_insured = 50M USD each).
 
 ### §3.2 Insurers (Syndicates) `[ACTIVE]`
 
@@ -173,7 +173,7 @@ where `E[annual_loss]` summed two peril contributions:
 
 Canonical values: `expected_loss_fraction = 0.239`, `target_loss_ratio = 0.70` → ATP rate ≈ 0.34. Source: `src/insurer.rs`.
 
-### §4.3 Expense loading and broker fees `[PLANNED]`
+### §4.3 Expense loading and broker fees `[PARTIAL]`
 
 The premium charged to an insured must recover not just expected claims but also the syndicate's acquisition costs, management overheads, Lloyd's levies, and cost of capital. Expenses are expressed as a percentage of **gross written premium (GWP)**, making the loading formula multiplicative, not additive:
 
@@ -235,11 +235,13 @@ For coverholder business: coverholder collects premium, deducts ceding commissio
 
 #### Implementation note
 
-The current model has no explicit expense loading (`[PLANNED]`). The actuarial channel uses `target_loss_ratio` to build profit margin into the ATP, but does not separately model brokerage or operating expenses. When expense loadings are added:
+**Current implementation (`[PARTIAL]`):** `Insurer::on_policy_bound` credits `net_premium = gross_premium × (1 − expense_ratio)` to capital. Canonical `expense_ratio = 0.344` (Lloyd's 2024: 22.6% acquisition + 11.8% management). The deduction is applied at bind time, not at earning — a simplification that is acceptable for annual contracts but would need adjustment if multi-year or mid-year cancellation were introduced.
 
-1. The ATP formula should separate components: `ATP = E[loss] / (1 − expense_ratio − profit_margin)`.
-2. Brokerage should be modelled as a deduction from premium received by the syndicate, logged separately from the operating expense ratio used in pricing.
-3. The combined ratio constraint (84–91% at Lloyd's) implies `expense_ratio ≈ 34%` and an attainable loss ratio of 50–57%.
+What is not yet modelled:
+- Brokerage as a separate cash flow (currently folded into `expense_ratio`).
+- The correct pricing formula is `ATP = E[loss] / (1 − expense_ratio − profit_margin)`; the current formula uses `target_loss_ratio` as a single divisor, which conflates the profit margin with the expense loading. When separated:
+  - With `expense_ratio = 0.344` and a target profit margin of ~10%, `target_loss_ratio ≈ 1 − 0.344 − 0.10 = 0.556`, close to the current canonical 0.55.
+- Outward reinsurance premiums and the distinction between GWP and NEP.
 
 ---
 
@@ -261,9 +263,11 @@ The underwriter channel reflects non-actuarial market intelligence: the current 
 3. **Lead-follow adjustment (follow mode only):** follower syndicates observe the lead quote and allow it to pull their own price. A higher follow-weight parameter produces stronger herding.
 4. Output: final quoted premium = `ATP × (1 + underwriter_adjustment)`.
 
-**Capital constraint override:** before emitting the quote, the syndicate checks whether accepting the risk would breach exposure limits, concentration limits, or solvency floor. If so, it either declines or quotes a premium high enough to make acceptance capital-neutral. The coordinator does not intervene.
+**Exposure limit enforcement `[PARTIAL]`:** before emitting the quote, the syndicate checks its exposure limits and emits `LeadQuoteDeclined` if either is breached. The broker then re-routes to the next insurer (round-robin, up to N attempts). Two limits are active:
+- `max_line_size` — declines any risk whose `sum_insured` exceeds this threshold.
+- `max_cat_aggregate` — declines a cat-covered risk if adding its `sum_insured` would push the insurer's live `WindstormAtlantic` aggregate above the limit. Canonical: 750M USD (15 × ASSET_VALUE) per insurer.
 
-**Per-risk maximum line:** the syndicate checks whether the risk's limit exceeds its maximum single-risk loss tolerance (a fraction of initial capital). If so, it declines regardless of available capacity.
+Capital-neutral premium adjustment and solvency-floor declination are not yet implemented.
 
 ---
 
@@ -282,13 +286,15 @@ Lloyd's operates a subscription market: a lead syndicate sets terms, and followe
 
 ### Current implementation `[PARTIAL]`
 
-Round-robin single-insurer routing (`src/broker.rs`). The quoting chain is:
+Round-robin single-insurer routing with exposure-limit re-routing (`src/broker.rs`). The quoting chain is:
 
 ```
 CoverageRequested (+1d) → LeadQuoteRequested (same day) → LeadQuoteIssued (+1d) → QuotePresented (same day) → QuoteAccepted (+1d) → PolicyBound
 ```
 
-Total `CoverageRequested` → `PolicyBound` cycle: **3 days**. The structural chain is complete; multi-syndicate panel assembly and lead/follow pricing modes are planned.
+If the selected insurer breaches an exposure limit it emits `LeadQuoteDeclined` instead of `LeadQuoteIssued`. The broker re-routes to the next insurer in the round-robin (up to N attempts); if all N insurers decline, the submission is dropped silently.
+
+Total `CoverageRequested` → `PolicyBound` cycle: **3 days** (on the happy path). Multi-syndicate panel assembly and lead/follow pricing modes are planned.
 
 ---
 
