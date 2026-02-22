@@ -34,33 +34,60 @@ Report any FAIL lines from each verifier before the Step 3 analysis.
 
 ## Step 3 — Report
 
-Present the analysis output with brief interpretation:
+Structure the report as four explicit priority tiers. Work top-to-bottom; if Tier 1 has critical failures, note that deeper tiers may be unreliable.
 
-**Mechanics conformance:**
-- State PASS or FAIL for `verify_mechanics.py`
-- If FAIL: name each failing invariant and its violation count prominently
-- If PASS: list each invariant individually as PASS ([1] through [6])
-- If WARN appears: flag as an unusual run signal (ambiguous grouping, not a bug)
-- Highlight any year-over-year trends (rising/falling bind rates, premium shifts, loss spikes)
-- Note any event types with zero counts that should be non-zero (potential bugs)
-- Flag if total claims significantly exceed total premiums for any syndicate in any year
-- Comment on capacity trends: are insolvency counts rising, and is the active syndicate count shrinking over time?
-- Comment on HHI trend: does market concentration surge after catastrophe years?
-- Note if average panel size is shrinking (sign of capacity withdrawal)
-- Flag if lead role is highly concentrated (top 1-2 syndicates holding >50% of leads)
+---
 
-**Insured and GUL diagnostics:**
-- Note total GUL vs total claims settled each year — a large gap indicates losses absorbed by insureds above attachment or below deductible
-- Comment on insured GUL concentration (GUL-HHI and top-insured share): a few dominant insureds suggest limited diversification of the insured book
-- Flag if a single insured's GUL spikes sharply in a cat year — sign that a specific insured is driving systemic risk
-- Note the count of distinct insureds generating losses each year; a shrinking count in later years may indicate capacity withdrawal or portfolio narrowing
-- Compare year-over-year GUL per insured to identify whether loss growth is broad-based or concentrated in repeat high-loss names
+### Tier 1 — Mechanics & Verifier Status (always)
 
-**Attritional vs Cat splits:**
-- Comment on the GUL split: attritional typically dominates (>70%) in benign years; a rising Cat% signals an active cat year
-- Flag Y3-style mixed years where cat GUL approaches or exceeds attritional — these stress the market differently
-- In the per-insured split, flag insureds that are 100% attritional (pure frequency risk) vs those with significant cat exposure (tail risk); mixed insureds like 102 or 303 are the ones most likely to destabilise syndicates in bad cat years
-- In the market-level LR split, comment on whether the combined LR is driven by attritional drift (high AttrLR% in quiet cat years) or cat spikes (high CatLR% in event years) — both paths to syndicate stress have different policy implications
-- Note if cat claims as a share of total claims is rising over time — could indicate adverse portfolio selection or under-priced cat risk
+List each of the 6 mechanics invariants as **PASS** or **FAIL** (from `verify_mechanics.py` output).
+List each secondary verifier as **PASS** or **FAIL**:
+- `verify_claims.py`
+- `verify_insolvency.py`
+- `verify_panel_integrity.py`
+- `verify_quoting_flow.py`
 
-- Suggest one follow-up question or area to investigate based on the data
+If any invariant or verifier FAILs: name it and its violation count prominently.
+If any WARN appears: flag it as an unusual run signal.
+If critical failures exist, note that Tiers 2–4 may be unreliable and stop.
+
+---
+
+### Tier 2 — Year Character Table (always)
+
+Produce one row per year:
+
+| Year | Tag | Market LR% | Dominant Peril | Worst Insurer LR% |
+|------|-----|------------|----------------|-------------------|
+
+**Tag thresholds:**
+- **quiet** — no cat `LossEvent` AND market LR < 70%
+- **moderate** — cat present but market LR < 100%, OR no cat but LR 70–100%
+- **severe** — market LR ≥ 100%
+
+**Dominant peril:** "Attritional" if Cat GUL% < 30%, "Mixed" if 30–60%, "Cat" if > 60%.
+
+After the table, note the count of quiet / moderate / severe years.
+
+---
+
+### Tier 3 — Stress Deep-Dive (only if any year is tagged severe)
+
+For each severe year:
+- What triggered it: number of cat `LossEvent`s and total cat GUL
+- Which insurer had the worst LR, and which large insured(s) drove that concentration
+- Top insured GUL driver that year and their share of total GUL
+- Pattern: is stress worsening over time (trend), or random cat-driven spikes?
+
+Skip this tier entirely if no severe year exists.
+
+---
+
+### Tier 4 — One Investigation Question (always)
+
+One sharp, specific question tied to the most striking data signal from Tiers 2–3.
+It must reference a specific number or pattern from this run — not a generic prompt.
+
+Good examples:
+- "Insurer 4 holds the top-3 cat-exposed large insureds in years 7 and 20 — is round-robin creating systematic concentration?"
+- "AttrLR runs 60–64% in benign years — is the attritional rate parameter calibrated correctly?"
