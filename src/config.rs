@@ -10,6 +10,10 @@ pub struct InsurerConfig {
     pub expected_loss_fraction: f64,
     /// ATP = expected_loss_fraction / target_loss_ratio.
     pub target_loss_ratio: f64,
+    /// Max WindstormAtlantic aggregate sum_insured across all in-force policies (None = unlimited).
+    pub max_cat_aggregate: Option<u64>,
+    /// Max sum_insured on any single risk (None = unlimited).
+    pub max_line_size: Option<u64>,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -58,6 +62,8 @@ impl SimulationConfig {
                     rate: 0.35,
                     expected_loss_fraction: 0.239, // E_att(0.164) + E_cat(0.075)
                     target_loss_ratio: 0.70,
+                    max_cat_aggregate: None,
+                    max_line_size: None,
                 })
                 .collect(),
             n_insureds: 100,

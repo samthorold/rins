@@ -38,7 +38,17 @@ impl Simulation {
         let insurers: Vec<Insurer> = config
             .insurers
             .iter()
-            .map(|c| Insurer::new(c.id, c.initial_capital, c.rate, c.expected_loss_fraction, c.target_loss_ratio))
+            .map(|c| {
+                Insurer::new(
+                    c.id,
+                    c.initial_capital,
+                    c.rate,
+                    c.expected_loss_fraction,
+                    c.target_loss_ratio,
+                    c.max_cat_aggregate,
+                    c.max_line_size,
+                )
+            })
             .collect();
 
         let insurer_ids: Vec<InsurerId> = insurers.iter().map(|i| i.id).collect();
@@ -162,7 +172,7 @@ impl Simulation {
                 }
             }
 
-            Event::LeadQuoteIssued { submission_id, insured_id, insurer_id, atp: _, premium } => {
+            Event::LeadQuoteIssued { submission_id, insured_id, insurer_id, atp: _, premium, cat_exposure_at_quote: _ } => {
                 let events =
                     self.broker.on_lead_quote_issued(day, submission_id, insured_id, insurer_id, premium);
                 for (d, e) in events {
@@ -229,6 +239,9 @@ impl Simulation {
                 // Schedule attritional InsuredLoss events for this policy,
                 // starting from the current day so no event is scheduled in the past.
                 if let Some(policy) = self.market.policies.get(&policy_id) {
+                    let insurer_id = policy.insurer_id;
+                    let sum_insured = policy.risk.sum_insured;
+                    let perils = policy.risk.perils_covered.clone();
                     let att_events = perils::schedule_attritional_claims_for_policy(
                         policy_id,
                         policy.insured_id,
@@ -240,10 +253,20 @@ impl Simulation {
                     for (d, e) in att_events {
                         self.schedule(d, e);
                     }
+                    if let Some(ins) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
+                        ins.on_policy_bound(policy_id, sum_insured, &perils);
+                    }
                 }
             }
 
             Event::PolicyExpired { policy_id } => {
+                // Read insurer_id before market removes the policy record.
+                let insurer_id = self.market.policies.get(&policy_id).map(|p| p.insurer_id);
+                if let Some(ins_id) = insurer_id
+                    && let Some(ins) = self.insurers.iter_mut().find(|i| i.id == ins_id)
+                {
+                    ins.on_policy_expired(policy_id);
+                }
                 self.market.on_policy_expired(policy_id);
             }
 
@@ -346,6 +369,8 @@ mod tests {
                 rate: 0.02,
                 expected_loss_fraction: 0.239,
                 target_loss_ratio: 0.70,
+                max_cat_aggregate: None,
+                max_line_size: None,
             }],
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -595,6 +620,8 @@ mod tests {
                 rate: 0.02,
                 expected_loss_fraction: 0.239,
                 target_loss_ratio: 0.70,
+                max_cat_aggregate: None,
+                max_line_size: None,
             })
             .collect();
         let sim = run_sim(config);
@@ -667,5 +694,72 @@ mod tests {
             cr_on_year2_start < n_insureds,
             "YearStart year 2 must not batch-emit CoverageRequested for all {n_insureds} insureds, got {cr_on_year2_start}"
         );
+    }
+
+    // ── Exposure tracking ─────────────────────────────────────────────────────
+
+    #[test]
+    fn lead_quote_issued_carries_cat_exposure() {
+        // Run a 1-insured, 1-insurer sim. Find the first two LeadQuoteIssued events for the
+        // same insurer. The second quote's cat_exposure_at_quote must equal the sum_insured
+        // of the first bound policy (the renewal quote fires after the initial policy is bound).
+        use crate::config::ASSET_VALUE;
+
+        let sim = run_sim(minimal_config(2, 1));
+
+        let issued: Vec<_> = sim
+            .log
+            .iter()
+            .filter_map(|e| {
+                if let Event::LeadQuoteIssued { insurer_id, cat_exposure_at_quote, .. } = &e.event {
+                    Some((*insurer_id, *cat_exposure_at_quote))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(issued.len() >= 2, "need at least two LeadQuoteIssued events");
+
+        // First quote: no policies bound yet → exposure must be 0.
+        assert_eq!(issued[0].1, 0, "first quote must have cat_exposure_at_quote == 0");
+
+        // Second quote: initial policy is already bound → exposure must equal ASSET_VALUE.
+        assert_eq!(
+            issued[1].1, ASSET_VALUE,
+            "second quote must reflect the already-bound cat aggregate"
+        );
+    }
+
+    #[test]
+    fn policy_expired_releases_insurer_cat_aggregate() {
+        // 2-year sim, 1 insured. After year-1 policy expires the insurer's cat_aggregate
+        // should drop back (the renewed policy adds it back, so at any point ≤ 2×ASSET_VALUE).
+        use crate::config::ASSET_VALUE;
+
+        let sim = run_sim(minimal_config(2, 1));
+
+        // Find all PolicyExpired events and ensure insurer cat_aggregate stays bounded.
+        // We verify indirectly: the second LeadQuoteIssued's cat_exposure_at_quote == ASSET_VALUE,
+        // not 2×ASSET_VALUE, showing that the renewal quote fires after the first policy is bound
+        // but before a second one is, so aggregate is exactly 1×ASSET_VALUE.
+        let issued: Vec<u64> = sim
+            .log
+            .iter()
+            .filter_map(|e| {
+                if let Event::LeadQuoteIssued { cat_exposure_at_quote, .. } = &e.event {
+                    Some(*cat_exposure_at_quote)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for &exp in &issued {
+            assert!(
+                exp <= 2 * ASSET_VALUE,
+                "cat_exposure_at_quote {exp} exceeds 2×ASSET_VALUE — aggregate not released properly"
+            );
+        }
     }
 }

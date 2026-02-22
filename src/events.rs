@@ -41,8 +41,9 @@ pub enum Event {
         submission_id: SubmissionId,
         insured_id: InsuredId,
         insurer_id: InsurerId,
-        atp: u64,     // actuarial technical price (break-even floor)
-        premium: u64, // final quoted premium (underwriter decision)
+        atp: u64,                  // actuarial technical price (break-even floor)
+        premium: u64,              // final quoted premium (underwriter decision)
+        cat_exposure_at_quote: u64, // insurer's WindstormAtlantic aggregate before this risk is added (0 if risk doesn't cover cat)
     },
     /// Broker presents the quote to the insured.
     QuotePresented {
@@ -67,6 +68,7 @@ pub enum Event {
         insured_id: InsuredId,
         insurer_id: InsurerId,
         premium: u64,
+        sum_insured: u64, // makes the event self-contained for exposure analysis
     },
     PolicyExpired {
         policy_id: PolicyId,
@@ -210,6 +212,7 @@ mod tests {
                 insured_id: InsuredId(5),
                 insurer_id: InsurerId(2),
                 premium: 50_000,
+                sum_insured: 5_000_000_000,
             },
         };
         let value = serde_json::to_value(&ev).unwrap();
@@ -217,6 +220,7 @@ mod tests {
         assert_eq!(value["event"]["PolicyBound"]["insurer_id"], 2);
         assert_eq!(value["event"]["PolicyBound"]["insured_id"], 5);
         assert_eq!(value["event"]["PolicyBound"]["premium"], 50_000);
+        assert_eq!(value["event"]["PolicyBound"]["sum_insured"], 5_000_000_000u64);
     }
 
     #[test]

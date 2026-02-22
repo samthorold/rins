@@ -1,5 +1,7 @@
-use crate::events::{Event, Risk};
-use crate::types::{Day, InsuredId, InsurerId, SubmissionId};
+use std::collections::HashMap;
+
+use crate::events::{Event, Peril, Risk};
+use crate::types::{Day, InsuredId, InsurerId, PolicyId, SubmissionId};
 
 /// A single insurer in the minimal property market.
 /// Writes 100% of each risk it quotes (lead-only, no follow market).
@@ -15,6 +17,14 @@ pub struct Insurer {
     expected_loss_fraction: f64,
     /// Actuarial channel: ATP = expected_loss_fraction / target_loss_ratio.
     target_loss_ratio: f64,
+    /// Exposure management: live WindstormAtlantic aggregate sum_insured.
+    pub cat_aggregate: u64,
+    /// Max WindstormAtlantic aggregate (None = unlimited).
+    pub max_cat_aggregate: Option<u64>,
+    /// Max sum_insured on any single risk (None = unlimited).
+    pub max_line_size: Option<u64>,
+    /// Map from policy_id to its WindstormAtlantic sum_insured, for release on expiry.
+    cat_policy_map: HashMap<PolicyId, u64>,
 }
 
 impl Insurer {
@@ -24,8 +34,21 @@ impl Insurer {
         rate: f64,
         expected_loss_fraction: f64,
         target_loss_ratio: f64,
+        max_cat_aggregate: Option<u64>,
+        max_line_size: Option<u64>,
     ) -> Self {
-        Insurer { id, capital: initial_capital, initial_capital, rate, expected_loss_fraction, target_loss_ratio }
+        Insurer {
+            id,
+            capital: initial_capital,
+            initial_capital,
+            rate,
+            expected_loss_fraction,
+            target_loss_ratio,
+            cat_aggregate: 0,
+            max_cat_aggregate,
+            max_line_size,
+            cat_policy_map: HashMap::new(),
+        }
     }
 
     /// Reset capital to initial_capital at the start of each year.
@@ -35,6 +58,7 @@ impl Insurer {
 
     /// Price and issue a lead quote for a risk. Always quotes (no capacity checks).
     /// Logs both the actuarial technical price (ATP) and the underwriter premium.
+    /// Future: check max_cat_aggregate / max_line_size and return LeadQuoteRejected if breached.
     pub fn on_lead_quote_requested(
         &self,
         day: Day,
@@ -44,7 +68,37 @@ impl Insurer {
     ) -> (Day, Event) {
         let atp = self.actuarial_price(risk);
         let premium = self.underwriter_premium(risk);
-        (day, Event::LeadQuoteIssued { submission_id, insured_id, insurer_id: self.id, atp, premium })
+        let cat_exposure_at_quote = if risk.perils_covered.contains(&Peril::WindstormAtlantic) {
+            self.cat_aggregate
+        } else {
+            0
+        };
+        (
+            day,
+            Event::LeadQuoteIssued {
+                submission_id,
+                insured_id,
+                insurer_id: self.id,
+                atp,
+                premium,
+                cat_exposure_at_quote,
+            },
+        )
+    }
+
+    /// A policy has been bound. Update WindstormAtlantic aggregate if the risk covers cat.
+    pub fn on_policy_bound(&mut self, policy_id: PolicyId, sum_insured: u64, perils: &[Peril]) {
+        if perils.contains(&Peril::WindstormAtlantic) {
+            self.cat_aggregate += sum_insured;
+            self.cat_policy_map.insert(policy_id, sum_insured);
+        }
+    }
+
+    /// A policy has expired. Release its WindstormAtlantic aggregate contribution.
+    pub fn on_policy_expired(&mut self, policy_id: PolicyId) {
+        if let Some(sum_insured) = self.cat_policy_map.remove(&policy_id) {
+            self.cat_aggregate = self.cat_aggregate.saturating_sub(sum_insured);
+        }
     }
 
     /// Actuarial channel: E[annual_loss] / target_loss_ratio.
@@ -80,7 +134,7 @@ mod tests {
     }
 
     fn make_insurer(id: InsurerId, capital: i64, rate: f64) -> Insurer {
-        Insurer::new(id, capital, rate, 0.239, 0.70)
+        Insurer::new(id, capital, rate, 0.239, 0.70, None, None)
     }
 
     #[test]
@@ -202,6 +256,83 @@ mod tests {
         if let Event::LeadQuoteIssued { atp, premium, .. } = event {
             assert_eq!(premium, expected_premium, "underwriter premium must equal rate × sum_insured");
             assert_ne!(atp, premium, "ATP and premium must differ when rate ≠ expected_loss_fraction / target_loss_ratio");
+        } else {
+            panic!("expected LeadQuoteIssued");
+        }
+    }
+
+    // ── Exposure management ───────────────────────────────────────────────────
+
+    fn cat_risk() -> Risk {
+        Risk {
+            sum_insured: ASSET_VALUE,
+            territory: "US-SE".to_string(),
+            perils_covered: vec![Peril::WindstormAtlantic],
+        }
+    }
+
+    fn att_only_risk() -> Risk {
+        Risk {
+            sum_insured: ASSET_VALUE,
+            territory: "US-SE".to_string(),
+            perils_covered: vec![Peril::Attritional],
+        }
+    }
+
+    #[test]
+    fn on_policy_bound_increments_cat_aggregate() {
+        let mut ins = make_insurer(InsurerId(1), 0, 0.02);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
+        assert_eq!(ins.cat_aggregate, ASSET_VALUE, "cat_aggregate must equal sum_insured after binding one cat policy");
+    }
+
+    #[test]
+    fn on_policy_expired_releases_cat_aggregate() {
+        let mut ins = make_insurer(InsurerId(1), 0, 0.02);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
+        assert_eq!(ins.cat_aggregate, ASSET_VALUE);
+        ins.on_policy_expired(PolicyId(1));
+        assert_eq!(ins.cat_aggregate, 0, "cat_aggregate must return to 0 after policy expiry");
+    }
+
+    #[test]
+    fn non_cat_policy_does_not_affect_cat_aggregate() {
+        let mut ins = make_insurer(InsurerId(1), 0, 0.02);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        assert_eq!(ins.cat_aggregate, 0, "attritional-only policy must not affect cat_aggregate");
+    }
+
+    #[test]
+    fn cat_exposure_at_quote_reflects_aggregate() {
+        let mut ins = make_insurer(InsurerId(1), 0, 0.02);
+        // Bind a cat policy first.
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
+
+        // Quote a second cat risk — exposure_at_quote should reflect the already-bound aggregate.
+        let risk = cat_risk();
+        let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk);
+        if let Event::LeadQuoteIssued { cat_exposure_at_quote, .. } = event {
+            assert_eq!(
+                cat_exposure_at_quote, ASSET_VALUE,
+                "cat_exposure_at_quote must equal the already-bound cat aggregate"
+            );
+        } else {
+            panic!("expected LeadQuoteIssued");
+        }
+    }
+
+    #[test]
+    fn cat_exposure_at_quote_is_zero_for_non_cat_risk() {
+        let mut ins = make_insurer(InsurerId(1), 0, 0.02);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
+
+        let risk = att_only_risk();
+        let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk);
+        if let Event::LeadQuoteIssued { cat_exposure_at_quote, .. } = event {
+            assert_eq!(
+                cat_exposure_at_quote, 0,
+                "cat_exposure_at_quote must be 0 for a risk that doesn't cover WindstormAtlantic"
+            );
         } else {
             panic!("expected LeadQuoteIssued");
         }

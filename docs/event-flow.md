@@ -32,13 +32,15 @@ flowchart TD
         LQP["**QuotePresented** scheduled\n+1 day from LeadQuoteIssued"]
     end
 
-    subgraph Insurer["Insurer\n(ATP pricing)"]
-        LQI["**LeadQuoteIssued**\n{submission_id, insured_id, insurer_id, atp, premium}\n(same day as LeadQuoteRequested)"]
+    subgraph Insurer["Insurer\n(ATP pricing + exposure tracking)"]
+        LQI["**LeadQuoteIssued**\n{submission_id, insured_id, insurer_id, atp, premium,\n cat_exposure_at_quote}\n(same day as LeadQuoteRequested)"]
         CS_I["on_claim_settled\ncapital −= amount"]
+        INS_PB["on_policy_bound\ncat_aggregate += sum_insured"]
+        INS_PE["on_policy_expired\ncat_aggregate −= sum_insured"]
     end
 
     subgraph Market["Market (Coordinator)"]
-        PB["**PolicyBound**\n{policy_id, submission_id, insured_id,\n insurer_id, premium}\n+1 day from QuoteAccepted"]
+        PB["**PolicyBound**\n{policy_id, submission_id, insured_id,\n insurer_id, premium, sum_insured}\n+1 day from QuoteAccepted"]
         PE["**PolicyExpired**\n{policy_id}\n+361 days from QuoteAccepted"]
         IL["**InsuredLoss**\n{policy_id, insured_id, peril, ground_up_loss}"]
         CS["**ClaimSettled**\n{policy_id, insurer_id, amount, peril}"]
@@ -52,7 +54,9 @@ flowchart TD
     QA -->|"+361 days"| PE
 
     PB -->|"on_policy_bound\nactivates policy for loss routing\nschedules attritional InsuredLoss"| IL
-    PE -->|"on_policy_expired\nremoves policy"| PE
+    PB -->|"Insurer::on_policy_bound\ncat_aggregate tracking"| INS_PB
+    PE -->|"Insurer::on_policy_expired\nreleases cat_aggregate"| INS_PE
+    PE -->|"Market::on_policy_expired\nremoves policy"| PE
 
     %% ── Loss cascade ─────────────────────────────────────────────────────────
 
@@ -79,12 +83,12 @@ flowchart TD
 | 3 | `YearEnd { year }` | `YearStart` handler | `Simulation::handle_year_end`: log stats, reset YTD, schedule next `YearStart` | `year × 360 − 1` | §8.2 Coordinator Statistics |
 | 4 | `CoverageRequested { insured_id, risk }` | `YearStart` handler | `Broker::on_coverage_requested` → emit `LeadQuoteRequested` | spread days 0–179 of year | §5 Placement |
 | 5 | `LeadQuoteRequested { submission_id, insured_id, insurer_id, risk }` | `Broker` | `Insurer::on_lead_quote_requested` → emit `LeadQuoteIssued` | +1 from `CoverageRequested` | §5 Placement, §4.1 Actuarial channel |
-| 6 | `LeadQuoteIssued { submission_id, insured_id, insurer_id, atp, premium }` | `Insurer` | `Broker::on_lead_quote_issued` → emit `QuotePresented` | same day as `LeadQuoteRequested` | §4 Pricing, §5 Placement |
+| 6 | `LeadQuoteIssued { submission_id, insured_id, insurer_id, atp, premium, cat_exposure_at_quote }` | `Insurer` | `Broker::on_lead_quote_issued` → emit `QuotePresented` | same day as `LeadQuoteRequested` | §4 Pricing, §5 Placement |
 | 7 | `QuotePresented { submission_id, insured_id, insurer_id, premium }` | `Broker` | `Insured::on_quote_presented` → emit `QuoteAccepted` | +1 from `LeadQuoteIssued` | §5 Placement |
 | 8 | `QuoteAccepted { submission_id, insured_id, insurer_id, premium }` | `Insured` | `Market::on_quote_accepted` → create `BoundPolicy` (pending), emit `PolicyBound` + `PolicyExpired` | same day as `QuotePresented` | §5 Placement, §2.2 Annual policy terms |
 | 9 | `QuoteRejected { submission_id, insured_id }` | `Insured` (not fired in this model) | `Market::on_quote_rejected` (no-op) | same day as `QuotePresented` | §5 Placement |
-| 10 | `PolicyBound { policy_id, submission_id, insured_id, insurer_id, premium }` | `Market` | `Market::on_policy_bound` (activate policy) + `perils::schedule_attritional_claims_for_policy` | +1 from `QuoteAccepted` | §2.2 Annual policy terms, §1.3 Attritional occurrences |
-| 11 | `PolicyExpired { policy_id }` | `Market::on_quote_accepted` | `Market::on_policy_expired` (remove policy) | +361 from `QuoteAccepted` (= +360 from `PolicyBound`) | §2.2 Annual policy terms |
+| 10 | `PolicyBound { policy_id, submission_id, insured_id, insurer_id, premium, sum_insured }` | `Market` | `Market::on_policy_bound` (activate policy) + `perils::schedule_attritional_claims_for_policy` + `Insurer::on_policy_bound` (cat aggregate tracking) | +1 from `QuoteAccepted` | §2.2 Annual policy terms, §1.3 Attritional occurrences |
+| 11 | `PolicyExpired { policy_id }` | `Market::on_quote_accepted` | `Insurer::on_policy_expired` (release cat aggregate) + `Market::on_policy_expired` (remove policy) | +361 from `QuoteAccepted` (= +360 from `PolicyBound`) | §2.2 Annual policy terms |
 | 12 | `LossEvent { event_id, peril }` | `perils::schedule_loss_events` at `YearStart` | `Market::on_loss_event` → emit `InsuredLoss` per active policy | Poisson-scheduled within year | §1.3 Occurrences, §1.2 Catastrophe peril class |
 | 13 | `InsuredLoss { policy_id, insured_id, peril, ground_up_loss }` | `Market` (cat) / `perils` (attritional) | `Insured::on_insured_loss` (GUL tracking) + `Market::on_insured_loss` → emit `ClaimSettled` | same day as trigger | §1.3 GUL, §2.1 Policy terms, §6 Loss Settlement |
 | 14 | `ClaimSettled { policy_id, insurer_id, amount, peril }` | `Market` | `Insurer::on_claim_settled` (capital deduction) | same day as `InsuredLoss` | §6 Loss Settlement, §7.2 Insolvency |

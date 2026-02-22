@@ -68,6 +68,7 @@ impl Market {
 
         let bind_day = day.offset(1);
         let expire_day = day.offset(361);
+        let sum_insured = risk.sum_insured;
 
         self.pending_policies.insert(
             policy_id,
@@ -86,7 +87,14 @@ impl Market {
         vec![
             (
                 bind_day,
-                Event::PolicyBound { policy_id, submission_id, insured_id, insurer_id, premium },
+                Event::PolicyBound {
+                    policy_id,
+                    submission_id,
+                    insured_id,
+                    insurer_id,
+                    premium,
+                    sum_insured,
+                },
             ),
             (expire_day, Event::PolicyExpired { policy_id }),
         ]

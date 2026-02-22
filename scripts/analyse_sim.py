@@ -42,11 +42,16 @@ sub_insurer   = {}
 premiums      = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insurer_id -> sum
 
 # ATP / exposure tracking (two-channel pricing)
-sub_atp         = {}   # submission_id -> atp (from LeadQuoteIssued)
-sub_sum_insured = {}   # submission_id -> sum_insured (from LeadQuoteRequested)
-atp_per_insurer = collections.defaultdict(lambda: collections.defaultdict(int))
+sub_atp              = {}   # submission_id -> atp (from LeadQuoteIssued)
+sub_cat_exposure     = {}   # submission_id -> cat_exposure_at_quote (from LeadQuoteIssued)
+sub_sum_insured      = {}   # submission_id -> sum_insured (from LeadQuoteRequested)
+atp_per_insurer      = collections.defaultdict(lambda: collections.defaultdict(int))
 # year -> insurer_id -> cumulative ATP (sum over bound policies)
-total_exposure  = collections.defaultdict(int)  # year -> total bound sum_insured
+total_exposure       = collections.defaultdict(int)  # year -> total bound sum_insured
+# Cat exposure written per insurer per year (sum of sum_insured from PolicyBound for cat risks)
+cat_exposure_written = collections.defaultdict(lambda: collections.defaultdict(int))
+# year -> insurer_id -> sum of cat_exposure_at_quote at time of quoting
+cat_exposure_at_quote_sum = collections.defaultdict(lambda: collections.defaultdict(int))
 
 # Policy count per insurer per year
 insurer_policy_count = collections.defaultdict(lambda: collections.defaultdict(int))
@@ -69,6 +74,7 @@ for e in events:
     elif k == 'LeadQuoteIssued':
         quote_iss[y] += 1
         sub_atp[v['submission_id']] = v['atp']
+        sub_cat_exposure[v['submission_id']] = v.get('cat_exposure_at_quote', 0)
     elif k == 'QuotePresented':
         quote_pres[y] += 1
     elif k == 'QuoteAccepted':
@@ -88,6 +94,12 @@ for e in events:
         atp_per_insurer[y][iid] += sub_atp.get(sid, 0)
         total_exposure[y]        += sub_sum_insured.get(sid, 0)
         policy_meta[pid] = {'insurer_id': iid, 'submission_id': sid}
+        # cat_exposure_at_quote from the matching LeadQuoteIssued
+        cat_exposure_at_quote_sum[y][iid] += sub_cat_exposure.get(sid, 0)
+        # Written cat exposure: use sum_insured from PolicyBound if present (new field),
+        # otherwise fall back to sub_sum_insured from LeadQuoteRequested.
+        bound_si = v.get('sum_insured', sub_sum_insured.get(sid, 0))
+        cat_exposure_written[y][iid] += bound_si
     elif k == 'LossEvent':
         loss_events[y] += 1
     elif k == 'InsuredLoss':
@@ -294,3 +306,20 @@ for y in years:
 if margin_warns:
     print()
     for w in margin_warns: print(w)
+
+print("\n=== Cat exposure written per insurer per year (sum_insured, cents) ===")
+print("(all bound policies, regardless of peril mix — use as written exposure proxy)")
+hdr_cat = f"{'Year':>4}" + "".join(f"  Ins{i:>2}" for i in all_insurers) + f"  {'Total':>12}"
+print(hdr_cat)
+for y in years:
+    total_cat = sum(cat_exposure_written[y].values())
+    row_cat = f"  {y:>2}" + "".join(f"  {cat_exposure_written[y].get(i,0):>8}" for i in all_insurers) + f"  {total_cat:>12}"
+    print(row_cat)
+
+print("\n=== Cat exposure at time of quoting per insurer per year (cumulative, cents) ===")
+print("(sum of cat_exposure_at_quote from LeadQuoteIssued for policies that bound)")
+print(hdr_cat)
+for y in years:
+    total_caq = sum(cat_exposure_at_quote_sum[y].values())
+    row_caq = f"  {y:>2}" + "".join(f"  {cat_exposure_at_quote_sum[y].get(i,0):>8}" for i in all_insurers) + f"  {total_caq:>12}"
+    print(row_caq)
