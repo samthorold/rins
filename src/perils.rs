@@ -62,40 +62,6 @@ pub fn default_peril_configs() -> Vec<PerilConfig> {
             annual_frequency: 0.5, // PLACEHOLDER
             damage_fraction: DamageFractionModel::LogNormal { mu: -1.5, sigma: 1.0 }, // PLACEHOLDER
         },
-        // E[df] ≈ 0.17; sum_insured≈£10M → E[loss]≈£1.7M
-        PerilConfig {
-            peril: Peril::WindstormEuropean,
-            region: "EU",
-            annual_frequency: 0.8, // PLACEHOLDER
-            damage_fraction: DamageFractionModel::LogNormal { mu: -2.0, sigma: 1.0 }, // PLACEHOLDER
-        },
-        // E[df] ≈ 0.47; sum_insured≈£30M → E[loss]≈£14M
-        PerilConfig {
-            peril: Peril::EarthquakeUS,
-            region: "US-CA",
-            annual_frequency: 0.2, // PLACEHOLDER
-            damage_fraction: DamageFractionModel::LogNormal { mu: -1.0, sigma: 1.0 }, // PLACEHOLDER
-        },
-        // E[df] ≈ 0.38; sum_insured≈£30M → E[loss]≈£11M
-        PerilConfig {
-            peril: Peril::EarthquakeJapan,
-            region: "JP",
-            annual_frequency: 0.3, // PLACEHOLDER
-            damage_fraction: DamageFractionModel::LogNormal { mu: -1.2, sigma: 1.0 }, // PLACEHOLDER
-        },
-        // E[df] ≈ 0.08; sum_insured≈£10M → E[loss]≈£0.8M
-        PerilConfig {
-            peril: Peril::Flood,
-            region: "EU",
-            annual_frequency: 1.5, // PLACEHOLDER
-            damage_fraction: DamageFractionModel::LogNormal { mu: -2.5, sigma: 1.0 }, // PLACEHOLDER
-        },
-        PerilConfig {
-            peril: Peril::Flood,
-            region: "US-SE",
-            annual_frequency: 1.5, // PLACEHOLDER
-            damage_fraction: DamageFractionModel::LogNormal { mu: -2.5, sigma: 1.0 }, // PLACEHOLDER
-        },
     ]
 }
 
@@ -116,10 +82,7 @@ pub struct AttritionalConfig {
 /// Target: attritional ≥ 50% of GUL in benign (low cat-frequency) years.
 pub fn default_attritional_configs() -> std::collections::HashMap<&'static str, AttritionalConfig> {
     [
-        ("UK",    AttritionalConfig { annual_rate: 3.0, damage_fraction: DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 } }),
-        ("EU",    AttritionalConfig { annual_rate: 3.0, damage_fraction: DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 } }),
         ("US-SE", AttritionalConfig { annual_rate: 4.0, damage_fraction: DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 } }),
-        ("US-CA", AttritionalConfig { annual_rate: 4.0, damage_fraction: DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 } }),
     ]
     .into_iter()
     .collect()

@@ -31,20 +31,12 @@ impl Default for ActuarialParams {
 
         let territory_factors = [
             ("US-SE".to_string(), 1.4),
-            ("US-CA".to_string(), 1.3),
-            ("EU".to_string(), 1.1),
-            ("UK".to_string(), 1.0),
-            ("JP".to_string(), 1.5), // earthquake-prone, high loading
         ]
         .into_iter()
         .collect();
 
         let peril_factors = [
             (Peril::WindstormAtlantic, 1.5),
-            (Peril::WindstormEuropean, 1.3),
-            (Peril::EarthquakeUS, 1.6),
-            (Peril::EarthquakeJapan, 1.6),
-            (Peril::Flood, 1.2),
             (Peril::Attritional, 0.8),
         ]
         .into_iter()

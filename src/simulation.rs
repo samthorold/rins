@@ -1368,7 +1368,7 @@ mod tests {
     /// events with policy_id: null appear but no ClaimSettled events follow.
     #[test]
     fn attritional_gul_recorded_even_when_no_policy_bound() {
-        let risk = make_risk("UK", vec![Peril::Attritional]);
+        let risk = make_risk("US-SE", vec![Peril::Attritional]);
         // Use a broker with Attritional risk so handle_simulation_start schedules claims.
         let broker = make_broker(1, risk);
 

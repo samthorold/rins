@@ -40,49 +40,22 @@ impl SimulationConfig {
             perils_covered: vec![Peril::WindstormAtlantic],
         };
 
-        let medium_us_flood = Risk {
+        let medium_us_wind = Risk {
             line_of_business: "property".to_string(),
-            sum_insured: 2_000_000_000,
+            sum_insured: 2_500_000_000,  // £25M
             territory: "US-SE".to_string(),
-            limit: 1_000_000_000,
-            attachment: 100_000_000,
-            perils_covered: vec![Peril::Flood],
+            limit: 1_000_000_000,        // £10M
+            attachment: 100_000_000,     // £1M
+            perils_covered: vec![Peril::WindstormAtlantic],
         };
 
-        let eu_property = Risk {
+        let small_us_wind = Risk {
             line_of_business: "property".to_string(),
-            sum_insured: 1_000_000_000,
-            territory: "EU".to_string(),
-            limit: 500_000_000,
-            attachment: 50_000_000,
-            perils_covered: vec![Peril::WindstormEuropean, Peril::Flood, Peril::Attritional],
-        };
-
-        let uk_property = Risk {
-            line_of_business: "property".to_string(),
-            sum_insured: 500_000_000,
-            territory: "UK".to_string(),
-            limit: 200_000_000,
-            attachment: 20_000_000,
-            perils_covered: vec![Peril::Attritional],
-        };
-
-        let us_earthquake = Risk {
-            line_of_business: "property".to_string(),
-            sum_insured: 3_000_000_000,
-            territory: "US-CA".to_string(),
-            limit: 1_500_000_000,
-            attachment: 200_000_000,
-            perils_covered: vec![Peril::EarthquakeUS],
-        };
-
-        let jp_property = Risk {
-            line_of_business: "property".to_string(),
-            sum_insured: 3_000_000_000,  // £30M
-            territory: "JP".to_string(),
-            limit: 1_500_000_000,        // £15M — within small-syndicate £24M cap
-            attachment: 200_000_000,     // £2M
-            perils_covered: vec![Peril::EarthquakeJapan],
+            sum_insured: 500_000_000,    // £5M
+            territory: "US-SE".to_string(),
+            limit: 200_000_000,          // £2M
+            attachment: 20_000_000,      // £200K
+            perils_covered: vec![Peril::WindstormAtlantic],
         };
 
         // ── Insured generator ─────────────────────────────────────────────────
@@ -124,78 +97,71 @@ impl SimulationConfig {
                 SyndicateConfig { id: SyndicateId(14), capital: 8_000_000_000, rate_on_line_bps: 675 },
                 SyndicateConfig { id: SyndicateId(15), capital: 8_000_000_000, rate_on_line_bps: 700 },
             ],
-            // ── Brokers: 6 with different specialisms ─────────────────────────
+            // ── Brokers: 6 with different US wind specialisms ─────────────────
             // 800 insureds total (one submission per insured per year).
             // Each broker's risk mix reflects its specialism; insureds cycle
             // through the mix so the portfolio is evenly distributed.
             brokers: vec![
-                // Broker 1: US wind/flood — 200 insureds
+                // Broker 1: Large property specialist — 200 insureds
                 BrokerConfig {
                     id: BrokerId(1),
                     submissions_per_year: 200,
                     insureds: make_insureds(1, &[
                         large_us_wind.clone(),
-                        medium_us_flood.clone(),
-                        us_earthquake.clone(),
-                        uk_property.clone(),
-                    ], "US Property Client", 200),
+                        large_us_wind.clone(),
+                        medium_us_wind.clone(),
+                    ], "Large US Wind Client", 200),
                 },
-                // Broker 2: US property mid-market — 150 insureds
+                // Broker 2: Mid-market specialist — 150 insureds
                 BrokerConfig {
                     id: BrokerId(2),
                     submissions_per_year: 150,
                     insureds: make_insureds(2, &[
-                        medium_us_flood.clone(),
-                        large_us_wind.clone(),
-                        uk_property.clone(),
-                        eu_property.clone(),
-                    ], "US Mid-Market Client", 150),
+                        medium_us_wind.clone(),
+                        medium_us_wind.clone(),
+                        small_us_wind.clone(),
+                    ], "Mid-Market US Wind Client", 150),
                 },
-                // Broker 3: European property / flood — 120 insureds
+                // Broker 3: Diversified US wind — 120 insureds
                 BrokerConfig {
                     id: BrokerId(3),
                     submissions_per_year: 120,
                     insureds: make_insureds(3, &[
-                        eu_property.clone(),
-                        uk_property.clone(),
-                        medium_us_flood.clone(),
                         large_us_wind.clone(),
-                    ], "European Property Client", 120),
+                        medium_us_wind.clone(),
+                        small_us_wind.clone(),
+                    ], "Diversified US Wind Client", 120),
                 },
-                // Broker 4: UK attritional book — 100 insureds
+                // Broker 4: Small commercial — 100 insureds
                 BrokerConfig {
                     id: BrokerId(4),
                     submissions_per_year: 100,
                     insureds: make_insureds(4, &[
-                        uk_property.clone(),
-                        eu_property.clone(),
-                        medium_us_flood.clone(),
-                        us_earthquake.clone(),
-                    ], "UK Commercial Client", 100),
+                        medium_us_wind.clone(),
+                        small_us_wind.clone(),
+                        small_us_wind.clone(),
+                    ], "Small US Wind Client", 100),
                 },
-                // Broker 5: Marine / specialist — earthquake-heavy, 80 insureds
+                // Broker 5: High-value specialist — 80 insureds
                 BrokerConfig {
                     id: BrokerId(5),
                     submissions_per_year: 80,
                     insureds: make_insureds(5, &[
-                        jp_property.clone(),
-                        us_earthquake.clone(),
                         large_us_wind.clone(),
-                        eu_property.clone(),
-                        medium_us_flood.clone(),
-                    ], "Specialist Risk Client", 80),
+                        large_us_wind.clone(),
+                        medium_us_wind.clone(),
+                    ], "High-Value US Wind Client", 80),
                 },
-                // Broker 6: Mixed / global — 150 insureds
+                // Broker 6: General market — 150 insureds
                 BrokerConfig {
                     id: BrokerId(6),
                     submissions_per_year: 150,
                     insureds: make_insureds(6, &[
-                        jp_property,
                         large_us_wind,
-                        eu_property,
-                        us_earthquake,
-                        uk_property,
-                    ], "Global Portfolio Client", 150),
+                        medium_us_wind.clone(),
+                        medium_us_wind,
+                        small_us_wind,
+                    ], "General US Wind Client", 150),
                 },
             ],
         }
