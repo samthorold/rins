@@ -135,13 +135,19 @@ Report: individual attritional CV, market attritional CV, CV ratio, LLN predicti
 
 Produce one row per year:
 
-| Year | Tag | Market LR% | Dominant Peril | Worst Insurer LR% |
-|------|-----|------------|----------------|-------------------|
+| Year | Tag | Market LR% | Rate% | Dominant Peril | Worst Insurer LR% |
+|------|-----|------------|-------|----------------|-------------------|
 
 **Tag thresholds:**
 - **quiet** — no cat `LossEvent` AND market LR < 70%
 - **moderate** — cat present but market LR < 100%, OR no cat but LR 70–100%
 - **severe** — market LR ≥ 100%
+
+**Rate%:** market-wide premium per unit of exposure (`total_bound_premium / total_sum_insured`).
+In the current fixed-rate model this is constant (~35%). It will diverge across years
+once the underwriter channel responds to cycle signals. Flag any year where Rate% < ATP-rate
+(currently ~34.1%) as a potential soft-market signal. Read Rate% from the "Market rate on line
+per year" section of `analyse_sim.py` output.
 
 **Dominant peril:** "Attritional" if Cat GUL% < 30%, "Mixed" if 30–60%, "Cat" if > 60%.
 
@@ -155,6 +161,7 @@ For each severe year:
 - What triggered it: number of cat `LossEvent`s and total cat GUL
 - Which insurer had the worst LR, and which large insured(s) drove that concentration
 - Top insured GUL driver that year and their share of total GUL
+- ATP adequacy ratio for that year (from "ATP adequacy ratio per year" section): quote the value and note whether claims exceeded the actuarial floor (adequacy > 1.0)
 - Pattern: is stress worsening over time (trend), or random cat-driven spikes?
 
 Skip this tier entirely if no severe year exists.

@@ -41,6 +41,13 @@ sub_premium   = {}
 sub_insurer   = {}
 premiums      = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insurer_id -> sum
 
+# ATP / exposure tracking (two-channel pricing)
+sub_atp         = {}   # submission_id -> atp (from LeadQuoteIssued)
+sub_sum_insured = {}   # submission_id -> sum_insured (from LeadQuoteRequested)
+atp_per_insurer = collections.defaultdict(lambda: collections.defaultdict(int))
+# year -> insurer_id -> cumulative ATP (sum over bound policies)
+total_exposure  = collections.defaultdict(int)  # year -> total bound sum_insured
+
 # Policy count per insurer per year
 insurer_policy_count = collections.defaultdict(lambda: collections.defaultdict(int))
 
@@ -58,8 +65,10 @@ for e in events:
         submissions[y] += 1
     elif k == 'LeadQuoteRequested':
         quote_req[y] += 1
+        sub_sum_insured[v['submission_id']] = v['risk']['sum_insured']
     elif k == 'LeadQuoteIssued':
         quote_iss[y] += 1
+        sub_atp[v['submission_id']] = v['atp']
     elif k == 'QuotePresented':
         quote_pres[y] += 1
     elif k == 'QuoteAccepted':
@@ -76,6 +85,8 @@ for e in events:
         insurer_policy_count[y][iid] += 1
         prem = sub_premium.get(sid, 0)
         premiums[y][iid] += prem
+        atp_per_insurer[y][iid] += sub_atp.get(sid, 0)
+        total_exposure[y]        += sub_sum_insured.get(sid, 0)
         policy_meta[pid] = {'insurer_id': iid, 'submission_id': sid}
     elif k == 'LossEvent':
         loss_events[y] += 1
@@ -240,3 +251,46 @@ for y in years:
         print(f"  {y:>2}    {hhi:>6.0f}")
     else:
         print(f"  {y:>2}      n/a")
+
+print("\n=== Market rate on line per year ===")
+print(f"{'Year':>4}  {'TotalPrem':>16}  {'TotalExposure':>16}  {'RateOnLine%':>12}")
+for y in years:
+    tp  = sum(premiums[y].values())
+    exp = total_exposure[y]
+    rol = f"{100 * tp / exp:.1f}%" if exp else "-"
+    print(f"  {y:>2}    {tp:>16}  {exp:>16}  {rol:>12}")
+
+print("\n=== ATP adequacy ratio per year ===")
+print(f"{'Year':>4}  {'TotalATP':>16}  {'TotalClaims':>16}  {'Adequacy':>9}  Note")
+for y in years:
+    total_atp    = sum(atp_per_insurer[y].values())
+    total_claims = sum(claims[y].values())
+    if total_atp:
+        adequacy = total_claims / total_atp
+        note = "*** ABOVE FLOOR ***" if adequacy > 1.0 else "(expect ~0.70 in benign year)"
+        print(f"  {y:>2}    {total_atp:>16}  {total_claims:>16}  {adequacy:>9.2f}  {note}")
+    else:
+        print(f"  {y:>2}    {'n/a':>16}  {total_claims:>16}  {'-':>9}")
+
+print("\n=== Underwriter margin per insurer per year ===")
+print("(premium - atp) / atp — positive = premium above ATP floor")
+hdr_um = f"{'Year':>4}" + "".join(f"  Ins{i:>2}" for i in all_insurers)
+print(hdr_um)
+margin_warns = []
+for y in years:
+    row_um = f"  {y:>2}"
+    for i in all_insurers:
+        atp_i  = atp_per_insurer[y].get(i, 0)
+        prem_i = premiums[y].get(i, 0)
+        if atp_i:
+            margin = (prem_i - atp_i) / atp_i * 100
+            cell = f"{margin:>7.1f}%"
+            if margin < 0:
+                margin_warns.append(f"  WARN year={y} insurer={i}: premium < atp (underwriting below actuarial floor)")
+        else:
+            cell = f"{'n/a':>8}"
+        row_um += f"  {cell}"
+    print(row_um)
+if margin_warns:
+    print()
+    for w in margin_warns: print(w)
