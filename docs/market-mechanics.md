@@ -197,21 +197,28 @@ Attritional losses model the background rate of independent small losses: slips,
 
 **Mechanics:**
 - At `PolicyBound`, a per-policy Poisson scheduler samples the expected number of attritional claims for the year and schedules each individual occurrence as a future `InsuredLoss` event, spread across the policy year.
-- Each occurrence draws an independent damage fraction from the attritional distribution; small fractions (order of a few percent) are expected in every policy year.
+- Each occurrence draws an **independent** damage fraction from the attritional distribution; small fractions (order of a few percent) are expected in every policy year.
 - Attritional `InsuredLoss` events have no `LossEvent` ancestor. They enter the loss cascade at the `InsuredLoss` stage and follow the same policy-terms path (§8.2) from that point.
 
 **Correlation properties:** attritional losses are uncorrelated across policies and across syndicates. A bad attritional year for one syndicate carries no information about other syndicates' experience.
 
+**Aggregate modelling note:** because each policy draws independently, the total attritional claim for N homogeneous policies is the sum of N iid draws — a compound distribution, not N times a single draw. Aggregating N policies into a single group policy with exposure N × S and drawing once changes the loss distribution and is an approximation, not an exact reduction.
+
 ### §8.4 Catastrophe loss class
 
-A catastrophe event is a single physical occurrence — hurricane, earthquake, flood — that simultaneously affects all assets exposed in its region.
+A catastrophe event is a single physical occurrence — hurricane, earthquake, flood — that simultaneously affects all assets exposed in its region. The physical forcing (wind speed field, ground motion, flood depth) is a property of the event itself, not of individual assets.
 
 **Mechanics:**
-- Cat events are Poisson-scheduled globally at `SimulationStart`, with frequency calibrated to return-period targets. No severity field is carried on the `LossEvent`; severity is determined per-policy at fire time.
-- When a `LossEvent` fires, the coordinator fans it out to all active policies in the matching (region, peril) index. Each affected policy draws an independent damage fraction from the peril's `DamageFractionModel` (LogNormal or Pareto, clipped to [0, 1]).
+- Cat events are Poisson-scheduled globally at `SimulationStart`, with frequency calibrated to return-period targets.
+- When a `LossEvent` fires, the coordinator draws **one** damage fraction from the peril's `DamageFractionModel` (LogNormal or Pareto, clipped to [0, 1]). This single draw represents the intensity of the event; it is shared across every affected policy.
+- The coordinator fans the event out to all active policies in the matching (territory, peril) index. Every affected policy receives `GUL = shared_fraction × sum_insured`.
 - Each affected policy produces one `InsuredLoss` event, which then follows the standard policy-terms path (§8.2).
 
-**Correlation mechanism:** spatial correlation within a single cat event is represented by the *shared occurrence*, not by correlating damage fractions across policies. Every syndicate writing risks in the struck region is hit in the same event year; the severity per policy is still independent. Diversification across perils and territories reduces cat exposure; diversification within a single territory does not. This is the mechanism behind catastrophe-amplified capital crises (phenomena.md §2).
+**Why a shared fraction:** physical damage at a given location is determined by the event's intensity field, not by independent per-asset draws. Two neighbouring buildings exposed to the same windstorm experience essentially the same wind speed; their damage fractions are strongly correlated. Modelling this as a single shared draw per event captures the dominant correlation correctly. Residual asset-level variation (construction quality, micro-siting) is a second-order effect not included in the base model.
+
+**Aggregate modelling note:** because all N policies in a territory receive the same fraction, the total cat claim for N homogeneous policies is exactly N × fraction × S. For a group of N identical insureds in the same territory, the group aggregate loss is exact — not an approximation — and can be represented by a single `InsuredLoss` event with `ground_up_loss = N × fraction × S`.
+
+**Correlation mechanism:** every syndicate writing risks in the struck region is hit in the same event year by the same intensity draw. Diversification across perils and territories reduces cat exposure; diversification within a single territory does not — all policies there share the same fraction. This is the mechanism behind catastrophe-amplified capital crises (phenomena.md §2).
 
 **Cross-syndicate correlation** is not hardcoded: it is an emergent property of broker routing. Because brokers channel similar risks to similar panels (§§3–5), syndicates accumulate overlapping regional books, and a single cat event strikes many of them simultaneously.
 
