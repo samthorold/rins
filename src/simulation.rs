@@ -209,6 +209,12 @@ impl Simulation {
                         perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
                     });
                 if let Some(risk) = risk {
+                    // Schedule renewal CoverageRequested ahead of expiry.
+                    // PolicyExpired fires at day+361; renewal fires renewal_lead_days before that.
+                    let renewal_day =
+                        day.offset(361 - self.config.renewal_lead_days as u64);
+                    let renewal_risk = risk.clone();
+
                     let events = self.market.on_quote_accepted(
                         day,
                         submission_id,
@@ -221,6 +227,11 @@ impl Simulation {
                     for (d, e) in events {
                         self.schedule(d, e);
                     }
+
+                    self.schedule(renewal_day, Event::CoverageRequested {
+                        insured_id,
+                        risk: renewal_risk,
+                    });
                 }
             }
 
@@ -296,26 +307,29 @@ impl Simulation {
             insurer.on_year_start();
         }
 
-        // Schedule CoverageRequested for each insured, spread over first 180 days.
-        let n = self.broker.insureds.len();
-        let coverage_events: Vec<(Day, InsuredId, Risk)> = self
-            .broker
-            .insureds
-            .iter()
-            .enumerate()
-            .map(|(i, insured)| {
-                let offset = if n > 1 { i as u64 * 180 / n as u64 } else { 0 };
-                let risk = Risk {
-                    sum_insured: insured.sum_insured(),
-                    territory: "US-SE".to_string(),
-                    perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
-                };
-                (day.offset(offset), insured.id, risk)
-            })
-            .collect();
+        // Year 1 only: schedule CoverageRequested for each insured, spread over first 180 days.
+        // Subsequent years: renewals are triggered by approaching PolicyExpired instead.
+        if year.0 == 1 {
+            let n = self.broker.insureds.len();
+            let coverage_events: Vec<(Day, InsuredId, Risk)> = self
+                .broker
+                .insureds
+                .iter()
+                .enumerate()
+                .map(|(i, insured)| {
+                    let offset = if n > 1 { i as u64 * 180 / n as u64 } else { 0 };
+                    let risk = Risk {
+                        sum_insured: insured.sum_insured(),
+                        territory: "US-SE".to_string(),
+                        perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
+                    };
+                    (day.offset(offset), insured.id, risk)
+                })
+                .collect();
 
-        for (d, insured_id, risk) in coverage_events {
-            self.schedule(d, Event::CoverageRequested { insured_id, risk });
+            for (d, insured_id, risk) in coverage_events {
+                self.schedule(d, Event::CoverageRequested { insured_id, risk });
+            }
         }
 
         // Schedule catastrophe loss events (Poisson draw for the year).
@@ -376,6 +390,7 @@ mod tests {
                 pareto_scale: 0.05,
                 pareto_shape: 1.5,
             },
+            renewal_lead_days: 14,
         }
     }
 
@@ -516,16 +531,21 @@ mod tests {
 
     #[test]
     fn one_policy_bound_per_insured_per_year() {
+        // Every insured must have their initial policy bound in year 1.
+        // Renewals may also fire within the horizon, so count unique insured IDs.
         let n_insureds = 5;
         let sim = run_sim(minimal_config(1, n_insureds, 0));
-        let bound_count = sim
-            .log
-            .iter()
-            .filter(|e| matches!(e.event, Event::PolicyBound { .. }))
-            .count();
+        let mut bound_insureds = std::collections::HashSet::new();
+        for e in &sim.log {
+            if let Event::PolicyBound { insured_id, .. } = &e.event {
+                bound_insureds.insert(*insured_id);
+            }
+        }
         assert_eq!(
-            bound_count, n_insureds,
-            "expected {n_insureds} PolicyBound events in year 1, got {bound_count}"
+            bound_insureds.len(),
+            n_insureds,
+            "expected all {n_insureds} insureds to have a PolicyBound, got {}",
+            bound_insureds.len()
         );
     }
 
@@ -623,6 +643,61 @@ mod tests {
         assert!(
             insurer_counts.len() >= 2,
             "submissions should be distributed across multiple insurers, got: {insurer_counts:?}"
+        );
+    }
+
+    // ── Renewal ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn renewal_coverage_requested_scheduled_from_quote_accepted() {
+        // One insured, one insurer, 2-year sim.
+        // After the initial QuoteAccepted (day 2), a renewal CoverageRequested
+        // should be scheduled at day + 361 - renewal_lead_days = 2 + 347 = 349.
+        let config = minimal_config(2, 1, 0);
+        let renewal_lead = config.renewal_lead_days;
+        let sim = run_sim(config);
+
+        let qa_day = sim
+            .log
+            .iter()
+            .find(|e| matches!(e.event, Event::QuoteAccepted { .. }))
+            .map(|e| e.day)
+            .expect("QuoteAccepted missing");
+
+        let expected_renewal_day = qa_day.offset(361 - renewal_lead as u64);
+
+        let renewal_cr_days: Vec<Day> = sim
+            .log
+            .iter()
+            .skip_while(|e| e.day <= qa_day)
+            .filter(|e| matches!(e.event, Event::CoverageRequested { .. }))
+            .map(|e| e.day)
+            .collect();
+
+        assert!(
+            renewal_cr_days.contains(&expected_renewal_day),
+            "expected a CoverageRequested at day {}, got: {:?}",
+            expected_renewal_day.0,
+            renewal_cr_days.iter().map(|d| d.0).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn year_start_year2_emits_no_coverage_requested() {
+        // In a 2-year sim, YearStart for year 2 must not emit any CoverageRequested.
+        let sim = run_sim(minimal_config(2, 3, 0));
+
+        let year2_start = Day::year_start(Year(2));
+
+        let cr_on_year2_start = sim
+            .log
+            .iter()
+            .filter(|e| e.day == year2_start && matches!(e.event, Event::CoverageRequested { .. }))
+            .count();
+
+        assert_eq!(
+            cr_on_year2_start, 0,
+            "YearStart year 2 must not emit CoverageRequested (renewals come from PolicyExpired path)"
         );
     }
 }

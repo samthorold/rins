@@ -66,6 +66,7 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
         n_large_insureds: scenario.n_large_insureds,
         attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
         catastrophe: CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5 },
+        renewal_lead_days: 14,
     };
     let mut sim = Simulation::from_config(config);
     sim.schedule(Day(0), Event::SimulationStart { year_start: Year(1) });

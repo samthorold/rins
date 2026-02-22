@@ -36,6 +36,9 @@ pub struct SimulationConfig {
     pub n_large_insureds: usize,
     pub attritional: AttritionalConfig,
     pub catastrophe: CatConfig,
+    /// Days before PolicyExpired that an insured seeks renewal coverage.
+    /// Must be ≥ 3 (the quoting cycle length).
+    pub renewal_lead_days: u32,
 }
 
 /// Small insured asset value: 50M USD in cents.
@@ -68,6 +71,7 @@ impl SimulationConfig {
                 pareto_scale: 0.05,     // minimum 5% damage fraction
                 pareto_shape: 1.5,      // E[df] = 0.05 × 1.5 / 0.5 = 0.15 (unclipped)
             },
+            renewal_lead_days: 14,
         }
     }
 }
