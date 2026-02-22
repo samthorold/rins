@@ -23,14 +23,14 @@ def year(day): return day // 360 + 1
 
 # ── Build metadata ────────────────────────────────────────────────────────────
 
-# submission_id -> risk (from SubmissionArrived)
-submission_risk = {}
+# submission_id -> sum_insured (from LeadQuoteRequested which carries the risk)
+submission_sum_insured = {}
 for e in events:
     ev = e["event"]
     if not isinstance(ev, dict): continue
     k = next(iter(ev)); v = ev[k]
-    if k == "SubmissionArrived":
-        submission_risk[v["submission_id"]] = v["risk"]
+    if k == "LeadQuoteRequested":
+        submission_sum_insured[v["submission_id"]] = v["risk"]["sum_insured"]
 
 # policy_id -> {sum_insured, insurer_id, submission_id} (from PolicyBound)
 policies = {}
@@ -40,12 +40,12 @@ for e in events:
     k = next(iter(ev)); v = ev[k]
     if k == "PolicyBound":
         sid = v["submission_id"]
-        risk = submission_risk.get(sid)
-        if risk is None:
-            print(f"WARN: PolicyBound for submission {sid} has no SubmissionArrived")
+        si = submission_sum_insured.get(sid)
+        if si is None:
+            print(f"WARN: PolicyBound for submission {sid} has no LeadQuoteRequested")
             continue
         policies[v["policy_id"]] = {
-            "sum_insured": risk["sum_insured"],
+            "sum_insured": si,
             "insurer_id":  v["insurer_id"],
             "submission_id": sid,
             "bound_day": e["day"],
@@ -57,13 +57,9 @@ print(f"Policies loaded: {len(policies)}")
 
 # (day, policy_id) -> list of ground_up_loss values
 insured_loss_index = defaultdict(list)
-# policy_id seen in InsuredLoss (for orphan ClaimSettled check)
-insured_loss_pids = set()
 
 # (policy_id, year) -> total ClaimSettled amount
 claim_totals = defaultdict(int)
-# (day, policy_id) -> total ClaimSettled amount
-claim_by_day_policy = defaultdict(int)
 # (day, policy_id) seen in ClaimSettled
 claim_day_pids = set()
 
@@ -77,13 +73,11 @@ for e in events:
     if k == "InsuredLoss":
         pid = v["policy_id"]
         insured_loss_index[(day, pid)].append(v["ground_up_loss"])
-        insured_loss_pids.add(pid)
         insured_loss_count += 1
     elif k == "ClaimSettled":
         pid = v["policy_id"]
         y   = year(day)
         claim_totals[(pid, y)] += v["amount"]
-        claim_by_day_policy[(day, pid)] += v["amount"]
         claim_day_pids.add((day, pid))
         claim_count += 1
 

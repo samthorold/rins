@@ -2,8 +2,8 @@
 """
 verify_quoting_flow.py — event-stream verifier for quoting flow coherence.
 
-Invariant: every QuoteRequested for (submission_id, insurer_id) must have
-exactly one response (QuoteIssued or QuoteDeclined). No responses without a
+Invariant: every LeadQuoteRequested for (submission_id, insurer_id) must have
+exactly one response (LeadQuoteIssued or QuoteRejected). No responses without a
 prior request.
 
 Run from the project root after `cargo run`:
@@ -22,10 +22,10 @@ for e in events:
     ev = e["event"]
     if not isinstance(ev, dict): continue
     k = next(iter(ev)); v = ev[k]; day = e["day"]
-    if k == "QuoteRequested":
+    if k == "LeadQuoteRequested":
         key = (v["submission_id"], v["insurer_id"])
         requested[key] = day
-    elif k in ("QuoteIssued", "QuoteDeclined"):
+    elif k in ("LeadQuoteIssued", "QuoteRejected"):
         key = (v["submission_id"], v["insurer_id"])
         responses[key].append(k)
 
@@ -37,7 +37,7 @@ for key, req_day in sorted(requested.items()):
         sub_id, ins_id = key
         failures.append(
             f"  FAIL submission_id={sub_id} insurer_id={ins_id}: "
-            f"QuoteRequested on day={req_day} has no response"
+            f"LeadQuoteRequested on day={req_day} has no response"
         )
 
 # Duplicate responses
@@ -55,10 +55,10 @@ for key, resp_list in sorted(responses.items()):
         sub_id, ins_id = key
         failures.append(
             f"  FAIL submission_id={sub_id} insurer_id={ins_id}: "
-            f"response ({resp_list[0]}) has no prior QuoteRequested"
+            f"response ({resp_list[0]}) has no prior LeadQuoteRequested"
         )
 
-print(f"QuoteRequested pairs checked: {len(requested)}")
+print(f"LeadQuoteRequested pairs checked: {len(requested)}")
 print(f"Responses received: {sum(len(r) for r in responses.values())}")
 
 if failures:
@@ -69,4 +69,4 @@ if failures:
         print(f"  ... and {len(failures) - 50} more")
     sys.exit(1)
 else:
-    print("\nPASS — every request has exactly one response; no orphan responses.")
+    print("\nPASS — every LeadQuoteRequested has exactly one response; no orphan responses.")
