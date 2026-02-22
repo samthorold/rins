@@ -15,6 +15,10 @@ pub struct BoundPolicy {
     pub risk: Risk,
     pub premium: u64,
     pub bound_year: Year,
+    /// The day the matching `PolicyExpired` event fires (= bound_day + 360).
+    /// Used by `on_loss_event` to guard against the DES race where a `LossEvent`
+    /// and `PolicyExpired` share the same day but the loss fires first.
+    pub expire_day: Day,
 }
 
 pub struct Market {
@@ -62,6 +66,9 @@ impl Market {
         let policy_id = PolicyId(self.next_policy_id);
         self.next_policy_id += 1;
 
+        let bind_day = day.offset(1);
+        let expire_day = day.offset(361);
+
         self.pending_policies.insert(
             policy_id,
             BoundPolicy {
@@ -72,11 +79,9 @@ impl Market {
                 risk,
                 premium,
                 bound_year: year,
+                expire_day,
             },
         );
-
-        let bind_day = day.offset(1);
-        let expire_day = day.offset(361);
 
         vec![
             (
@@ -125,6 +130,11 @@ impl Market {
         let df = model.sample(rng);
         self.policies
             .values()
+            // Guard against the DES race where a LossEvent and PolicyExpired share the
+            // same day but the loss fires first (before on_policy_expired removes the
+            // policy). The expiry day is not a coverage day: the policy covers
+            // [bound_day, expire_day), so losses on expire_day are excluded.
+            .filter(|p| day < p.expire_day)
             .filter(|p| p.risk.perils_covered.contains(&peril))
             .filter_map(|policy| {
                 let gul = (df * policy.risk.sum_insured as f64) as u64;
@@ -406,6 +416,25 @@ mod tests {
         for (_, e) in &events {
             assert!(matches!(e, Event::InsuredLoss { peril: Peril::WindstormAtlantic, .. }));
         }
+    }
+
+    #[test]
+    fn on_loss_event_skips_policy_on_expiry_day() {
+        // DES race: LossEvent and PolicyExpired share the same day. The loss must not
+        // hit a policy whose expire_day equals the loss day, even if on_policy_expired
+        // has not yet been called.
+        let mut market = Market::new();
+        // bind_policy uses Day(0) as the accepted day, so expire_day = Day(0+361) = Day(361)
+        // and bound_day = Day(1). Loss on Day(361) must be skipped.
+        bind_policy(&mut market, 1, 1);
+        let events =
+            market.on_loss_event(Day(361), Peril::WindstormAtlantic, &full_damage_models(), &mut rng());
+        assert!(events.is_empty(), "loss on expiry day must be skipped");
+
+        // Loss one day before expiry must still be emitted.
+        let events =
+            market.on_loss_event(Day(360), Peril::WindstormAtlantic, &full_damage_models(), &mut rng());
+        assert_eq!(events.len(), 1, "loss one day before expiry must be emitted");
     }
 
     #[test]
