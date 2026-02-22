@@ -1,5 +1,6 @@
 use crate::types::InsurerId;
 
+#[derive(Clone)]
 pub struct InsurerConfig {
     pub id: InsurerId,
     pub initial_capital: i64, // signed to allow negative (no insolvency in MVP)
@@ -22,6 +23,7 @@ pub struct InsurerConfig {
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
+#[derive(Clone)]
 pub struct AttritionalConfig {
     /// Expected number of attritional claims per insured per year.
     pub annual_rate: f64,
@@ -32,6 +34,7 @@ pub struct AttritionalConfig {
 }
 
 /// Catastrophe peril parameters — Pareto damage fraction, Poisson market-wide frequency.
+#[derive(Clone)]
 pub struct CatConfig {
     /// Expected number of cat events per year (market-wide).
     pub annual_frequency: f64,
@@ -41,6 +44,7 @@ pub struct CatConfig {
     pub pareto_shape: f64,
 }
 
+#[derive(Clone)]
 pub struct SimulationConfig {
     pub seed: u64,
     /// Number of analysis years. The simulation runs `warmup_years + years` in total;

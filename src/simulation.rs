@@ -431,6 +431,21 @@ mod tests {
     }
 
     #[test]
+    fn different_seeds_produce_different_logs() {
+        let mut a = minimal_config(1, 3);
+        a.seed = 1;
+        let mut b = minimal_config(1, 3);
+        b.seed = 2;
+        assert_ne!(run_sim(a).log, run_sim(b).log);
+    }
+
+    #[test]
+    fn cloned_config_produces_identical_log() {
+        let config = minimal_config(1, 3);
+        assert_eq!(run_sim(config.clone()).log, run_sim(config).log);
+    }
+
+    #[test]
     fn year_end_fires_at_correct_day() {
         let sim = run_sim(minimal_config(1, 2));
         let ye = sim
