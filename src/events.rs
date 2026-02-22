@@ -2,109 +2,78 @@ use std::cmp::Ordering;
 
 use serde::Serialize;
 
-use crate::types::{BrokerId, Day, InsuredId, LossEventId, PolicyId, SubmissionId, SyndicateId, Year};
+use crate::types::{Day, InsuredId, InsurerId, PolicyId, SubmissionId, Year};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum Peril {
     WindstormAtlantic,
-    WindstormEuropean,
-    EarthquakeUS,
-    EarthquakeJapan,
-    Flood,
     Attritional,
 }
 
+/// The risk being submitted for coverage.
+/// Full coverage: the insurer writes limit = sum_insured, attachment = 0.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Risk {
-    pub line_of_business: String,
-    pub sum_insured: u64, // pence
+    pub sum_insured: u64, // monetary units (e.g. USD cents)
     pub territory: String,
-    pub limit: u64,
-    pub attachment: u64,
     pub perils_covered: Vec<Peril>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PanelEntry {
-    pub syndicate_id: SyndicateId,
-    pub share_bps: u32, // basis points; entries must sum to 10_000
-    pub premium: u64,   // syndicate's share, pence
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Panel {
-    pub entries: Vec<PanelEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[allow(clippy::enum_variant_names)] // LossEvent is a domain term, not a naming error
 pub enum Event {
-    SimulationStart {
-        year_start: Year,
-    },
-    YearEnd {
-        year: Year,
-    },
+    /// Fires once at Day(0) to bootstrap the simulation. Schedules YearStart(year_start).
+    SimulationStart { year_start: Year },
+    /// Fires at the start of each simulated year.
+    YearStart { year: Year },
+    /// Fires at the end of each simulated year.
+    YearEnd { year: Year },
     SubmissionArrived {
         submission_id: SubmissionId,
-        broker_id: BrokerId,
         insured_id: InsuredId,
         risk: Risk,
     },
     QuoteRequested {
         submission_id: SubmissionId,
-        syndicate_id: SyndicateId,
-        is_lead: bool,
+        insurer_id: InsurerId,
     },
     QuoteIssued {
         submission_id: SubmissionId,
-        syndicate_id: SyndicateId,
-        /// Lead: slip price (ATP for 100% of risk).
-        /// Follower: own ATP (informational; settlement uses lead's slip price).
+        insurer_id: InsurerId,
         premium: u64,
-        /// Share this syndicate wants to write, in basis points (e.g. 2000 = 20%).
-        desired_line_bps: u32,
-        is_lead: bool,
     },
     QuoteDeclined {
         submission_id: SubmissionId,
-        syndicate_id: SyndicateId,
-    },
-    SubmissionAbandoned {
-        submission_id: SubmissionId,
+        insurer_id: InsurerId,
     },
     PolicyBound {
+        policy_id: PolicyId,
         submission_id: SubmissionId,
-        panel: Panel,
+        insurer_id: InsurerId,
+    },
+    PolicyExpired {
+        policy_id: PolicyId,
     },
     LossEvent {
-        event_id: LossEventId,
-        region: String,
+        event_id: u64,
         peril: Peril,
     },
     InsuredLoss {
-        policy_id: Option<PolicyId>,
+        policy_id: PolicyId,
         insured_id: InsuredId,
         peril: Peril,
-        ground_up_loss: u64, // damage_fraction × sum_insured, pence
+        ground_up_loss: u64,
     },
     ClaimSettled {
         policy_id: PolicyId,
-        syndicate_id: SyndicateId,
+        insurer_id: InsurerId,
         amount: u64,
         peril: Peril,
-    },
-    SyndicateEntered {
-        syndicate_id: SyndicateId,
-    },
-    SyndicateInsolvency {
-        syndicate_id: SyndicateId,
     },
 }
 
 /// Unified event record — serves as both the immutable log entry and the
-/// priority queue entry. Ordering is by `day` only; `Event` has no
-/// meaningful ordering.
+/// priority queue entry. Ordering is by `day` only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SimEvent {
     pub day: Day,
@@ -128,21 +97,16 @@ mod tests {
     use std::io::{BufWriter, Write};
 
     use super::*;
-    use crate::types::{LossEventId, SyndicateId};
+    use crate::types::{InsurerId, SubmissionId};
 
     #[test]
     fn peril_covered_membership() {
         let risk = Risk {
-            line_of_business: "property".to_string(),
             sum_insured: 1_000_000,
             territory: "US-SE".to_string(),
-            limit: 500_000,
-            attachment: 50_000,
-            perils_covered: vec![Peril::WindstormAtlantic, Peril::Flood],
+            perils_covered: vec![Peril::WindstormAtlantic],
         };
         assert!(risk.perils_covered.contains(&Peril::WindstormAtlantic));
-        assert!(risk.perils_covered.contains(&Peril::Flood));
-        assert!(!risk.perils_covered.contains(&Peril::EarthquakeUS));
         assert!(!risk.perils_covered.contains(&Peril::Attritional));
     }
 
@@ -167,42 +131,18 @@ mod tests {
     }
 
     #[test]
-    fn risk_perils_serialize_as_string_array() {
-        let risk = Risk {
-            line_of_business: "property".to_string(),
-            sum_insured: 500_000,
-            territory: "US-SE".to_string(),
-            limit: 250_000,
-            attachment: 25_000,
-            perils_covered: vec![Peril::WindstormAtlantic, Peril::Flood],
-        };
-        let value = serde_json::to_value(&risk).unwrap();
-        assert_eq!(value["perils_covered"], serde_json::json!(["WindstormAtlantic", "Flood"]));
-    }
-
-    #[test]
-    fn policy_bound_panel_entries_serialize() {
+    fn policy_bound_serializes() {
         let ev = SimEvent {
             day: Day(10),
             event: Event::PolicyBound {
-                submission_id: crate::types::SubmissionId(1),
-                panel: Panel {
-                    entries: vec![
-                        PanelEntry { syndicate_id: SyndicateId(1), share_bps: 6_000, premium: 60_000 },
-                        PanelEntry { syndicate_id: SyndicateId(2), share_bps: 4_000, premium: 40_000 },
-                    ],
-                },
+                policy_id: PolicyId(0),
+                submission_id: SubmissionId(1),
+                insurer_id: InsurerId(2),
             },
         };
         let value = serde_json::to_value(&ev).unwrap();
-        let entries = &value["event"]["PolicyBound"]["panel"]["entries"];
-        assert_eq!(entries.as_array().unwrap().len(), 2);
-        assert_eq!(entries[0]["syndicate_id"], 1);
-        assert_eq!(entries[0]["share_bps"], 6_000);
-        assert_eq!(entries[0]["premium"], 60_000);
-        assert_eq!(entries[1]["syndicate_id"], 2);
-        assert_eq!(entries[1]["share_bps"], 4_000);
-        assert_eq!(entries[1]["premium"], 40_000);
+        assert_eq!(value["event"]["PolicyBound"]["policy_id"], 0);
+        assert_eq!(value["event"]["PolicyBound"]["insurer_id"], 2);
     }
 
     #[test]
@@ -218,11 +158,7 @@ mod tests {
             },
             SimEvent {
                 day: Day(180),
-                event: Event::LossEvent {
-                    event_id: LossEventId(1),
-                    region: "US-SE".to_string(),
-                    peril: Peril::WindstormAtlantic,
-                },
+                event: Event::LossEvent { event_id: 1, peril: Peril::WindstormAtlantic },
             },
         ];
 

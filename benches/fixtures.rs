@@ -1,116 +1,61 @@
-use rins::broker::Broker;
-use rins::events::{Event, Panel, PanelEntry, Peril, Risk};
-use rins::insured::Insured;
+use rins::config::{AttritionalConfig, CatConfig, InsurerConfig, SimulationConfig};
+use rins::events::{Event, Peril, Risk};
 use rins::market::Market;
 use rins::simulation::Simulation;
-use rins::syndicate::Syndicate;
-use rins::types::{BrokerId, Day, InsuredId, SubmissionId, SyndicateId, Year};
+use rins::types::{Day, InsuredId, InsurerId, SubmissionId, Year};
 
 pub struct Scenario {
-    pub syndicates: usize,
-    pub brokers: usize,
-    pub submissions_per_broker: usize,
-    pub initial_capital: u64,
-    pub rate_on_line_bps: u32,
+    pub n_small_insureds: usize,
+    pub n_large_insureds: usize,
+    pub insurer_count: usize,
 }
 
-pub const SMALL: Scenario = Scenario {
-    syndicates: 5,
-    brokers: 2,
-    submissions_per_broker: 10,
-    initial_capital: 50_000_000,
-    rate_on_line_bps: 500,
-};
+pub const SMALL: Scenario =
+    Scenario { n_small_insureds: 9, n_large_insureds: 1, insurer_count: 3 };
 
-pub const MEDIUM: Scenario = Scenario {
-    syndicates: 20,
-    brokers: 10,
-    submissions_per_broker: 100,
-    initial_capital: 50_000_000,
-    rate_on_line_bps: 500,
-};
+pub const MEDIUM: Scenario =
+    Scenario { n_small_insureds: 90, n_large_insureds: 10, insurer_count: 5 };
 
-pub const LARGE: Scenario = Scenario {
-    syndicates: 80,
-    brokers: 25,
-    submissions_per_broker: 500,
-    initial_capital: 50_000_000,
-    rate_on_line_bps: 500,
-};
+pub const LARGE: Scenario =
+    Scenario { n_small_insureds: 900, n_large_insureds: 100, insurer_count: 10 };
 
-pub fn make_syndicates(n: usize, capital: u64, rate: u32) -> Vec<Syndicate> {
-    (1..=n)
-        .map(|i| Syndicate::new(SyndicateId(i as u64), capital, rate))
-        .collect()
-}
-
-pub fn make_brokers(n: usize, subs_per_broker: usize) -> Vec<Broker> {
-    let territories = ["US-SE", "UK", "JP"];
-    let perils: [&[Peril]; 3] = [
-        &[Peril::WindstormAtlantic],
-        &[Peril::WindstormEuropean],
-        &[Peril::EarthquakeJapan],
-    ];
-    (1..=n)
-        .map(|i| {
-            let idx = (i - 1) % 3;
-            let risk = Risk {
-                line_of_business: "property".to_string(),
-                sum_insured: 2_000_000,
-                territory: territories[idx].to_string(),
-                limit: 1_000_000,
-                attachment: 100_000,
-                perils_covered: perils[idx].to_vec(),
-            };
-            let insured = Insured {
-                id: InsuredId(i as u64),
-                name: format!("Insured {i}"),
-                assets: vec![risk],
-                total_ground_up_loss_by_year: std::collections::HashMap::new(),
-            };
-            Broker::new(BrokerId(i as u64), subs_per_broker, vec![insured])
-        })
-        .collect()
-}
-
-/// Bind `policy_count` policies into `market` via `on_policy_bound`.
-/// All policies use territory "US-SE" and `Peril::WindstormAtlantic` so a single
-/// `LossEvent` hits all of them. Shares are allocated equally with any remainder
-/// assigned to entry 0.
-pub fn prepopulate_policies(market: &mut Market, policy_count: usize, panel_size: usize) {
-    let share_per = 10_000u32 / panel_size as u32;
-    let remainder = 10_000u32 - share_per * panel_size as u32;
-    for i in 0..policy_count {
-        let entries: Vec<PanelEntry> = (0..panel_size)
-            .map(|j| PanelEntry {
-                syndicate_id: SyndicateId((j + 1) as u64),
-                share_bps: if j == 0 { share_per + remainder } else { share_per },
-                premium: 0,
-            })
-            .collect();
-        let risk = Risk {
-            line_of_business: "property".to_string(),
-            sum_insured: 2_000_000,
-            territory: "US-SE".to_string(),
-            limit: 5_000_000,
-            attachment: 500_000,
-            perils_covered: vec![Peril::WindstormAtlantic],
-        };
-        market.on_policy_bound(SubmissionId(i as u64), risk, Panel { entries }, Year(1));
+fn default_risk() -> Risk {
+    Risk {
+        sum_insured: 5_000_000_000,
+        territory: "US-SE".to_string(),
+        perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
     }
 }
 
-/// Build a full `Simulation` ready to run, scheduled up to the end of `years`.
+/// Bind `policy_count` policies directly into `market` using the public API.
+pub fn prepopulate_policies(market: &mut Market, policy_count: usize) {
+    let insurers = vec![InsurerId(1)];
+    for i in 0..policy_count {
+        let sid = SubmissionId(i as u64);
+        let iid = InsuredId(i as u64 + 1);
+        market.on_submission_arrived(Day(0), sid, iid, default_risk(), &insurers);
+        market.on_quote_issued(Day(0), sid, InsurerId(1), 100_000, Year(1));
+    }
+}
+
+/// Build a full `Simulation` ready to run for `years`.
 pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulation {
-    let syndicates =
-        make_syndicates(scenario.syndicates, scenario.initial_capital, scenario.rate_on_line_bps);
-    let brokers = make_brokers(scenario.brokers, scenario.submissions_per_broker);
-    let mut sim = Simulation::new(seed)
-        .until(Day::year_end(Year(years)))
-        .with_agents(syndicates, brokers);
-    sim.schedule(
-        Day::year_start(Year(1)),
-        Event::SimulationStart { year_start: Year(1) },
-    );
+    let config = SimulationConfig {
+        seed,
+        years,
+        insurers: (1..=scenario.insurer_count as u64)
+            .map(|i| InsurerConfig {
+                id: InsurerId(i),
+                initial_capital: 100_000_000_000,
+                target_loss_ratio: 0.65,
+            })
+            .collect(),
+        n_small_insureds: scenario.n_small_insureds,
+        n_large_insureds: scenario.n_large_insureds,
+        attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
+        catastrophe: CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5 },
+    };
+    let mut sim = Simulation::from_config(config);
+    sim.schedule(Day(0), Event::SimulationStart { year_start: Year(1) });
     sim
 }

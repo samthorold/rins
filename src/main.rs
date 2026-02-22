@@ -2,28 +2,24 @@ mod broker;
 mod config;
 mod events;
 mod insured;
+mod insurer;
 mod market;
 mod perils;
 mod simulation;
-mod syndicate;
 mod types;
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use config::SimulationConfig;
+use events::Event;
 use simulation::Simulation;
 use types::{Day, Year};
 
 fn main() {
-    let mut sim = Simulation::from_config(&SimulationConfig::canonical());
+    let mut sim = Simulation::from_config(SimulationConfig::canonical());
 
-    sim.schedule(
-        Day::year_start(Year(1)),
-        events::Event::SimulationStart {
-            year_start: Year(1),
-        },
-    );
+    sim.schedule(Day(0), Event::SimulationStart { year_start: Year(1) });
     sim.run();
 
     let file = File::create("events.ndjson").expect("failed to create events.ndjson");
@@ -34,13 +30,10 @@ fn main() {
     }
 
     println!("Events fired: {}", sim.log.len());
-    for e in &sim.log {
-        println!("  day={:5}  {:?}", e.day.0, e.event);
-    }
 
-    // Report final syndicate capitals.
-    println!("\nFinal syndicate capitals:");
-    for s in &sim.syndicates {
-        println!("  Syndicate {:?}: {} pence", s.id, s.capital);
+    // Report final insurer capitals.
+    println!("\nFinal insurer capitals (end of simulation):");
+    for ins in &sim.insurers {
+        println!("  Insurer {:?}: {} cents", ins.id, ins.capital);
     }
 }

@@ -10,26 +10,23 @@ use rand_chacha::ChaCha20Rng;
 use rins::events::{Event, Peril, SimEvent};
 use rins::market::Market;
 use rins::perils::DamageFractionModel;
-use rins::types::{Day, SyndicateId};
+use rins::types::{Day, InsurerId, Year};
 
 use fixtures::{LARGE, MEDIUM, SMALL, build_simulation, prepopulate_policies};
 
-/// Build a per-peril damage models map from default configs (same as Simulation::new).
 fn default_damage_models() -> HashMap<Peril, DamageFractionModel> {
-    let mut damage_models = HashMap::new();
-    for cfg in rins::perils::default_peril_configs() {
-        damage_models.entry(cfg.peril).or_insert(cfg.damage_fraction);
-    }
-    damage_models
+    HashMap::from([
+        (Peril::WindstormAtlantic, DamageFractionModel::Pareto { scale: 0.05, shape: 1.5 }),
+        (Peril::Attritional, DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 }),
+    ])
 }
 
 // ── Group 1: loss_distribution — policy count scaling ───────────────────────
 
 fn bench_loss_distribution(c: &mut Criterion) {
     let mut group = c.benchmark_group("loss_distribution");
-    let panel_size = 5usize;
     for &policy_count in &[100usize, 500, 1_000, 5_000, 10_000] {
-        group.throughput(Throughput::Elements((policy_count * panel_size) as u64));
+        group.throughput(Throughput::Elements(policy_count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(policy_count),
             &policy_count,
@@ -37,14 +34,17 @@ fn bench_loss_distribution(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let mut market = Market::new();
-                        prepopulate_policies(&mut market, pc, panel_size);
+                        prepopulate_policies(&mut market, pc);
                         let damage_models = default_damage_models();
                         let rng = ChaCha20Rng::seed_from_u64(42);
                         (market, damage_models, rng)
                     },
                     |(market, damage_models, mut rng)| {
                         market.on_loss_event(
-                            Day(180), "US-SE", Peril::WindstormAtlantic, &damage_models, &mut rng,
+                            Day(180),
+                            Peril::WindstormAtlantic,
+                            &damage_models,
+                            &mut rng,
                         )
                     },
                     BatchSize::LargeInput,
@@ -55,39 +55,7 @@ fn bench_loss_distribution(c: &mut Criterion) {
     group.finish();
 }
 
-// ── Group 2: loss_panel_size — panel size scaling ────────────────────────────
-
-fn bench_loss_panel_size(c: &mut Criterion) {
-    let mut group = c.benchmark_group("loss_panel_size");
-    let policy_count = 1_000usize;
-    for &panel_size in &[3usize, 5, 10] {
-        group.throughput(Throughput::Elements((policy_count * panel_size) as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(panel_size),
-            &panel_size,
-            |b, &ps| {
-                b.iter_batched(
-                    || {
-                        let mut market = Market::new();
-                        prepopulate_policies(&mut market, policy_count, ps);
-                        let damage_models = default_damage_models();
-                        let rng = ChaCha20Rng::seed_from_u64(42);
-                        (market, damage_models, rng)
-                    },
-                    |(market, damage_models, mut rng)| {
-                        market.on_loss_event(
-                            Day(180), "US-SE", Peril::WindstormAtlantic, &damage_models, &mut rng,
-                        )
-                    },
-                    BatchSize::LargeInput,
-                )
-            },
-        );
-    }
-    group.finish();
-}
-
-// ── Group 3: full_year — end-to-end single year ──────────────────────────────
+// ── Group 2: full_year — end-to-end single year ──────────────────────────────
 
 fn bench_full_year(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_year");
@@ -96,7 +64,7 @@ fn bench_full_year(c: &mut Criterion) {
             group.sample_size(10);
         }
         group.throughput(Throughput::Elements(
-            (scenario.brokers * scenario.submissions_per_broker) as u64,
+            (scenario.n_small_insureds + scenario.n_large_insureds) as u64,
         ));
         group.bench_function(BenchmarkId::from_parameter(name), |b| {
             b.iter_batched(
@@ -109,7 +77,7 @@ fn bench_full_year(c: &mut Criterion) {
     group.finish();
 }
 
-// ── Group 4: multi_year — year-over-year scaling ─────────────────────────────
+// ── Group 3: multi_year — year-over-year scaling ─────────────────────────────
 
 fn bench_multi_year(c: &mut Criterion) {
     let mut group = c.benchmark_group("multi_year");
@@ -130,7 +98,7 @@ fn bench_multi_year(c: &mut Criterion) {
     group.finish();
 }
 
-// ── Group 5: event_queue — BinaryHeap in isolation ───────────────────────────
+// ── Group 4: event_queue — BinaryHeap in isolation ───────────────────────────
 
 fn bench_event_queue(c: &mut Criterion) {
     let mut group = c.benchmark_group("event_queue");
@@ -147,9 +115,7 @@ fn bench_event_queue(c: &mut Criterion) {
                                 let day = if i % 2 == 0 { i as u64 } else { (n - i) as u64 };
                                 Reverse(SimEvent {
                                     day: Day(day),
-                                    event: Event::SyndicateEntered {
-                                        syndicate_id: SyndicateId(i as u64),
-                                    },
+                                    event: Event::YearEnd { year: Year(1) },
                                 })
                             })
                             .collect::<Vec<_>>()
@@ -171,18 +137,22 @@ fn bench_event_queue(c: &mut Criterion) {
     group.finish();
 }
 
-// ── Group 6: syndicate_lookup — O(n) find cost ───────────────────────────────
+// ── Group 5: insurer_lookup — O(n) find cost ─────────────────────────────────
 
-fn bench_syndicate_lookup(c: &mut Criterion) {
-    let mut group = c.benchmark_group("syndicate_lookup");
+fn bench_insurer_lookup(c: &mut Criterion) {
+    let mut group = c.benchmark_group("insurer_lookup");
     for &pool_size in &[5usize, 20, 40, 80] {
         group.bench_with_input(
             BenchmarkId::from_parameter(pool_size),
             &pool_size,
             |b, &n| {
-                let syndicates = fixtures::make_syndicates(n, 50_000_000, 500);
-                let target = SyndicateId(n as u64); // last element — worst case
-                b.iter(|| syndicates.iter().find(|s| s.id == target))
+                let insurers: Vec<rins::insurer::Insurer> = (1..=n)
+                    .map(|i| {
+                        rins::insurer::Insurer::new(InsurerId(i as u64), 100_000_000_000, 0.65)
+                    })
+                    .collect();
+                let target = InsurerId(n as u64); // last element — worst case
+                b.iter(|| insurers.iter().find(|ins| ins.id == target))
             },
         );
     }
@@ -192,10 +162,9 @@ fn bench_syndicate_lookup(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_loss_distribution,
-    bench_loss_panel_size,
     bench_full_year,
     bench_multi_year,
     bench_event_queue,
-    bench_syndicate_lookup,
+    bench_insurer_lookup,
 );
 criterion_main!(benches);

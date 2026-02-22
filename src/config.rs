@@ -1,169 +1,73 @@
-use crate::events::{Peril, Risk};
-use crate::types::{BrokerId, InsuredId, SyndicateId};
+use crate::types::InsurerId;
 
-pub struct SyndicateConfig {
-    pub id: SyndicateId,
-    pub capital: u64,
-    pub rate_on_line_bps: u32,
+pub struct InsurerConfig {
+    pub id: InsurerId,
+    pub initial_capital: i64, // signed to allow negative (no insolvency in MVP)
+    pub target_loss_ratio: f64,
 }
 
-pub struct InsuredConfig {
-    pub id: InsuredId,
-    pub name: String,
-    pub assets: Vec<Risk>,
+/// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
+pub struct AttritionalConfig {
+    /// Expected number of attritional claims per insured per year.
+    pub annual_rate: f64,
+    /// LogNormal ln-space mean of the damage fraction.
+    pub mu: f64,
+    /// LogNormal ln-space std-dev of the damage fraction.
+    pub sigma: f64,
 }
 
-pub struct BrokerConfig {
-    pub id: BrokerId,
-    pub submissions_per_year: usize,
-    pub insureds: Vec<InsuredConfig>,
+/// Catastrophe peril parameters — Pareto damage fraction, Poisson market-wide frequency.
+pub struct CatConfig {
+    /// Expected number of cat events per year (market-wide).
+    pub annual_frequency: f64,
+    /// Pareto scale: minimum damage fraction (> 0, < 1).
+    pub pareto_scale: f64,
+    /// Pareto shape: tail index α (> 1 for finite mean).
+    pub pareto_shape: f64,
 }
 
 pub struct SimulationConfig {
     pub seed: u64,
     pub years: u32,
-    pub syndicates: Vec<SyndicateConfig>,
-    pub brokers: Vec<BrokerConfig>,
+    pub insurers: Vec<InsurerConfig>,
+    /// Number of small-asset insureds (90% of population). Asset value: 50M USD.
+    pub n_small_insureds: usize,
+    /// Number of large-asset insureds (10% of population). Asset value: 1B USD.
+    pub n_large_insureds: usize,
+    pub attritional: AttritionalConfig,
+    pub catastrophe: CatConfig,
 }
+
+/// Small insured asset value: 50M USD in cents.
+pub const SMALL_ASSET_VALUE: u64 = 5_000_000_000;
+/// Large insured asset value: 1B USD in cents.
+pub const LARGE_ASSET_VALUE: u64 = 100_000_000_000;
 
 impl SimulationConfig {
     pub fn canonical() -> Self {
-        // ── Risk templates ────────────────────────────────────────────────────
-        // All monetary values in pence. Scaled to ~real Lloyd's order-of-magnitude.
-
-        let large_us_wind = Risk {
-            line_of_business: "property".to_string(),
-            sum_insured: 10_000_000_000,
-            territory: "US-SE".to_string(),
-            limit: 5_000_000_000,
-            attachment: 500_000_000,
-            perils_covered: vec![Peril::WindstormAtlantic],
-        };
-
-        let medium_us_wind = Risk {
-            line_of_business: "property".to_string(),
-            sum_insured: 2_500_000_000,  // £25M
-            territory: "US-SE".to_string(),
-            limit: 1_000_000_000,        // £10M
-            attachment: 100_000_000,     // £1M
-            perils_covered: vec![Peril::WindstormAtlantic],
-        };
-
-        let small_us_wind = Risk {
-            line_of_business: "property".to_string(),
-            sum_insured: 500_000_000,    // £5M
-            territory: "US-SE".to_string(),
-            limit: 200_000_000,          // £2M
-            attachment: 20_000_000,      // £200K
-            perils_covered: vec![Peril::WindstormAtlantic],
-        };
-
-        // ── Insured generator ─────────────────────────────────────────────────
-        // Each insured holds a single risk asset. The broker's submissions_per_year
-        // equals its insured count so every insured submits exactly once per year.
-        // IDs: broker_number * 10_000 + sequential (1-based).
-        let make_insureds = |broker_num: u32, risks: &[Risk], prefix: &str, count: usize| -> Vec<InsuredConfig> {
-            (0..count)
-                .map(|i| InsuredConfig {
-                    id: InsuredId((broker_num * 10_000 + i as u32 + 1) as u64),
-                    name: format!("{} {}", prefix, i + 1),
-                    assets: vec![risks[i % risks.len()].clone()],
-                })
-                .collect()
-        };
-
         SimulationConfig {
             seed: 42,
-            years: 10,
-            // ── Syndicates: 3 size tiers ──────────────────────────────────────
-            // Capital in pence. Large: ~£500M, Medium: ~£200M, Small: ~£80M.
-            syndicates: vec![
-                // Large (3)
-                SyndicateConfig { id: SyndicateId(1),  capital: 50_000_000_000, rate_on_line_bps: 450 },
-                SyndicateConfig { id: SyndicateId(2),  capital: 50_000_000_000, rate_on_line_bps: 500 },
-                SyndicateConfig { id: SyndicateId(3),  capital: 50_000_000_000, rate_on_line_bps: 550 },
-                // Medium (6)
-                SyndicateConfig { id: SyndicateId(4),  capital: 20_000_000_000, rate_on_line_bps: 500 },
-                SyndicateConfig { id: SyndicateId(5),  capital: 20_000_000_000, rate_on_line_bps: 550 },
-                SyndicateConfig { id: SyndicateId(6),  capital: 20_000_000_000, rate_on_line_bps: 600 },
-                SyndicateConfig { id: SyndicateId(7),  capital: 20_000_000_000, rate_on_line_bps: 620 },
-                SyndicateConfig { id: SyndicateId(8),  capital: 20_000_000_000, rate_on_line_bps: 580 },
-                SyndicateConfig { id: SyndicateId(9),  capital: 20_000_000_000, rate_on_line_bps: 650 },
-                // Small (6)
-                SyndicateConfig { id: SyndicateId(10), capital: 8_000_000_000, rate_on_line_bps: 550 },
-                SyndicateConfig { id: SyndicateId(11), capital: 8_000_000_000, rate_on_line_bps: 600 },
-                SyndicateConfig { id: SyndicateId(12), capital: 8_000_000_000, rate_on_line_bps: 625 },
-                SyndicateConfig { id: SyndicateId(13), capital: 8_000_000_000, rate_on_line_bps: 650 },
-                SyndicateConfig { id: SyndicateId(14), capital: 8_000_000_000, rate_on_line_bps: 675 },
-                SyndicateConfig { id: SyndicateId(15), capital: 8_000_000_000, rate_on_line_bps: 700 },
-            ],
-            // ── Brokers: 6 with different US wind specialisms ─────────────────
-            // 800 insureds total (one submission per insured per year).
-            // Each broker's risk mix reflects its specialism; insureds cycle
-            // through the mix so the portfolio is evenly distributed.
-            brokers: vec![
-                // Broker 1: Large property specialist — 200 insureds
-                BrokerConfig {
-                    id: BrokerId(1),
-                    submissions_per_year: 200,
-                    insureds: make_insureds(1, &[
-                        large_us_wind.clone(),
-                        large_us_wind.clone(),
-                        medium_us_wind.clone(),
-                    ], "Large US Wind Client", 200),
-                },
-                // Broker 2: Mid-market specialist — 150 insureds
-                BrokerConfig {
-                    id: BrokerId(2),
-                    submissions_per_year: 150,
-                    insureds: make_insureds(2, &[
-                        medium_us_wind.clone(),
-                        medium_us_wind.clone(),
-                        small_us_wind.clone(),
-                    ], "Mid-Market US Wind Client", 150),
-                },
-                // Broker 3: Diversified US wind — 120 insureds
-                BrokerConfig {
-                    id: BrokerId(3),
-                    submissions_per_year: 120,
-                    insureds: make_insureds(3, &[
-                        large_us_wind.clone(),
-                        medium_us_wind.clone(),
-                        small_us_wind.clone(),
-                    ], "Diversified US Wind Client", 120),
-                },
-                // Broker 4: Small commercial — 100 insureds
-                BrokerConfig {
-                    id: BrokerId(4),
-                    submissions_per_year: 100,
-                    insureds: make_insureds(4, &[
-                        medium_us_wind.clone(),
-                        small_us_wind.clone(),
-                        small_us_wind.clone(),
-                    ], "Small US Wind Client", 100),
-                },
-                // Broker 5: High-value specialist — 80 insureds
-                BrokerConfig {
-                    id: BrokerId(5),
-                    submissions_per_year: 80,
-                    insureds: make_insureds(5, &[
-                        large_us_wind.clone(),
-                        large_us_wind.clone(),
-                        medium_us_wind.clone(),
-                    ], "High-Value US Wind Client", 80),
-                },
-                // Broker 6: General market — 150 insureds
-                BrokerConfig {
-                    id: BrokerId(6),
-                    submissions_per_year: 150,
-                    insureds: make_insureds(6, &[
-                        large_us_wind,
-                        medium_us_wind.clone(),
-                        medium_us_wind,
-                        small_us_wind,
-                    ], "General US Wind Client", 150),
-                },
-            ],
+            years: 5,
+            // 5 insurers, each endowed with 1B USD capital each year.
+            insurers: (1..=5)
+                .map(|i| InsurerConfig {
+                    id: InsurerId(i),
+                    initial_capital: 100_000_000_000, // 1B USD in cents
+                    target_loss_ratio: 0.65,
+                })
+                .collect(),
+            n_small_insureds: 90,
+            n_large_insureds: 10,
+            attritional: AttritionalConfig {
+                annual_rate: 2.0,  // 2 claims per insured per year on average
+                mu: -3.0,          // E[df] = exp(-3.0 + 0.5) ≈ 8.2%
+                sigma: 1.0,
+            },
+            catastrophe: CatConfig {
+                annual_frequency: 0.5,  // one cat event every 2 years on average
+                pareto_scale: 0.05,     // minimum 5% damage fraction
+                pareto_shape: 1.5,      // E[df] = 0.05 × 1.5 / 0.5 = 0.15 (unclipped)
+            },
         }
     }
 }
