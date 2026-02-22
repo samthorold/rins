@@ -33,9 +33,9 @@ flowchart TD
     end
 
     subgraph Syndicate["Syndicate  (ATP pricing)"]
-        QI_L["**QuoteIssued**\n{is_lead: true, premium}\nATP blended with benchmark"]
+        QI_L["**QuoteIssued**\n{is_lead: true, premium=ATP, desired_line_bps}\ndesired_line_bps = desired_lead_line_bps (tier-default)"]
         QD_L["**QuoteDeclined**\n{submission_id, syndicate_id}"]
-        QI_F["**QuoteIssued**\n{is_lead: false, premium}\nfollower pricing vs lead"]
+        QI_F["**QuoteIssued**\n{is_lead: false, premium=own_ATP, desired_line_bps}\nDeclines if lead_premium < own_ATP × min_rate_ratio\ndesired_line_bps = desired_follow_line_bps (tier-default)"]
         QD_F["**QuoteDeclined**\n{submission_id, syndicate_id}"]
         CS_S["on_claim_settled\ncapital −= amount\n→ true if capital < solvency floor"]
         YE_S["on_year_end\nEWMA ← realised loss ratio\n(per line of business)"]
@@ -54,6 +54,9 @@ flowchart TD
     QR_F --> QD_F
     QI_F -->|"all followers responded"| PB
     QD_F -->|"all followers responded"| PB
+
+    PB_NOTE["**assemble_panel logic**\ntotal_desired = Σ desired_line_bps\ntotal < 7_500 bps (75%) → SubmissionAbandoned\nsigned_bps[i] = desired[i] × 10_000 / total_desired\n(last entry absorbs rounding remainder)\npremium = lead_premium × signed_bps / 10_000\n(all entries at lead slip price, not own ATP)"]
+    PB_NOTE -.-> PB
 
     %% ── Loss cascade ────────────────────────────────────────────────────────
 
@@ -105,9 +108,9 @@ flowchart TD
 | 2 | `YearEnd` | `handle_simulation_start` | `Simulation::dispatch` → `Market::compute_year_stats`, `Syndicate::on_year_end`, `Broker::on_year_end`, `Market::expire_policies` |
 | 3 | `SubmissionArrived` {submission_id, broker_id, insured_id, risk} | `Broker::generate_submissions` | `Market::on_submission_arrived` |
 | 4 | `QuoteRequested` | `Market::on_submission_arrived` (+2 days), `Market::on_lead_quote_issued` (+3 days) | `Syndicate::on_quote_requested` |
-| 5 | `QuoteIssued` | `Syndicate::on_quote_requested` | `Market::on_lead_quote_issued` / `Market::on_follower_quote_issued` |
+| 5 | `QuoteIssued` {submission_id, syndicate_id, **premium** (own ATP, informational for followers), **desired_line_bps**, is_lead} | `Syndicate::on_quote_requested` | Lead: `Market::on_lead_quote_issued` (sets `lead_premium`, records `desired_line_bps`); Follower: `Market::on_follower_quote_issued` (records `desired_line_bps`; `premium` discarded — settlement uses `lead_premium`) |
 | 6 | `QuoteDeclined` | `Syndicate::on_quote_requested` | `Market::on_quote_declined` |
-| 7 | `SubmissionAbandoned` | `Market::on_quote_declined` (when lead declines) | none (log only) |
+| 7 | `SubmissionAbandoned` | `Market::on_quote_declined` (when lead declines); `Market::assemble_panel` (when total desired < 7_500 bps) | none (log only) |
 | 8 | `PolicyBound` | `Market::assemble_panel` (+5 days from last follower response) | `Market::on_policy_bound` (registers policy, YTD premium, populates `insured_active_policies`) |
 | 9 | `LossEvent` | `handle_simulation_start` via `perils::schedule_loss_events` (Poisson frequency, **cat perils only**; no severity field) | `Market::on_loss_event` → first pass: `InsuredLoss(Some)` per bound policy; second pass: `InsuredLoss(None)` per exposed-but-uninsured insured via `insured_exposure_index` |
 | 10 | `InsuredLoss` {policy_id: **Option**, insured_id, peril, ground_up_loss} | `Market::on_loss_event` (cat, both paths) or `perils::schedule_attritional_claims_for_insured` (Attritional, per-insured at SimulationStart, always `policy_id: None`) | `Insured::on_insured_loss` (accumulate stats) + `Market::on_insured_loss` → if policy_id=None resolves via `insured_active_policies`; applies policy terms → emits `ClaimSettled` (or nothing if uninsured) |

@@ -231,6 +231,7 @@ impl Simulation {
                 submission_id,
                 syndicate_id,
                 premium,
+                desired_line_bps,
                 is_lead,
             } => {
                 let available: Vec<SyndicateId> = self
@@ -245,11 +246,17 @@ impl Simulation {
                         submission_id,
                         syndicate_id,
                         premium,
+                        desired_line_bps,
                         &available,
                     )
                 } else {
-                    self.market
-                        .on_follower_quote_issued(day, submission_id, syndicate_id, premium)
+                    // premium (follower's own ATP) is informational; settlement uses lead_premium.
+                    self.market.on_follower_quote_issued(
+                        day,
+                        submission_id,
+                        syndicate_id,
+                        desired_line_bps,
+                    )
                 };
                 for (d, e) in events {
                     self.schedule(d, e);
@@ -859,7 +866,9 @@ mod tests {
         use crate::types::{LossEventId, Year};
 
         let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
-        let large_syn = || Syndicate::new(SyndicateId(1), 100_000_000_000, 500);
+        // Very-small-tier capital (< £50M) → desired_lead_line_bps = 10_000 so a single-syndicate
+        // market still fills past the 7_500 bps threshold and binds policies.
+        let large_syn = || Syndicate::new(SyndicateId(1), 1_000_000_000, 500);
 
         let build = |inject_loss: bool| {
             let mut sim = Simulation::new(42)
@@ -914,7 +923,8 @@ mod tests {
         use crate::types::{LossEventId, Year};
 
         let risk = make_risk("US-SE", vec![Peril::WindstormAtlantic]);
-        let large_syn = || Syndicate::new(SyndicateId(1), 100_000_000_000, 500);
+        // Very-small-tier capital → desired_lead_line_bps = 10_000 so single-syndicate market fills.
+        let large_syn = || Syndicate::new(SyndicateId(1), 1_000_000_000, 500);
 
         let build = |inject_loss: bool| {
             let mut sim = Simulation::new(42)

@@ -59,7 +59,11 @@ pub enum Event {
     QuoteIssued {
         submission_id: SubmissionId,
         syndicate_id: SyndicateId,
+        /// Lead: slip price (ATP for 100% of risk).
+        /// Follower: own ATP (informational; settlement uses lead's slip price).
         premium: u64,
+        /// Share this syndicate wants to write, in basis points (e.g. 2000 = 20%).
+        desired_line_bps: u32,
         is_lead: bool,
     },
     QuoteDeclined {

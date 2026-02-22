@@ -72,21 +72,41 @@ pub struct Syndicate {
     pub initial_capital: u64,
     pub is_active: bool,
     pub aggregate_written_premium: u64,
-    /// Per-submission premium reserved for in-flight quotes that have been issued but not yet bound.
-    /// Keyed by SubmissionId; value = atp/n_eligible for that quote.
-    /// Released exactly at bind (on_policy_bound_as_panelist) or cleared at year-end.
+    /// Per-submission exposure reserved for in-flight quotes not yet bound.
+    /// Lead: atp × desired_lead_line_bps / 10_000.
+    /// Follower: lead_premium × desired_follow_line_bps / 10_000.
+    /// Released at bind (on_policy_bound_as_panelist) or cleared at year-end.
     pub quoted_exposure: HashMap<SubmissionId, u64>,
     pub solvency_floor_pct: f64,
     pub max_premium_ratio: f64,
     pub max_single_risk_pct: f64,
     #[allow(dead_code)]
     pub rate_on_line_bps: u32, // basis points, e.g. 500 = 5% rate on line
+    /// Desired line as lead, in basis points (e.g. 2000 = 20%).
+    pub desired_lead_line_bps: u32,
+    /// Desired line as follower, in basis points (e.g. 700 = 7%).
+    pub desired_follow_line_bps: u32,
+    /// Minimum acceptable lead_premium / own_atp ratio; follower declines below this.
+    pub min_rate_ratio: f64,
     pub actuarial: ActuarialParams,
     experience: HashMap<String, LineExperience>,
 }
 
 impl Syndicate {
     pub fn new(id: SyndicateId, initial_capital: u64, rate_on_line_bps: u32) -> Self {
+        // Capital-tier defaults for desired line sizes.
+        // Thresholds in pence: £400M = 40_000_000_000p, £150M = 15_000_000_000p, £50M = 5_000_000_000p.
+        // Very small capitals (test syndicates, < £50M) use 10_000 lead / 5_000 follow so
+        // that single-syndicate test scenarios still bind policies.
+        let (desired_lead_line_bps, desired_follow_line_bps) = if initial_capital >= 40_000_000_000 {
+            (2000, 1000) // Large: £400M+
+        } else if initial_capital >= 15_000_000_000 {
+            (1500, 700) // Medium: £150M–£400M
+        } else if initial_capital >= 5_000_000_000 {
+            (1000, 500) // Small: £50M–£150M
+        } else {
+            (10_000, 5_000) // Very small / test syndicates: write 100% lead, 50% follow
+        };
         Syndicate {
             id,
             capital: initial_capital,
@@ -98,6 +118,9 @@ impl Syndicate {
             max_premium_ratio: 0.50,
             max_single_risk_pct: 0.30,
             rate_on_line_bps,
+            desired_lead_line_bps,
+            desired_follow_line_bps,
+            min_rate_ratio: 0.85,
             actuarial: ActuarialParams::default(),
             experience: HashMap::new(),
         }
@@ -199,11 +222,19 @@ impl Syndicate {
     }
 
     /// Price and issue (or decline) a quote for a submission.
-    /// Premium is set by the actuarial channel (ATP).
+    ///
+    /// **Lead path**: prices at ATP, declares `desired_lead_line_bps`, reserves
+    /// `atp × desired_lead_line_bps / 10_000` against capacity.
+    ///
+    /// **Follower path**: compares `lead_premium` to own ATP; declines if
+    /// `lead_premium < atp × min_rate_ratio`. Otherwise declares
+    /// `desired_follow_line_bps` and reserves `lead_premium × desired_follow_line_bps / 10_000`.
+    /// The `premium` field in `QuoteIssued` carries the follower's own ATP (informational);
+    /// settlement always uses `lead_premium`.
+    ///
     /// `industry_benchmark` is the market-wide loss ratio from the previous year's YearStats.
-    /// `n_eligible` is the number of syndicates that pass the per-risk eligibility check;
-    /// used to compute the expected panel-share premium for capacity reservation.
-    /// Returns QuoteDeclined if inactive or annual capacity would be breached.
+    /// `n_eligible` is retained for API compatibility but no longer used for reservation sizing.
+    /// Returns `QuoteDeclined` if inactive, risk oversized, or capacity would be breached.
     #[allow(clippy::too_many_arguments)]
     pub fn on_quote_requested(
         &mut self,
@@ -213,47 +244,70 @@ impl Syndicate {
         is_lead: bool,
         lead_premium: Option<u64>,
         industry_benchmark: f64,
-        n_eligible: usize,
+        _n_eligible: usize,
     ) -> (Day, Event) {
-        // Belt-and-suspenders: submission filtering should exclude inactive syndicates,
-        // but guard here too.
+        let decline = || (day, Event::QuoteDeclined { submission_id, syndicate_id: self.id });
+
+        // Belt-and-suspenders: submission filtering should exclude inactive syndicates.
         if !self.is_active {
-            return (day, Event::QuoteDeclined { submission_id, syndicate_id: self.id });
+            return decline();
         }
 
         // Per-risk size limit: decline if the risk's limit exceeds our maximum single-risk exposure.
         let max_single_risk_loss = (self.initial_capital as f64 * self.max_single_risk_pct) as u64;
         if risk.limit > max_single_risk_loss {
-            return (day, Event::QuoteDeclined { submission_id, syndicate_id: self.id });
+            return decline();
         }
 
-        let atp = self.atp(risk, industry_benchmark);
-
-        // Capacity check: decline if this risk would push annual premium over the cap.
-        // `quoted_exposure` tracks in-flight quotes not yet bound (prevents
-        // over-commitment when many submissions are quoted concurrently).
         let max_capacity = (self.initial_capital as f64 * self.max_premium_ratio) as u64;
         let in_flight: u64 = self.quoted_exposure.values().sum();
-        if self.aggregate_written_premium + in_flight + atp > max_capacity {
-            return (day, Event::QuoteDeclined { submission_id, syndicate_id: self.id });
+
+        if is_lead {
+            let atp = self.atp(risk, industry_benchmark);
+            // Reserve atp × desired_lead_line_bps / 10_000 against capacity.
+            let bound_exposure = atp * self.desired_lead_line_bps as u64 / 10_000;
+            if self.aggregate_written_premium + in_flight + bound_exposure > max_capacity {
+                return decline();
+            }
+            self.quoted_exposure.insert(submission_id, bound_exposure);
+            (
+                day,
+                Event::QuoteIssued {
+                    submission_id,
+                    syndicate_id: self.id,
+                    premium: atp,
+                    desired_line_bps: self.desired_lead_line_bps,
+                    is_lead: true,
+                },
+            )
+        } else {
+            // Follower path: lead_premium must be set.
+            let Some(lead_prem) = lead_premium else {
+                // Guard: followers should only be invited after the lead has quoted.
+                return decline();
+            };
+            let atp = self.atp(risk, industry_benchmark);
+            // Decline if lead price is too far below own actuarial estimate.
+            if lead_prem < (atp as f64 * self.min_rate_ratio) as u64 {
+                return decline();
+            }
+            // Reserve lead_premium × desired_follow_line_bps / 10_000 against capacity.
+            let bound_exposure = lead_prem * self.desired_follow_line_bps as u64 / 10_000;
+            if self.aggregate_written_premium + in_flight + bound_exposure > max_capacity {
+                return decline();
+            }
+            self.quoted_exposure.insert(submission_id, bound_exposure);
+            (
+                day,
+                Event::QuoteIssued {
+                    submission_id,
+                    syndicate_id: self.id,
+                    premium: atp, // own ATP, informational
+                    desired_line_bps: self.desired_follow_line_bps,
+                    is_lead: false,
+                },
+            )
         }
-
-        // Reserve the expected panel-share premium for this quote.
-        // Expected share = 1/n_eligible (equal split across eligible syndicates).
-        let n = n_eligible.max(1) as u64;
-        self.quoted_exposure.insert(submission_id, atp / n);
-
-        // is_lead and lead_premium are inputs to the underwriter channel — deferred.
-        let _ = (is_lead, lead_premium);
-        (
-            day,
-            Event::QuoteIssued {
-                submission_id,
-                syndicate_id: self.id,
-                premium: atp,
-                is_lead,
-            },
-        )
     }
 
     /// Deduct a settled claim from capital.
@@ -726,7 +780,7 @@ mod tests {
         // Risk with limit 3_000_000_000 > 2_400_000_000 → must decline.
         let over_limit = make_risk(3_000_000_000);
         let (_, event) =
-            s.on_quote_requested(crate::types::Day(0), SubmissionId(1), &over_limit, false, None, 0.65, 1);
+            s.on_quote_requested(crate::types::Day(0), SubmissionId(1), &over_limit, true, None, 0.65, 1);
         assert!(
             matches!(event, Event::QuoteDeclined { .. }),
             "expected QuoteDeclined for oversized risk, got {event:?}"
@@ -735,7 +789,7 @@ mod tests {
         // Risk with limit 2_000_000_000 < 2_400_000_000 → must issue.
         let under_limit = make_risk(2_000_000_000);
         let (_, event) =
-            s.on_quote_requested(crate::types::Day(0), SubmissionId(2), &under_limit, false, None, 0.65, 1);
+            s.on_quote_requested(crate::types::Day(0), SubmissionId(2), &under_limit, true, None, 0.65, 1);
         assert!(
             matches!(event, Event::QuoteIssued { .. }),
             "expected QuoteIssued for acceptable risk, got {event:?}"
@@ -749,17 +803,18 @@ mod tests {
     #[test]
     fn quoted_exposure_tracks_per_submission() {
         // Syndicate with 10_000_000 capital → max_capacity = 5_000_000.
-        // With n_eligible=3, each reservation = ATP/3. Three quotes together well under capacity.
+        // Very-small-tier: desired_lead_line_bps = 10_000 → reservation = full ATP.
+        // Three quotes (atp ≈ 1_365_000 each) total ≈ 4_095_000 < 5_000_000 → all issued.
         let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
         let risk = make_risk(1_000_000);
         let day = crate::types::Day(0);
         let benchmark = 0.65;
 
-        // Issue 3 quotes with distinct submission IDs.
+        // Issue 3 quotes as lead with distinct submission IDs.
         let mut premiums = vec![];
         for i in 1u64..=3 {
             let (_, event) =
-                s.on_quote_requested(day, SubmissionId(i), &risk, false, None, benchmark, 3);
+                s.on_quote_requested(day, SubmissionId(i), &risk, true, None, benchmark, 1);
             match event {
                 Event::QuoteIssued { premium, .. } => premiums.push(premium),
                 _ => panic!("expected QuoteIssued for submission {i}, got {event:?}"),
@@ -767,7 +822,8 @@ mod tests {
         }
         assert_eq!(s.quoted_exposure.len(), 3, "should track 3 in-flight quotes");
 
-        // Bind the first submission.
+        // Bind the first submission. Premium passed here matches what assemble_panel
+        // would compute for a single-entry 100%-share panel: lead_premium × 10_000 / 10_000 = atp.
         s.on_policy_bound_as_panelist(SubmissionId(1), premiums[0]);
         assert_eq!(s.quoted_exposure.len(), 2, "binding one quote should remove it from quoted_exposure");
         assert_eq!(
@@ -780,27 +836,74 @@ mod tests {
     /// when many submissions are quoted concurrently.
     #[test]
     fn quoted_exposure_blocks_over_commitment() {
-        // Syndicate with 10_000_000 capital → max_capacity = 5_000_000.
-        // Each quote with n_eligible=1 reserves the full ATP (~1_365_000 for make_risk(1_000_000)).
-        // After 3 quotes: sum(quoted_exposure) ≈ 4_095_000. 4th quote must be declined.
+        // Very-small-tier syndicate (capital = 10_000_000): desired_lead_line_bps = 10_000
+        // → reservation per lead quote = atp × 10_000 / 10_000 = atp ≈ 1_365_000.
+        // max_capacity = 5_000_000; after 3 quotes: ≈ 4_095_000 < 5_000_000 → issued.
+        // After 4 quotes: ≈ 5_460_000 > 5_000_000 → declined.
         let mut s = Syndicate::new(SyndicateId(1), 10_000_000, 500);
         let risk = make_risk(1_000_000);
         let day = crate::types::Day(0);
 
-        // First 3 quotes should be issued.
+        // First 3 lead quotes should be issued.
         for i in 1..=3 {
-            let (_, event) = s.on_quote_requested(day, SubmissionId(i), &risk, false, None, 0.65, 1);
+            let (_, event) = s.on_quote_requested(day, SubmissionId(i), &risk, true, None, 0.65, 1);
             assert!(
                 matches!(event, Event::QuoteIssued { .. }),
                 "quote {i} should be issued, got {event:?}"
             );
         }
         // 4th quote should be declined due to quoted_exposure exhausting capacity.
-        let (_, event) = s.on_quote_requested(day, SubmissionId(4), &risk, false, None, 0.65, 1);
+        let (_, event) = s.on_quote_requested(day, SubmissionId(4), &risk, true, None, 0.65, 1);
         assert!(
             matches!(event, Event::QuoteDeclined { .. }),
-            "4th quote should be declined when quoted_exposure exhausts capacity, got {event:?}"
+            "4th lead quote should be declined when quoted_exposure exhausts capacity, got {event:?}"
         );
+    }
+
+    // ── Follower logic tests ───────────────────────────────────────────────────
+
+    /// Follower declines when lead_premium is too far below its own ATP.
+    #[test]
+    fn follower_declines_when_lead_premium_below_min_rate_ratio() {
+        let mut s = fresh_syndicate(); // min_rate_ratio = 0.85
+        let risk = make_risk(1_000_000);
+        let benchmark = 0.65;
+        let atp = s.atp(&risk, benchmark);
+        // Set lead_premium to 50% of ATP — well below the 0.85 threshold.
+        let cheap_lead = atp / 2;
+        let (_, event) = s.on_quote_requested(
+            crate::types::Day(0), SubmissionId(1), &risk, false, Some(cheap_lead), benchmark, 1,
+        );
+        assert!(
+            matches!(event, Event::QuoteDeclined { .. }),
+            "expected QuoteDeclined when lead_premium is below min_rate_ratio, got {event:?}"
+        );
+    }
+
+    /// Follower issues a quote with its own ATP (informational) and desired_follow_line_bps.
+    #[test]
+    fn follower_quotes_at_own_atp_with_desired_line() {
+        let mut s = fresh_syndicate(); // min_rate_ratio = 0.85, desired_follow_line_bps = 5_000
+        let risk = make_risk(1_000_000);
+        let benchmark = 0.65;
+        let atp = s.atp(&risk, benchmark);
+        // Set lead_premium 20% above ATP — acceptably above the 0.85 threshold.
+        let generous_lead = atp * 12 / 10;
+        let (_, event) = s.on_quote_requested(
+            crate::types::Day(0), SubmissionId(1), &risk, false, Some(generous_lead), benchmark, 1,
+        );
+        match event {
+            Event::QuoteIssued { premium, desired_line_bps, is_lead, .. } => {
+                assert!(!is_lead, "follower must emit is_lead: false");
+                assert_eq!(premium, atp, "follower QuoteIssued.premium must be own ATP");
+                assert_eq!(
+                    desired_line_bps, s.desired_follow_line_bps,
+                    "desired_line_bps must equal desired_follow_line_bps"
+                );
+                assert!(desired_line_bps > 0, "desired_follow_line_bps must be positive");
+            }
+            _ => panic!("expected QuoteIssued when lead_premium is acceptable, got {event:?}"),
+        }
     }
 
     #[test]

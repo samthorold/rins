@@ -30,8 +30,8 @@ struct PendingSubmission {
     lead_premium: Option<u64>,
     followers_invited: usize,
     followers_responded: usize,
-    /// (syndicate_id, premium) — shares allocated at panel assembly.
-    quoted_syndicates: Vec<(SyndicateId, u64)>,
+    /// (syndicate_id, desired_line_bps) — collected from QuoteIssued; settlement uses lead_premium.
+    quoted_syndicates: Vec<(SyndicateId, u32)>,
     declined_count: usize,
 }
 
@@ -218,6 +218,7 @@ impl Market {
         submission_id: SubmissionId,
         syndicate_id: SyndicateId,
         premium: u64,
+        desired_line_bps: u32,
         available_syndicates: &[SyndicateId],
     ) -> Vec<(Day, Event)> {
         let pending = match self.pending.get_mut(&submission_id) {
@@ -225,7 +226,7 @@ impl Market {
             None => return vec![],
         };
         pending.lead_premium = Some(premium);
-        pending.quoted_syndicates.push((syndicate_id, premium));
+        pending.quoted_syndicates.push((syndicate_id, desired_line_bps));
 
         // Followers are all syndicates except the lead.
         let followers: Vec<SyndicateId> = available_syndicates
@@ -256,18 +257,20 @@ impl Market {
     }
 
     /// A follower syndicate has issued a quote.
+    /// `desired_line_bps` is the follower's desired share (from `QuoteIssued`).
+    /// The follower's own ATP is not needed here — settlement uses `lead_premium`.
     pub fn on_follower_quote_issued(
         &mut self,
         day: Day,
         submission_id: SubmissionId,
         syndicate_id: SyndicateId,
-        premium: u64,
+        desired_line_bps: u32,
     ) -> Vec<(Day, Event)> {
         let pending = match self.pending.get_mut(&submission_id) {
             Some(p) => p,
             None => return vec![],
         };
-        pending.quoted_syndicates.push((syndicate_id, premium));
+        pending.quoted_syndicates.push((syndicate_id, desired_line_bps));
         pending.followers_responded += 1;
         if pending.followers_responded == pending.followers_invited {
             self.assemble_panel(day, submission_id)
@@ -306,38 +309,59 @@ impl Market {
         self.risk_cache.remove(&submission_id)
     }
 
-    /// Assemble the panel from all syndicates that quoted, with equal shares.
-    /// Removes the submission from `pending` and returns a `PolicyBound` event.
+    /// Assemble the panel from all syndicates that quoted.
+    ///
+    /// **Sign-down (or sign-up)**: each syndicate's signed share is proportional to its
+    /// desired line, scaled so that the total always equals exactly 10_000 bps.
+    /// The last entry receives the rounding remainder to guarantee the exact sum.
+    ///
+    /// **Minimum fill**: if total desired < 7_500 bps (75%), the risk is abandoned
+    /// (too few syndicates willing to write it at the lead price).
+    ///
+    /// **Lead price settlement**: all entries are priced at `lead_premium × signed_bps / 10_000`,
+    /// never at the follower's own ATP.
     fn assemble_panel(&mut self, day: Day, submission_id: SubmissionId) -> Vec<(Day, Event)> {
         let pending = match self.pending.remove(&submission_id) {
             Some(p) => p,
             None => return vec![],
         };
-        if pending.quoted_syndicates.is_empty() {
-            // No quotes — submission is abandoned silently.
+
+        let total_desired: u32 = pending.quoted_syndicates.iter().map(|&(_, bps)| bps).sum();
+
+        if total_desired == 0 {
+            // No quotes at all — silent abandon (pending already removed).
             return vec![];
         }
+
+        const MIN_FILL_BPS: u32 = 7_500;
+        if total_desired < MIN_FILL_BPS {
+            return vec![(day, Event::SubmissionAbandoned { submission_id })];
+        }
+
         // Stash risk and insured_id so the dispatch layer can pass them to on_policy_bound.
         self.risk_cache.insert(submission_id, pending.risk.clone());
         self.insured_cache.insert(submission_id, pending.insured_id);
 
-        let n = pending.quoted_syndicates.len() as u32;
-        let base_share = 10_000 / n;
-        let remainder = 10_000 % n;
+        let lead_premium = pending.lead_premium.unwrap(); // guaranteed Some: lead declined → abandoned before here
+        let n = pending.quoted_syndicates.len();
+        let mut signed_so_far: u32 = 0;
+        let mut entries = Vec::with_capacity(n);
 
-        let entries: Vec<PanelEntry> = pending
-            .quoted_syndicates
-            .iter()
-            .enumerate()
-            .map(|(i, &(syn_id, prem))| {
-                let share_bps = base_share + if i == 0 { remainder } else { 0 };
-                PanelEntry {
-                    syndicate_id: syn_id,
-                    share_bps,
-                    premium: prem * share_bps as u64 / 10_000,
-                }
-            })
-            .collect();
+        for (i, &(syn_id, desired_bps)) in pending.quoted_syndicates.iter().enumerate() {
+            let share_bps = if i + 1 < n {
+                // Proportional sign-down (or sign-up when undersubscribed).
+                (desired_bps as u64 * 10_000 / total_desired as u64) as u32
+            } else {
+                // Last entry: remainder to guarantee sum == 10_000.
+                10_000 - signed_so_far
+            };
+            signed_so_far += share_bps;
+            entries.push(PanelEntry {
+                syndicate_id: syn_id,
+                share_bps,
+                premium: lead_premium * share_bps as u64 / 10_000,
+            });
+        }
 
         vec![(
             day.offset(5),
@@ -1274,5 +1298,150 @@ mod tests {
             market.insured_active_policies.is_empty(),
             "insured_active_policies must be cleared after policy expiry"
         );
+    }
+
+    // ── Lead-price panel mechanics tests ──────────────────────────────────────
+
+    /// Drive a full quoting round and verify every panel entry settles at lead_premium.
+    #[test]
+    fn panel_entries_all_settle_at_lead_premium() {
+        use crate::types::{BrokerId, InsuredId, SubmissionId, SyndicateId};
+
+        let mut market = Market::new();
+        let lead_id = SyndicateId(1);
+        let follower_id = SyndicateId(2);
+        let available = vec![lead_id, follower_id];
+
+        // Submission arrives.
+        market.on_submission_arrived(
+            Day(0), SubmissionId(1), BrokerId(1), InsuredId(1), make_risk(), &available,
+        );
+
+        // Lead quotes: slip price = 100_000, wants 5_000 bps (50%).
+        let lead_premium = 100_000u64;
+        let lead_desired = 5_000u32;
+        let follower_events = market.on_lead_quote_issued(
+            Day(2), SubmissionId(1), lead_id, lead_premium, lead_desired, &available,
+        );
+        // Lead invited the follower — QuoteRequested should have been emitted.
+        assert!(follower_events.iter().any(|(_, e)| matches!(e, Event::QuoteRequested { .. })));
+
+        // Follower quotes: wants 5_000 bps (50%) at the lead price.
+        let result_events = market.on_follower_quote_issued(
+            Day(5), SubmissionId(1), follower_id, 5_000,
+        );
+
+        // PolicyBound should be in result_events.
+        let panel = result_events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::PolicyBound { panel, .. } => Some(panel.clone()),
+                _ => None,
+            })
+            .expect("expected PolicyBound after all followers responded");
+
+        // total_desired = 10_000 (5000+5000), so each signed_bps = 5_000.
+        assert_eq!(panel.entries.len(), 2);
+        let total_premium: u64 = panel.entries.iter().map(|e| e.premium).sum();
+        // All entries must settle at lead_premium × share_bps / 10_000.
+        for entry in &panel.entries {
+            assert_eq!(
+                entry.premium,
+                lead_premium * entry.share_bps as u64 / 10_000,
+                "entry premium must equal lead_premium × share_bps / 10_000"
+            );
+        }
+        // Total premium must equal lead_premium (100% subscribed).
+        assert_eq!(total_premium, lead_premium, "total premium should equal lead_premium for 100% fill");
+    }
+
+    /// Oversubscription: total desired > 10_000 → shares sign down proportionally.
+    #[test]
+    fn panel_signs_down_on_oversubscription() {
+        use crate::types::{BrokerId, InsuredId, SubmissionId, SyndicateId};
+
+        let mut market = Market::new();
+        let lead_id = SyndicateId(1);
+        let f1_id = SyndicateId(2);
+        let f2_id = SyndicateId(3);
+        let available = vec![lead_id, f1_id, f2_id];
+
+        market.on_submission_arrived(
+            Day(0), SubmissionId(1), BrokerId(1), InsuredId(1), make_risk(), &available,
+        );
+
+        // Lead wants 2_000 bps; each follower wants 6_000 bps → total desired = 14_000.
+        let lead_premium = 200_000u64;
+        market.on_lead_quote_issued(Day(2), SubmissionId(1), lead_id, lead_premium, 2_000, &available);
+        market.on_follower_quote_issued(Day(5), SubmissionId(1), f1_id, 6_000);
+        let events = market.on_follower_quote_issued(Day(5), SubmissionId(1), f2_id, 6_000);
+
+        let panel = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::PolicyBound { panel, .. } => Some(panel.clone()),
+                _ => None,
+            })
+            .expect("expected PolicyBound");
+
+        // Shares must sum to exactly 10_000.
+        let share_sum: u32 = panel.entries.iter().map(|e| e.share_bps).sum();
+        assert_eq!(share_sum, 10_000, "signed shares must sum to 10_000, got {share_sum}");
+
+        // Each non-last entry must be within 1 bps of its proportional share (floor rounding).
+        // The last entry absorbs the remainder, so it may be up to (n-1) bps higher.
+        let desired = [2_000u32, 6_000, 6_000];
+        let n = panel.entries.len() as u32;
+        for (i, (entry, &des)) in panel.entries.iter().zip(desired.iter()).enumerate() {
+            let proportional = des * 10_000 / 14_000;
+            let tolerance = if i + 1 < panel.entries.len() { 1 } else { n - 1 };
+            assert!(
+                entry.share_bps <= proportional + tolerance,
+                "entry {} signed {} > proportional {} + tolerance {} (desired {} of 14000)",
+                entry.syndicate_id.0, entry.share_bps, proportional, tolerance, des
+            );
+        }
+
+        // All entries settle at lead_premium × signed_bps / 10_000.
+        for entry in &panel.entries {
+            assert_eq!(
+                entry.premium,
+                lead_premium * entry.share_bps as u64 / 10_000,
+                "entry must settle at lead price, not own ATP"
+            );
+        }
+    }
+
+    /// Undersubscription below 75% threshold → SubmissionAbandoned.
+    #[test]
+    fn submission_abandoned_when_undersubscribed_below_threshold() {
+        use crate::types::{BrokerId, InsuredId, SubmissionId, SyndicateId};
+
+        let mut market = Market::new();
+        let lead_id = SyndicateId(1);
+        let follower_id = SyndicateId(2);
+        let available = vec![lead_id, follower_id];
+
+        market.on_submission_arrived(
+            Day(0), SubmissionId(1), BrokerId(1), InsuredId(1), make_risk(), &available,
+        );
+
+        // Lead wants 1_000 bps (10%), follower wants 500 bps (5%) → total = 1_500 < 7_500.
+        market.on_lead_quote_issued(Day(2), SubmissionId(1), lead_id, 100_000, 1_000, &available);
+        let events = market.on_follower_quote_issued(Day(5), SubmissionId(1), follower_id, 500);
+
+        let has_abandoned = events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::SubmissionAbandoned { .. }));
+        assert!(
+            has_abandoned,
+            "expected SubmissionAbandoned when total desired ({}) < 7_500, got {events:?}",
+            1_000 + 500
+        );
+
+        let has_policy = events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::PolicyBound { .. }));
+        assert!(!has_policy, "must not emit PolicyBound when undersubscribed");
     }
 }
