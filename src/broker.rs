@@ -83,11 +83,12 @@ mod tests {
     use crate::insured::AssetType;
 
     fn make_insured(id: u64, asset_type: AssetType) -> Insured {
-        Insured {
-            id: InsuredId(id),
+        Insured::new(
+            InsuredId(id),
             asset_type,
-            total_ground_up_loss_by_year: Default::default(),
-        }
+            "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic, Peril::Attritional],
+        )
     }
 
     fn small_risk() -> Risk {

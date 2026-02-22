@@ -40,18 +40,20 @@ impl Simulation {
 
         let mut insureds = Vec::new();
         for i in 0..config.n_small_insureds {
-            insureds.push(Insured {
-                id: InsuredId(i as u64 + 1),
-                asset_type: AssetType::Small,
-                total_ground_up_loss_by_year: HashMap::new(),
-            });
+            insureds.push(Insured::new(
+                InsuredId(i as u64 + 1),
+                AssetType::Small,
+                "US-SE".to_string(),
+                vec![Peril::WindstormAtlantic, Peril::Attritional],
+            ));
         }
         for i in 0..config.n_large_insureds {
-            insureds.push(Insured {
-                id: InsuredId(config.n_small_insureds as u64 + i as u64 + 1),
-                asset_type: AssetType::Large,
-                total_ground_up_loss_by_year: HashMap::new(),
-            });
+            insureds.push(Insured::new(
+                InsuredId(config.n_small_insureds as u64 + i as u64 + 1),
+                AssetType::Large,
+                "US-SE".to_string(),
+                vec![Peril::WindstormAtlantic, Peril::Attritional],
+            ));
         }
         let broker = Broker::new(insureds, insurer_ids);
 
@@ -196,18 +198,12 @@ impl Simulation {
 
             Event::QuoteAccepted { submission_id, insured_id, insurer_id, premium } => {
                 let year = Year((day.0 / Day::DAYS_PER_YEAR) as u32 + 1);
-                // Retrieve the risk from the LeadQuoteRequested that seeded this chain.
-                // We need the risk to store in BoundPolicy. Look it up from the insured.
                 let risk = self
                     .broker
                     .insureds
                     .iter()
                     .find(|i| i.id == insured_id)
-                    .map(|i| Risk {
-                        sum_insured: i.sum_insured(),
-                        territory: "US-SE".to_string(),
-                        perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
-                    });
+                    .map(|i| i.risk.clone());
                 if let Some(risk) = risk {
                     // Schedule renewal CoverageRequested ahead of expiry.
                     // PolicyExpired fires at day+361; renewal fires renewal_lead_days before that.
@@ -318,12 +314,7 @@ impl Simulation {
                 .enumerate()
                 .map(|(i, insured)| {
                     let offset = if n > 1 { i as u64 * 180 / n as u64 } else { 0 };
-                    let risk = Risk {
-                        sum_insured: insured.sum_insured(),
-                        territory: "US-SE".to_string(),
-                        perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
-                    };
-                    (day.offset(offset), insured.id, risk)
+                    (day.offset(offset), insured.id, insured.risk.clone())
                 })
                 .collect();
 

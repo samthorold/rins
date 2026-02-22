@@ -1,5 +1,5 @@
 use crate::config::{LARGE_ASSET_VALUE, SMALL_ASSET_VALUE};
-use crate::events::{Event, Peril};
+use crate::events::{Event, Peril, Risk};
 use crate::types::{Day, InsuredId, InsurerId, SubmissionId, Year};
 
 /// Asset size tier for an insured.
@@ -14,16 +14,33 @@ pub enum AssetType {
 pub struct Insured {
     pub id: InsuredId,
     pub asset_type: AssetType,
+    /// The asset this insured holds and seeks coverage for.
+    pub risk: Risk,
     /// Cumulative ground-up losses experienced, keyed by year.
     pub total_ground_up_loss_by_year: std::collections::HashMap<Year, u64>,
 }
 
 impl Insured {
-    pub fn sum_insured(&self) -> u64 {
-        match self.asset_type {
+    pub fn new(
+        id: InsuredId,
+        asset_type: AssetType,
+        territory: String,
+        perils_covered: Vec<Peril>,
+    ) -> Self {
+        let sum_insured = match asset_type {
             AssetType::Small => SMALL_ASSET_VALUE,
             AssetType::Large => LARGE_ASSET_VALUE,
+        };
+        Self {
+            id,
+            asset_type,
+            risk: Risk { sum_insured, territory, perils_covered },
+            total_ground_up_loss_by_year: std::collections::HashMap::new(),
         }
+    }
+
+    pub fn sum_insured(&self) -> u64 {
+        self.risk.sum_insured
     }
 
     /// The insured receives a quote and accepts it unconditionally.
@@ -57,40 +74,44 @@ mod tests {
     use super::*;
 
     fn make_insured(id: u64) -> Insured {
-        Insured {
-            id: InsuredId(id),
-            asset_type: AssetType::Small,
-            total_ground_up_loss_by_year: Default::default(),
-        }
+        Insured::new(
+            InsuredId(id),
+            AssetType::Small,
+            "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic, Peril::Attritional],
+        )
     }
 
     #[test]
     fn small_asset_sum_insured() {
-        let insured = Insured {
-            id: InsuredId(1),
-            asset_type: AssetType::Small,
-            total_ground_up_loss_by_year: Default::default(),
-        };
+        let insured = Insured::new(
+            InsuredId(1),
+            AssetType::Small,
+            "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic],
+        );
         assert_eq!(insured.sum_insured(), SMALL_ASSET_VALUE);
     }
 
     #[test]
     fn large_asset_sum_insured() {
-        let insured = Insured {
-            id: InsuredId(1),
-            asset_type: AssetType::Large,
-            total_ground_up_loss_by_year: Default::default(),
-        };
+        let insured = Insured::new(
+            InsuredId(1),
+            AssetType::Large,
+            "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic],
+        );
         assert_eq!(insured.sum_insured(), LARGE_ASSET_VALUE);
     }
 
     #[test]
     fn on_insured_loss_accumulates_by_year() {
-        let mut insured = Insured {
-            id: InsuredId(1),
-            asset_type: AssetType::Small,
-            total_ground_up_loss_by_year: Default::default(),
-        };
+        let mut insured = Insured::new(
+            InsuredId(1),
+            AssetType::Small,
+            "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic, Peril::Attritional],
+        );
         insured.on_insured_loss(100_000, Peril::Attritional, Year(1));
         insured.on_insured_loss(200_000, Peril::WindstormAtlantic, Year(1));
         insured.on_insured_loss(50_000, Peril::Attritional, Year(2));
