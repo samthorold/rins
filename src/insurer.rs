@@ -11,8 +11,6 @@ pub struct Insurer {
     /// Current capital (signed to allow negative without panicking).
     pub capital: i64,
     pub initial_capital: i64,
-    /// Underwriter channel: premium = rate × sum_insured.
-    pub rate: f64,
     /// Actuarial channel: E[annual_loss] / sum_insured across all perils.
     expected_loss_fraction: f64,
     /// Actuarial channel: ATP = expected_loss_fraction / target_loss_ratio.
@@ -31,7 +29,6 @@ impl Insurer {
     pub fn new(
         id: InsurerId,
         initial_capital: i64,
-        rate: f64,
         expected_loss_fraction: f64,
         target_loss_ratio: f64,
         max_cat_aggregate: Option<u64>,
@@ -41,7 +38,6 @@ impl Insurer {
             id,
             capital: initial_capital,
             initial_capital,
-            rate,
             expected_loss_fraction,
             target_loss_ratio,
             cat_aggregate: 0,
@@ -107,10 +103,11 @@ impl Insurer {
         (self.expected_loss_fraction * risk.sum_insured as f64 / self.target_loss_ratio).round() as u64
     }
 
-    /// Underwriter channel: fixed rate × sum_insured (market rate, not ATP-derived).
-    /// Future: apply cycle indicator, relationship score, lead-quote anchoring.
+    /// Underwriter channel: Step 0 — technical pricing baseline, premium = ATP.
+    /// Future: apply cycle indicator, relationship score, lead-quote anchoring
+    /// as a multiplicative factor on ATP (premium = ATP × underwriter_factor).
     fn underwriter_premium(&self, risk: &Risk) -> u64 {
-        (self.rate * risk.sum_insured as f64).round() as u64
+        self.actuarial_price(risk)
     }
 
     /// Deduct a settled claim from capital (can go negative — no insolvency logic yet).
@@ -133,13 +130,13 @@ mod tests {
         }
     }
 
-    fn make_insurer(id: InsurerId, capital: i64, rate: f64) -> Insurer {
-        Insurer::new(id, capital, rate, 0.239, 0.70, None, None)
+    fn make_insurer(id: InsurerId, capital: i64) -> Insurer {
+        Insurer::new(id, capital, 0.239, 0.70, None, None)
     }
 
     #[test]
     fn on_year_start_resets_capital() {
-        let mut ins = make_insurer(InsurerId(1), 1_000_000, 0.02);
+        let mut ins = make_insurer(InsurerId(1), 1_000_000);
         ins.capital = 500_000; // depleted
         ins.on_year_start();
         assert_eq!(ins.capital, ins.initial_capital);
@@ -147,21 +144,21 @@ mod tests {
 
     #[test]
     fn on_claim_settled_reduces_capital() {
-        let mut ins = make_insurer(InsurerId(1), 1_000_000, 0.02);
+        let mut ins = make_insurer(InsurerId(1), 1_000_000);
         ins.on_claim_settled(300_000);
         assert_eq!(ins.capital, 700_000);
     }
 
     #[test]
     fn on_claim_settled_can_go_negative() {
-        let mut ins = make_insurer(InsurerId(1), 100, 0.02);
+        let mut ins = make_insurer(InsurerId(1), 100);
         ins.on_claim_settled(1_000_000);
         assert!(ins.capital < 0, "capital should go negative without panicking");
     }
 
     #[test]
     fn on_lead_quote_requested_always_quotes() {
-        let ins = make_insurer(InsurerId(1), 1_000_000_000, 0.02);
+        let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
         let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
         assert!(
@@ -171,19 +168,18 @@ mod tests {
     }
 
     #[test]
-    fn premium_equals_rate_times_sum_insured() {
-        let ins = make_insurer(InsurerId(1), 1_000_000_000, 0.02);
+    fn premium_equals_atp() {
+        let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
-        let expected = (0.02 * ASSET_VALUE as f64).round() as u64;
         let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
-        if let Event::LeadQuoteIssued { premium, .. } = event {
-            assert_eq!(premium, expected, "premium must equal rate × sum_insured");
+        if let Event::LeadQuoteIssued { atp, premium, .. } = event {
+            assert_eq!(premium, atp, "Step 0 technical pricing: premium must equal ATP");
         }
     }
 
     #[test]
     fn lead_quote_issued_carries_insured_id() {
-        let ins = make_insurer(InsurerId(1), 1_000_000_000, 0.02);
+        let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
         let (_, event) =
             ins.on_lead_quote_requested(Day(0), SubmissionId(5), InsuredId(42), &risk);
@@ -198,7 +194,7 @@ mod tests {
 
     #[test]
     fn premium_scales_with_sum_insured() {
-        let ins = make_insurer(InsurerId(1), 0, 0.02);
+        let ins = make_insurer(InsurerId(1), 0);
         let small = Risk {
             sum_insured: ASSET_VALUE,
             territory: "US-SE".to_string(),
@@ -225,7 +221,7 @@ mod tests {
 
     #[test]
     fn quote_premium_is_positive_for_nonzero_risk() {
-        let ins = make_insurer(InsurerId(1), 1_000_000_000, 0.02);
+        let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
         let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
         if let Event::LeadQuoteIssued { premium, .. } = event {
@@ -235,7 +231,7 @@ mod tests {
 
     #[test]
     fn atp_equals_expected_loss_over_target_ratio() {
-        let ins = make_insurer(InsurerId(1), 0, 0.02);
+        let ins = make_insurer(InsurerId(1), 0);
         let risk = small_risk();
         let expected = (0.239 * ASSET_VALUE as f64 / 0.70).round() as u64;
         let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
@@ -247,15 +243,14 @@ mod tests {
     }
 
     #[test]
-    fn premium_is_rate_times_sum_insured_independent_of_atp() {
-        // ATP and premium are computed from separate channels; verify independence.
-        let ins = make_insurer(InsurerId(1), 0, 0.02);
+    fn premium_equals_expected_loss_fraction_over_target_ratio() {
+        // Step 0 technical pricing: premium = ATP = expected_loss_fraction × sum_insured / target_loss_ratio.
+        let ins = make_insurer(InsurerId(1), 0);
         let risk = small_risk();
-        let expected_premium = (0.02 * ASSET_VALUE as f64).round() as u64;
+        let expected = (0.239 * ASSET_VALUE as f64 / 0.70).round() as u64;
         let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
-        if let Event::LeadQuoteIssued { atp, premium, .. } = event {
-            assert_eq!(premium, expected_premium, "underwriter premium must equal rate × sum_insured");
-            assert_ne!(atp, premium, "ATP and premium must differ when rate ≠ expected_loss_fraction / target_loss_ratio");
+        if let Event::LeadQuoteIssued { premium, .. } = event {
+            assert_eq!(premium, expected, "premium must equal expected_loss_fraction × sum_insured / target_loss_ratio");
         } else {
             panic!("expected LeadQuoteIssued");
         }
@@ -281,14 +276,14 @@ mod tests {
 
     #[test]
     fn on_policy_bound_increments_cat_aggregate() {
-        let mut ins = make_insurer(InsurerId(1), 0, 0.02);
+        let mut ins = make_insurer(InsurerId(1), 0);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
         assert_eq!(ins.cat_aggregate, ASSET_VALUE, "cat_aggregate must equal sum_insured after binding one cat policy");
     }
 
     #[test]
     fn on_policy_expired_releases_cat_aggregate() {
-        let mut ins = make_insurer(InsurerId(1), 0, 0.02);
+        let mut ins = make_insurer(InsurerId(1), 0);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
         assert_eq!(ins.cat_aggregate, ASSET_VALUE);
         ins.on_policy_expired(PolicyId(1));
@@ -297,14 +292,14 @@ mod tests {
 
     #[test]
     fn non_cat_policy_does_not_affect_cat_aggregate() {
-        let mut ins = make_insurer(InsurerId(1), 0, 0.02);
+        let mut ins = make_insurer(InsurerId(1), 0);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
         assert_eq!(ins.cat_aggregate, 0, "attritional-only policy must not affect cat_aggregate");
     }
 
     #[test]
     fn cat_exposure_at_quote_reflects_aggregate() {
-        let mut ins = make_insurer(InsurerId(1), 0, 0.02);
+        let mut ins = make_insurer(InsurerId(1), 0);
         // Bind a cat policy first.
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
 
@@ -323,7 +318,7 @@ mod tests {
 
     #[test]
     fn cat_exposure_at_quote_is_zero_for_non_cat_risk() {
-        let mut ins = make_insurer(InsurerId(1), 0, 0.02);
+        let mut ins = make_insurer(InsurerId(1), 0);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
 
         let risk = att_only_risk();

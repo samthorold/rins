@@ -42,7 +42,6 @@ impl Simulation {
                 Insurer::new(
                     c.id,
                     c.initial_capital,
-                    c.rate,
                     c.expected_loss_fraction,
                     c.target_loss_ratio,
                     c.max_cat_aggregate,
@@ -366,7 +365,6 @@ mod tests {
             insurers: vec![InsurerConfig {
                 id: InsurerId(1),
                 initial_capital: 100_000_000_000,
-                rate: 0.02,
                 expected_loss_fraction: 0.239,
                 target_loss_ratio: 0.70,
                 max_cat_aggregate: None,
@@ -617,7 +615,6 @@ mod tests {
             .map(|i| InsurerConfig {
                 id: InsurerId(i),
                 initial_capital: 100_000_000_000,
-                rate: 0.02,
                 expected_loss_fraction: 0.239,
                 target_loss_ratio: 0.70,
                 max_cat_aggregate: None,

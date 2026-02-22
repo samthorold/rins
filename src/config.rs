@@ -3,12 +3,11 @@ use crate::types::InsurerId;
 pub struct InsurerConfig {
     pub id: InsurerId,
     pub initial_capital: i64, // signed to allow negative (no insolvency in MVP)
-    /// Premium as a fraction of sum_insured (e.g. 0.02 = 2% rate on line).
-    pub rate: f64,
     /// E[annual_loss] / sum_insured, combining all perils. Used by actuarial channel.
     /// Canonical: E_att(0.164) + E_cat(0.075) ≈ 0.239.
     pub expected_loss_fraction: f64,
-    /// ATP = expected_loss_fraction / target_loss_ratio.
+    /// Target combined loss ratio. ATP = expected_loss_fraction / target_loss_ratio.
+    /// With target_loss_ratio < 1, ATP includes a profit margin above expected loss.
     pub target_loss_ratio: f64,
     /// Max WindstormAtlantic aggregate sum_insured across all in-force policies (None = unlimited).
     pub max_cat_aggregate: Option<u64>,
@@ -59,7 +58,6 @@ impl SimulationConfig {
                 .map(|i| InsurerConfig {
                     id: InsurerId(i),
                     initial_capital: 100_000_000_000, // 1B USD in cents
-                    rate: 0.35,
                     expected_loss_fraction: 0.239, // E_att(0.164) + E_cat(0.075)
                     target_loss_ratio: 0.70,
                     max_cat_aggregate: None,
