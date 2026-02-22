@@ -71,6 +71,14 @@ pub struct Market {
     ytd_premiums_by_line: HashMap<String, u64>,
     /// Year-to-date claims settled per line of business.
     ytd_claims_by_line: HashMap<String, u64>,
+    /// Remaining insurable asset value per (policy, year).
+    /// Initialized lazily to `policy.risk.sum_insured` on the first `InsuredLoss`
+    /// for that policy in that year; decremented by each effective ground-up loss.
+    /// Ensures aggregate annual GUL ≤ sum_insured: once an asset is fully consumed
+    /// it cannot generate further loss in the same year.
+    /// Keyed by PolicyId (not InsuredId) so independent assets owned by the same
+    /// insured each get their own cap.
+    remaining_asset_value: HashMap<(PolicyId, Year), u64>,
 }
 
 impl Default for Market {
@@ -92,6 +100,7 @@ impl Market {
             insured_cache: HashMap::new(),
             ytd_premiums_by_line: HashMap::new(),
             ytd_claims_by_line: HashMap::new(),
+            remaining_asset_value: HashMap::new(),
         }
     }
 
@@ -530,7 +539,7 @@ impl Market {
     /// Emits one `ClaimSettled` per panel entry. Policies whose net loss is zero
     /// (ground_up_loss ≤ attachment, or no active policy) produce no events.
     pub fn on_insured_loss(
-        &self,
+        &mut self,
         day: Day,
         policy_id: Option<PolicyId>,
         insured_id: InsuredId,
@@ -547,17 +556,38 @@ impl Market {
         let Some(policy) = self.policies.get(&effective_pid) else {
             return vec![];
         };
-        let gross = ground_up_loss.min(policy.risk.limit);
-        let net = gross.saturating_sub(policy.risk.attachment);
-        if net == 0 {
-            return vec![];
-        }
-        policy
+        // Extract policy fields before the mutable borrow of remaining_asset_value.
+        let sum_insured = policy.risk.sum_insured;
+        let limit      = policy.risk.limit;
+        let attachment = policy.risk.attachment;
+        let panel_entries: Vec<(SyndicateId, u32)> = policy
             .panel
             .entries
             .iter()
-            .filter_map(|entry| {
-                let syndicate_loss = net * entry.share_bps as u64 / 10_000;
+            .map(|e| (e.syndicate_id, e.share_bps))
+            .collect();
+
+        // Cap effective GUL at the remaining insurable asset value for this
+        // (policy, year) pair. Initialized lazily to sum_insured; decremented
+        // each call so aggregate annual GUL cannot exceed sum_insured.
+        // Using PolicyId (not InsuredId) so independent assets are independently capped.
+        let year = Year((day.0 / Day::DAYS_PER_YEAR) as u32 + 1);
+        let remaining = self
+            .remaining_asset_value
+            .entry((effective_pid, year))
+            .or_insert(sum_insured);
+        let effective_gul = ground_up_loss.min(*remaining);
+        *remaining = remaining.saturating_sub(effective_gul);
+
+        let gross = effective_gul.min(limit);
+        let net = gross.saturating_sub(attachment);
+        if net == 0 {
+            return vec![];
+        }
+        panel_entries
+            .into_iter()
+            .filter_map(|(syndicate_id, share_bps)| {
+                let syndicate_loss = net * share_bps as u64 / 10_000;
                 if syndicate_loss == 0 {
                     return None;
                 }
@@ -565,7 +595,7 @@ impl Market {
                     day,
                     Event::ClaimSettled {
                         policy_id: effective_pid,
-                        syndicate_id: entry.syndicate_id,
+                        syndicate_id,
                         amount: syndicate_loss,
                         peril,
                     },
@@ -1261,10 +1291,43 @@ mod tests {
     /// on_insured_loss(None, insured_id) produces no events when no active policy.
     #[test]
     fn on_insured_loss_none_policy_id_without_active_policy_produces_no_claim() {
-        let market = Market::new();
+        let mut market = Market::new();
         // No policy bound — uninsured.
         let events = market.on_insured_loss(Day(0), None, InsuredId(99), 1_000_000, Peril::Attritional);
         assert!(events.is_empty(), "expected no events for uninsured insured");
+    }
+
+    /// Two InsuredLoss events for the same insured in the same year cannot produce
+    /// combined ClaimSettled amounts that imply aggregate GUL > sum_insured.
+    #[test]
+    fn aggregate_annual_gul_capped_at_sum_insured() {
+        use crate::types::SubmissionId;
+
+        let risk = Risk {
+            line_of_business: "property".to_string(),
+            sum_insured: 1_000_000,
+            territory: "US-SE".to_string(),
+            limit: 1_000_000,
+            attachment: 0,
+            perils_covered: vec![Peril::Attritional],
+        };
+        let mut market = Market::new();
+        market.on_policy_bound(
+            SubmissionId(1),
+            risk,
+            Panel { entries: vec![PanelEntry { syndicate_id: SyndicateId(1), share_bps: 10_000, premium: 0 }] },
+            Year(1),
+        );
+
+        // Two losses of 700K each — combined 1.4M exceeds sum_insured 1M.
+        let e1 = market.on_insured_loss(Day(1), Some(PolicyId(0)), InsuredId(0), 700_000, Peril::Attritional);
+        let e2 = market.on_insured_loss(Day(2), Some(PolicyId(0)), InsuredId(0), 700_000, Peril::Attritional);
+
+        let total_claimed: u64 = e1.iter().chain(e2.iter()).filter_map(|(_, e)| {
+            if let Event::ClaimSettled { amount, .. } = e { Some(*amount) } else { None }
+        }).sum();
+
+        assert_eq!(total_claimed, 1_000_000, "combined claims must not exceed sum_insured");
     }
 
     /// on_policy_bound populates insured_active_policies.
