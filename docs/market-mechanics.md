@@ -18,9 +18,9 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Catastrophe loss distribution | ACTIVE | `src/market.rs::on_loss_event` |
 | Policy terms (full-value, zero attachment) | ACTIVE (PARTIAL — full-value simplification of layer mechanics) | `src/market.rs::on_insured_loss` |
 | Annual policy expiry | ACTIVE | `src/market.rs::expire_policies` |
-| Fixed-rate pricing | ACTIVE (PARTIAL — simplification of actuarial channel) | `src/insurer.rs` |
+| Fixed-rate pricing (underwriter channel) | ACTIVE (PARTIAL — simplification of underwriter channel) | `src/insurer.rs::underwriter_premium` |
 | Lead-follow quoting (round-robin) | ACTIVE (PARTIAL — simplification of lead-follow) | `src/broker.rs` |
-| Actuarial channel (full ATP) | PLANNED | — |
+| Actuarial channel (structural scaffold) | PARTIAL — prior-based ATP, no EWMA yet | `src/insurer.rs::actuarial_price` |
 | Underwriter channel / cycle adjustment | PLANNED | — |
 | Broker relationship scores | PLANNED | — |
 | Syndicate entry / exit | PLANNED | — |
@@ -154,17 +154,17 @@ The ATP is not the quoted premium; it is a floor and an input.
 
 *[TBD: EWMA decay parameter — per-line or per-syndicate?]*
 
-**Current simplification (`[PARTIAL]`):** the full actuarial channel above has not been implemented. The formula used in the removed actuarial implementation was:
+**Current simplified implementation (`[PARTIAL]`):** `actuarial_price()` computes `expected_loss_fraction × sum_insured / target_loss_ratio` using a fixed per-insurer prior for `expected_loss_fraction` (calibrated from peril model parameters). The ATP is logged in `LeadQuoteIssued.atp`. `underwriter_premium()` returns `rate × sum_insured` independently (currently ≈ ATP). Both channels exist as separate code paths; neither yet uses runtime experience data.
 
 ```
 ATP = E[annual_loss] / target_loss_ratio
 ```
 
 where `E[annual_loss]` summed two peril contributions:
-- Attritional: `annual_rate × exp(mu + σ²/2) × sum_insured`
-- Cat (WindstormAtlantic): `annual_frequency × (scale × shape / (shape − 1)) × sum_insured`
+- Attritional: `annual_rate × exp(mu + σ²/2) × sum_insured` ≈ 0.164 × sum_insured
+- Cat (WindstormAtlantic): `annual_frequency × (scale × shape / (shape − 1)) × sum_insured` ≈ 0.075 × sum_insured
 
-This was replaced by a fixed rate on line: `premium = rate × sum_insured`, where `rate` is a single config parameter per insurer. Source: `src/insurer.rs`.
+Canonical values: `expected_loss_fraction = 0.239`, `target_loss_ratio = 0.70` → ATP rate ≈ 0.34. Source: `src/insurer.rs`.
 
 ### §4.2 Underwriter channel `[PLANNED]`
 

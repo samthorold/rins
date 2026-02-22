@@ -33,7 +33,7 @@ flowchart TD
     end
 
     subgraph Insurer["Insurer\n(ATP pricing)"]
-        LQI["**LeadQuoteIssued**\n{submission_id, insured_id, insurer_id, premium}\n(same day as LeadQuoteRequested)"]
+        LQI["**LeadQuoteIssued**\n{submission_id, insured_id, insurer_id, atp, premium}\n(same day as LeadQuoteRequested)"]
         CS_I["on_claim_settled\ncapital −= amount"]
     end
 
@@ -79,7 +79,7 @@ flowchart TD
 | 3 | `YearEnd { year }` | `YearStart` handler | `Simulation::handle_year_end`: log stats, reset YTD, schedule next `YearStart` | `year × 360 − 1` | §8.2 Coordinator Statistics |
 | 4 | `CoverageRequested { insured_id, risk }` | `YearStart` handler | `Broker::on_coverage_requested` → emit `LeadQuoteRequested` | spread days 0–179 of year | §5 Placement |
 | 5 | `LeadQuoteRequested { submission_id, insured_id, insurer_id, risk }` | `Broker` | `Insurer::on_lead_quote_requested` → emit `LeadQuoteIssued` | +1 from `CoverageRequested` | §5 Placement, §4.1 Actuarial channel |
-| 6 | `LeadQuoteIssued { submission_id, insured_id, insurer_id, premium }` | `Insurer` | `Broker::on_lead_quote_issued` → emit `QuotePresented` | same day as `LeadQuoteRequested` | §4 Pricing, §5 Placement |
+| 6 | `LeadQuoteIssued { submission_id, insured_id, insurer_id, atp, premium }` | `Insurer` | `Broker::on_lead_quote_issued` → emit `QuotePresented` | same day as `LeadQuoteRequested` | §4 Pricing, §5 Placement |
 | 7 | `QuotePresented { submission_id, insured_id, insurer_id, premium }` | `Broker` | `Insured::on_quote_presented` → emit `QuoteAccepted` | +1 from `LeadQuoteIssued` | §5 Placement |
 | 8 | `QuoteAccepted { submission_id, insured_id, insurer_id, premium }` | `Insured` | `Market::on_quote_accepted` → create `BoundPolicy` (pending), emit `PolicyBound` + `PolicyExpired` | same day as `QuotePresented` | §5 Placement, §2.2 Annual policy terms |
 | 9 | `QuoteRejected { submission_id, insured_id }` | `Insured` (not fired in this model) | `Market::on_quote_rejected` (no-op) | same day as `QuotePresented` | §5 Placement |

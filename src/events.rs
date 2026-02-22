@@ -41,7 +41,8 @@ pub enum Event {
         submission_id: SubmissionId,
         insured_id: InsuredId,
         insurer_id: InsurerId,
-        premium: u64,
+        atp: u64,     // actuarial technical price (break-even floor)
+        premium: u64, // final quoted premium (underwriter decision)
     },
     /// Broker presents the quote to the insured.
     QuotePresented {

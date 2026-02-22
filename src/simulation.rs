@@ -38,7 +38,7 @@ impl Simulation {
         let insurers: Vec<Insurer> = config
             .insurers
             .iter()
-            .map(|c| Insurer::new(c.id, c.initial_capital, c.rate))
+            .map(|c| Insurer::new(c.id, c.initial_capital, c.rate, c.expected_loss_fraction, c.target_loss_ratio))
             .collect();
 
         let insurer_ids: Vec<InsurerId> = insurers.iter().map(|i| i.id).collect();
@@ -162,7 +162,7 @@ impl Simulation {
                 }
             }
 
-            Event::LeadQuoteIssued { submission_id, insured_id, insurer_id, premium } => {
+            Event::LeadQuoteIssued { submission_id, insured_id, insurer_id, atp: _, premium } => {
                 let events =
                     self.broker.on_lead_quote_issued(day, submission_id, insured_id, insurer_id, premium);
                 for (d, e) in events {
@@ -344,6 +344,8 @@ mod tests {
                 id: InsurerId(1),
                 initial_capital: 100_000_000_000,
                 rate: 0.02,
+                expected_loss_fraction: 0.239,
+                target_loss_ratio: 0.70,
             }],
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -591,6 +593,8 @@ mod tests {
                 id: InsurerId(i),
                 initial_capital: 100_000_000_000,
                 rate: 0.02,
+                expected_loss_fraction: 0.239,
+                target_loss_ratio: 0.70,
             })
             .collect();
         let sim = run_sim(config);

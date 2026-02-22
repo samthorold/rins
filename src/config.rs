@@ -5,6 +5,11 @@ pub struct InsurerConfig {
     pub initial_capital: i64, // signed to allow negative (no insolvency in MVP)
     /// Premium as a fraction of sum_insured (e.g. 0.02 = 2% rate on line).
     pub rate: f64,
+    /// E[annual_loss] / sum_insured, combining all perils. Used by actuarial channel.
+    /// Canonical: E_att(0.164) + E_cat(0.075) ≈ 0.239.
+    pub expected_loss_fraction: f64,
+    /// ATP = expected_loss_fraction / target_loss_ratio.
+    pub target_loss_ratio: f64,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -51,6 +56,8 @@ impl SimulationConfig {
                     id: InsurerId(i),
                     initial_capital: 100_000_000_000, // 1B USD in cents
                     rate: 0.35,
+                    expected_loss_fraction: 0.239, // E_att(0.164) + E_cat(0.075)
+                    target_loss_ratio: 0.70,
                 })
                 .collect(),
             n_insureds: 100,
