@@ -31,18 +31,14 @@ pub struct SimulationConfig {
     pub seed: u64,
     pub years: u32,
     pub insurers: Vec<InsurerConfig>,
-    /// Number of small-asset insureds (90% of population). Asset value: 50M USD.
-    pub n_small_insureds: usize,
-    /// Number of large-asset insureds (10% of population). Asset value: 1B USD.
-    pub n_large_insureds: usize,
+    /// Number of insureds. Asset value: 50M USD each.
+    pub n_insureds: usize,
     pub attritional: AttritionalConfig,
     pub catastrophe: CatConfig,
 }
 
-/// Small insured asset value: 50M USD in cents.
-pub const SMALL_ASSET_VALUE: u64 = 5_000_000_000;
-/// Large insured asset value: 1B USD in cents.
-pub const LARGE_ASSET_VALUE: u64 = 100_000_000_000;
+/// Insured asset value: 50M USD in cents.
+pub const ASSET_VALUE: u64 = 5_000_000_000;
 
 impl SimulationConfig {
     pub fn canonical() -> Self {
@@ -57,8 +53,7 @@ impl SimulationConfig {
                     rate: 0.35,
                 })
                 .collect(),
-            n_small_insureds: 90,
-            n_large_insureds: 10,
+            n_insureds: 100,
             attritional: AttritionalConfig {
                 annual_rate: 2.0,  // 2 claims per insured per year on average
                 mu: -3.0,          // E[df] = exp(-3.0 + 0.5) ≈ 8.2%

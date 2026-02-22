@@ -64,7 +64,7 @@ fn bench_full_year(c: &mut Criterion) {
             group.sample_size(10);
         }
         group.throughput(Throughput::Elements(
-            (scenario.n_small_insureds + scenario.n_large_insureds) as u64,
+            scenario.n_insureds as u64,
         ));
         group.bench_function(BenchmarkId::from_parameter(name), |b| {
             b.iter_batched(

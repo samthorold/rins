@@ -10,7 +10,7 @@ const QUOTING_CHAIN_DAYS: u64 = 3;
 use crate::broker::Broker;
 use crate::config::SimulationConfig;
 use crate::events::{Event, EventLog, Peril, Risk, SimEvent};
-use crate::insured::{AssetType, Insured};
+use crate::insured::Insured;
 use crate::insurer::Insurer;
 use crate::market::Market;
 use crate::perils::{self, DamageFractionModel};
@@ -44,18 +44,9 @@ impl Simulation {
         let insurer_ids: Vec<InsurerId> = insurers.iter().map(|i| i.id).collect();
 
         let mut insureds = Vec::new();
-        for i in 0..config.n_small_insureds {
+        for i in 0..config.n_insureds {
             insureds.push(Insured::new(
                 InsuredId(i as u64 + 1),
-                AssetType::Small,
-                "US-SE".to_string(),
-                vec![Peril::WindstormAtlantic, Peril::Attritional],
-            ));
-        }
-        for i in 0..config.n_large_insureds {
-            insureds.push(Insured::new(
-                InsuredId(config.n_small_insureds as u64 + i as u64 + 1),
-                AssetType::Large,
                 "US-SE".to_string(),
                 vec![Peril::WindstormAtlantic, Peril::Attritional],
             ));
@@ -345,7 +336,7 @@ mod tests {
     use crate::config::{AttritionalConfig, CatConfig, InsurerConfig, SimulationConfig};
     use crate::events::Event;
 
-    fn minimal_config(years: u32, n_small: usize, n_large: usize) -> SimulationConfig {
+    fn minimal_config(years: u32, n_insureds: usize) -> SimulationConfig {
         SimulationConfig {
             seed: 42,
             years,
@@ -354,8 +345,7 @@ mod tests {
                 initial_capital: 100_000_000_000,
                 rate: 0.02,
             }],
-            n_small_insureds: n_small,
-            n_large_insureds: n_large,
+            n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
             catastrophe: CatConfig {
                 annual_frequency: 0.5,
@@ -376,7 +366,7 @@ mod tests {
 
     #[test]
     fn log_is_day_ordered() {
-        let sim = run_sim(minimal_config(1, 5, 1));
+        let sim = run_sim(minimal_config(1, 6));
         let days: Vec<u64> = sim.log.iter().map(|e| e.day.0).collect();
         let mut sorted = days.clone();
         sorted.sort_unstable();
@@ -385,13 +375,13 @@ mod tests {
 
     #[test]
     fn same_seed_produces_identical_logs() {
-        let run = || run_sim(minimal_config(2, 5, 1));
+        let run = || run_sim(minimal_config(2, 6));
         assert_eq!(run().log, run().log, "same seed must produce identical logs");
     }
 
     #[test]
     fn year_end_fires_at_correct_day() {
-        let sim = run_sim(minimal_config(1, 2, 0));
+        let sim = run_sim(minimal_config(1, 2));
         let ye = sim
             .log
             .iter()
@@ -402,7 +392,7 @@ mod tests {
 
     #[test]
     fn simulation_runs_multiple_years() {
-        let sim = run_sim(minimal_config(3, 3, 0));
+        let sim = run_sim(minimal_config(3, 3));
         let year_ends: Vec<u32> = sim
             .log
             .iter()
@@ -418,7 +408,7 @@ mod tests {
 
     #[test]
     fn quote_chain_produces_all_event_types() {
-        let sim = run_sim(minimal_config(1, 1, 0));
+        let sim = run_sim(minimal_config(1, 1));
         let has_coverage_req =
             sim.log.iter().any(|e| matches!(e.event, Event::CoverageRequested { .. }));
         let has_lead_quote_req =
@@ -442,7 +432,7 @@ mod tests {
     #[test]
     fn quote_chain_day_ordering() {
         // For a single insured, verify the day progression through the chain.
-        let sim = run_sim(minimal_config(1, 1, 0));
+        let sim = run_sim(minimal_config(1, 1));
 
         let coverage_day = sim
             .log
@@ -505,7 +495,7 @@ mod tests {
         // Every insured must have their initial policy bound in year 1.
         // Renewals may also fire within the horizon, so count unique insured IDs.
         let n_insureds = 5;
-        let sim = run_sim(minimal_config(1, n_insureds, 0));
+        let sim = run_sim(minimal_config(1, n_insureds));
         let mut bound_insureds = std::collections::HashSet::new();
         for e in &sim.log {
             if let Event::PolicyBound { insured_id, .. } = &e.event {
@@ -522,7 +512,7 @@ mod tests {
 
     #[test]
     fn each_policy_bound_has_no_duplicate() {
-        let sim = run_sim(minimal_config(1, 3, 0));
+        let sim = run_sim(minimal_config(1, 3));
         let bound_ids: Vec<_> = sim
             .log
             .iter()
@@ -544,7 +534,7 @@ mod tests {
 
     #[test]
     fn insured_loss_appears_between_loss_event_and_claim_settled() {
-        let mut config = minimal_config(1, 2, 0);
+        let mut config = minimal_config(1, 2);
         config.catastrophe.annual_frequency = 10.0;
         let sim = run_sim(config);
 
@@ -560,7 +550,7 @@ mod tests {
 
     #[test]
     fn claim_settled_amount_is_non_negative() {
-        let sim = run_sim(minimal_config(2, 5, 1));
+        let sim = run_sim(minimal_config(2, 6));
         for e in &sim.log {
             if let Event::ClaimSettled { amount, .. } = &e.event {
                 assert!(*amount > 0, "ClaimSettled amount must be positive, got {amount}");
@@ -570,7 +560,7 @@ mod tests {
 
     #[test]
     fn attritional_insured_loss_appears_in_log() {
-        let mut config = minimal_config(1, 5, 0);
+        let mut config = minimal_config(1, 5);
         config.attritional.annual_rate = 10.0;
         let sim = run_sim(config);
         let has_att = sim.log.iter().any(|e| {
@@ -583,7 +573,7 @@ mod tests {
 
     #[test]
     fn insurer_capital_reset_each_year() {
-        let mut config = minimal_config(2, 5, 0);
+        let mut config = minimal_config(2, 5);
         config.catastrophe.annual_frequency = 10.0;
         let sim = run_sim(config);
         for ins in &sim.insurers {
@@ -595,7 +585,7 @@ mod tests {
 
     #[test]
     fn submissions_routed_across_multiple_insurers() {
-        let mut config = minimal_config(1, 6, 0);
+        let mut config = minimal_config(1, 6);
         config.insurers = (1..=3)
             .map(|i| InsurerConfig {
                 id: InsurerId(i),
@@ -625,7 +615,7 @@ mod tests {
         // After the initial QuoteAccepted (day 2), a renewal CoverageRequested
         // should be scheduled at day + 361 - QUOTING_CHAIN_DAYS = 2 + 358 = 360,
         // so the new PolicyBound lands exactly on the old PolicyExpired (day 363).
-        let sim = run_sim(minimal_config(2, 1, 0));
+        let sim = run_sim(minimal_config(2, 1));
 
         let qa_day = sim
             .log
@@ -659,7 +649,7 @@ mod tests {
         // With the zero-drift formula, insured 0's renewal (QA day 2 + 358) lands exactly
         // on year2_start = 360, so we assert count < n_insureds rather than == 0.
         let n_insureds = 3;
-        let sim = run_sim(minimal_config(2, n_insureds, 0));
+        let sim = run_sim(minimal_config(2, n_insureds));
 
         let year2_start = Day::year_start(Year(2));
 

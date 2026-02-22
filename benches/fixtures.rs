@@ -5,19 +5,15 @@ use rins::simulation::Simulation;
 use rins::types::{Day, InsuredId, InsurerId, SubmissionId, Year};
 
 pub struct Scenario {
-    pub n_small_insureds: usize,
-    pub n_large_insureds: usize,
+    pub n_insureds: usize,
     pub insurer_count: usize,
 }
 
-pub const SMALL: Scenario =
-    Scenario { n_small_insureds: 9, n_large_insureds: 1, insurer_count: 3 };
+pub const SMALL: Scenario = Scenario { n_insureds: 10, insurer_count: 3 };
 
-pub const MEDIUM: Scenario =
-    Scenario { n_small_insureds: 90, n_large_insureds: 10, insurer_count: 5 };
+pub const MEDIUM: Scenario = Scenario { n_insureds: 100, insurer_count: 5 };
 
-pub const LARGE: Scenario =
-    Scenario { n_small_insureds: 900, n_large_insureds: 100, insurer_count: 10 };
+pub const LARGE: Scenario = Scenario { n_insureds: 1000, insurer_count: 10 };
 
 fn default_risk() -> Risk {
     Risk {
@@ -62,8 +58,7 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
                 rate: 0.02,
             })
             .collect(),
-        n_small_insureds: scenario.n_small_insureds,
-        n_large_insureds: scenario.n_large_insureds,
+        n_insureds: scenario.n_insureds,
         attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
         catastrophe: CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5 },
     };

@@ -198,7 +198,7 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
 
     use super::*;
-    use crate::config::SMALL_ASSET_VALUE;
+    use crate::config::ASSET_VALUE;
     use crate::perils::DamageFractionModel;
 
     fn rng() -> ChaCha20Rng {
@@ -207,7 +207,7 @@ mod tests {
 
     fn small_risk() -> Risk {
         Risk {
-            sum_insured: SMALL_ASSET_VALUE,
+            sum_insured: ASSET_VALUE,
             territory: "US-SE".to_string(),
             perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
         }
@@ -381,7 +381,7 @@ mod tests {
         let mut market = Market::new();
         bind_policy(&mut market, 1, 1);
         bind_policy(&mut market, 2, 2);
-        // Both policies have SMALL_ASSET_VALUE. Use a variable model (not the
+        // Both policies have ASSET_VALUE. Use a variable model (not the
         // degenerate Pareto(1,2) that always clips to 1.0).
         let models: HashMap<Peril, DamageFractionModel> = [(
             Peril::WindstormAtlantic,
@@ -478,8 +478,8 @@ mod tests {
         for (_, e) in &events {
             if let Event::InsuredLoss { ground_up_loss, .. } = e {
                 assert!(
-                    *ground_up_loss <= SMALL_ASSET_VALUE,
-                    "gul {ground_up_loss} > sum_insured {SMALL_ASSET_VALUE}"
+                    *ground_up_loss <= ASSET_VALUE,
+                    "gul {ground_up_loss} > sum_insured {ASSET_VALUE}"
                 );
             }
         }
@@ -500,7 +500,7 @@ mod tests {
     fn aggregate_annual_gul_capped_at_sum_insured() {
         let mut market = Market::new();
         let pid = bind_policy(&mut market, 1, 1);
-        let half = SMALL_ASSET_VALUE / 2 + 1;
+        let half = ASSET_VALUE / 2 + 1;
         let e1 = market.on_insured_loss(Day(10), pid, half, Peril::WindstormAtlantic);
         let e2 = market.on_insured_loss(Day(20), pid, half, Peril::WindstormAtlantic);
 
@@ -512,7 +512,7 @@ mod tests {
             })
             .sum();
 
-        assert_eq!(total, SMALL_ASSET_VALUE, "aggregate annual GUL must not exceed sum_insured");
+        assert_eq!(total, ASSET_VALUE, "aggregate annual GUL must not exceed sum_insured");
     }
 
     #[test]

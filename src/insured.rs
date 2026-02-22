@@ -1,35 +1,19 @@
-use crate::config::{LARGE_ASSET_VALUE, SMALL_ASSET_VALUE};
+use crate::config::ASSET_VALUE;
 use crate::events::{Event, Peril, Risk};
 use crate::types::{Day, InsuredId, InsurerId, SubmissionId};
 
-/// Asset size tier for an insured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AssetType {
-    /// Small property: 50M USD asset value.
-    Small,
-    /// Large property: 1B USD asset value.
-    Large,
-}
-
 pub struct Insured {
     pub id: InsuredId,
-    pub asset_type: AssetType,
     /// The asset this insured holds and seeks coverage for.
     pub risk: Risk,
 }
 
 impl Insured {
-    pub fn new(
-        id: InsuredId,
-        asset_type: AssetType,
-        territory: String,
-        perils_covered: Vec<Peril>,
-    ) -> Self {
-        let sum_insured = match asset_type {
-            AssetType::Small => SMALL_ASSET_VALUE,
-            AssetType::Large => LARGE_ASSET_VALUE,
-        };
-        Self { id, asset_type, risk: Risk { sum_insured, territory, perils_covered } }
+    pub fn new(id: InsuredId, territory: String, perils_covered: Vec<Peril>) -> Self {
+        Self {
+            id,
+            risk: Risk { sum_insured: ASSET_VALUE, territory, perils_covered },
+        }
     }
 
     pub fn sum_insured(&self) -> u64 {
@@ -64,32 +48,15 @@ mod tests {
     fn make_insured(id: u64) -> Insured {
         Insured::new(
             InsuredId(id),
-            AssetType::Small,
             "US-SE".to_string(),
             vec![Peril::WindstormAtlantic, Peril::Attritional],
         )
     }
 
     #[test]
-    fn small_asset_sum_insured() {
-        let insured = Insured::new(
-            InsuredId(1),
-            AssetType::Small,
-            "US-SE".to_string(),
-            vec![Peril::WindstormAtlantic],
-        );
-        assert_eq!(insured.sum_insured(), SMALL_ASSET_VALUE);
-    }
-
-    #[test]
-    fn large_asset_sum_insured() {
-        let insured = Insured::new(
-            InsuredId(1),
-            AssetType::Large,
-            "US-SE".to_string(),
-            vec![Peril::WindstormAtlantic],
-        );
-        assert_eq!(insured.sum_insured(), LARGE_ASSET_VALUE);
+    fn asset_sum_insured() {
+        let insured = Insured::new(InsuredId(1), "US-SE".to_string(), vec![Peril::WindstormAtlantic]);
+        assert_eq!(insured.sum_insured(), ASSET_VALUE);
     }
 
     // ── on_quote_presented ────────────────────────────────────────────────────

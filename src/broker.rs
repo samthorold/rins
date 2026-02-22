@@ -78,14 +78,12 @@ impl Broker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LARGE_ASSET_VALUE, SMALL_ASSET_VALUE};
+    use crate::config::ASSET_VALUE;
     use crate::events::Peril;
-    use crate::insured::AssetType;
 
-    fn make_insured(id: u64, asset_type: AssetType) -> Insured {
+    fn make_insured(id: u64) -> Insured {
         Insured::new(
             InsuredId(id),
-            asset_type,
             "US-SE".to_string(),
             vec![Peril::WindstormAtlantic, Peril::Attritional],
         )
@@ -93,16 +91,14 @@ mod tests {
 
     fn small_risk() -> Risk {
         Risk {
-            sum_insured: SMALL_ASSET_VALUE,
+            sum_insured: ASSET_VALUE,
             territory: "US-SE".to_string(),
             perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
         }
     }
 
-    fn broker_with_insurers(n_small: usize, insurer_ids: Vec<u64>) -> Broker {
-        let insureds = (1..=n_small as u64)
-            .map(|i| make_insured(i, AssetType::Small))
-            .collect();
+    fn broker_with_insurers(n: usize, insurer_ids: Vec<u64>) -> Broker {
+        let insureds = (1..=n as u64).map(|i| make_insured(i)).collect();
         let insurer_ids = insurer_ids.into_iter().map(InsurerId).collect();
         Broker::new(insureds, insurer_ids)
     }
@@ -259,25 +255,15 @@ mod tests {
 
     #[test]
     fn broker_holds_correct_insured_ids() {
-        let insureds = vec![
-            make_insured(10, AssetType::Small),
-            make_insured(20, AssetType::Large),
-        ];
+        let insureds = vec![make_insured(10), make_insured(20)];
         let broker = Broker::new(insureds, vec![InsurerId(1)]);
         let ids: Vec<u64> = broker.insureds.iter().map(|i| i.id.0).collect();
         assert_eq!(ids, vec![10, 20]);
     }
 
     #[test]
-    fn small_insured_sum_insured_is_correct() {
+    fn insured_sum_insured_is_correct() {
         let broker = broker_with_insurers(1, vec![1]);
-        assert_eq!(broker.insureds[0].sum_insured(), SMALL_ASSET_VALUE);
-    }
-
-    #[test]
-    fn large_insured_sum_insured_is_correct() {
-        let insureds = vec![make_insured(1, AssetType::Large)];
-        let broker = Broker::new(insureds, vec![InsurerId(1)]);
-        assert_eq!(broker.insureds[0].sum_insured(), LARGE_ASSET_VALUE);
+        assert_eq!(broker.insureds[0].sum_insured(), ASSET_VALUE);
     }
 }

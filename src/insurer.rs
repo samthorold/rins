@@ -45,12 +45,12 @@ impl Insurer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SMALL_ASSET_VALUE;
+    use crate::config::ASSET_VALUE;
     use crate::events::Peril;
 
     fn small_risk() -> Risk {
         Risk {
-            sum_insured: SMALL_ASSET_VALUE,
+            sum_insured: ASSET_VALUE,
             territory: "US-SE".to_string(),
             perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
         }
@@ -93,7 +93,7 @@ mod tests {
     fn premium_equals_rate_times_sum_insured() {
         let ins = Insurer::new(InsurerId(1), 1_000_000_000, 0.02);
         let risk = small_risk();
-        let expected = (0.02 * SMALL_ASSET_VALUE as f64).round() as u64;
+        let expected = (0.02 * ASSET_VALUE as f64).round() as u64;
         let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
         if let Event::LeadQuoteIssued { premium, .. } = event {
             assert_eq!(premium, expected, "premium must equal rate × sum_insured");
@@ -119,12 +119,12 @@ mod tests {
     fn premium_scales_with_sum_insured() {
         let ins = Insurer::new(InsurerId(1), 0, 0.02);
         let small = Risk {
-            sum_insured: SMALL_ASSET_VALUE,
+            sum_insured: ASSET_VALUE,
             territory: "US-SE".to_string(),
             perils_covered: vec![Peril::Attritional],
         };
         let large = Risk {
-            sum_insured: SMALL_ASSET_VALUE * 10,
+            sum_insured: ASSET_VALUE * 10,
             territory: "US-SE".to_string(),
             perils_covered: vec![Peril::Attritional],
         };

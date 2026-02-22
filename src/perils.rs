@@ -112,7 +112,7 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
 
     use super::*;
-    use crate::config::{AttritionalConfig, CatConfig, SMALL_ASSET_VALUE};
+    use crate::config::{AttritionalConfig, CatConfig, ASSET_VALUE};
     use crate::types::{Day, InsuredId, PolicyId, Year};
 
     fn rng() -> ChaCha20Rng {
@@ -129,7 +129,7 @@ mod tests {
 
     fn small_risk() -> Risk {
         Risk {
-            sum_insured: SMALL_ASSET_VALUE,
+            sum_insured: ASSET_VALUE,
             territory: "US-SE".to_string(),
             perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
         }
@@ -275,8 +275,8 @@ mod tests {
                 assert_eq!(*policy_id, PolicyId(1));
                 assert_eq!(*peril, Peril::Attritional);
                 assert!(
-                    *ground_up_loss <= SMALL_ASSET_VALUE,
-                    "gul {ground_up_loss} > sum_insured {SMALL_ASSET_VALUE}"
+                    *ground_up_loss <= ASSET_VALUE,
+                    "gul {ground_up_loss} > sum_insured {ASSET_VALUE}"
                 );
             }
         }
@@ -287,7 +287,7 @@ mod tests {
     fn attritional_skips_non_attritional_risk() {
         let mut rng = rng();
         let risk = Risk {
-            sum_insured: SMALL_ASSET_VALUE,
+            sum_insured: ASSET_VALUE,
             territory: "US-SE".to_string(),
             perils_covered: vec![Peril::WindstormAtlantic], // no Attritional
         };
@@ -343,7 +343,7 @@ mod tests {
         for (_, e) in &events {
             if let Event::InsuredLoss { ground_up_loss, .. } = e {
                 assert_eq!(
-                    *ground_up_loss, SMALL_ASSET_VALUE,
+                    *ground_up_loss, ASSET_VALUE,
                     "with damage_fraction=1.0, gul must equal sum_insured"
                 );
             }
