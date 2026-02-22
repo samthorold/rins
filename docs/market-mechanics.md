@@ -123,9 +123,9 @@ Canonical config: 90 small (sum_insured = 50M USD) + 10 large (sum_insured = 1B 
 
 ### §3.2 Insurers (Syndicates) `[ACTIVE]`
 
-Each Insurer provides capacity and prices risks. State: `id`, `capital`, `rate`, `active_policies`. Capital is reset at each `YearStart`. Source: `src/insurer.rs`.
+Each Insurer provides capacity and prices risks. State: `id`, `capital`, `active_policies`. Capital is reset at each `YearStart`. Source: `src/insurer.rs`.
 
-Canonical config: 5 insurers, 100B USD capital each, rate = 0.1 (10% of sum_insured).
+Canonical config: 5 insurers, 100B USD capital each.
 
 ### §3.3 Broker `[ACTIVE]`
 
@@ -135,7 +135,7 @@ A single Broker intermediates between Insureds and Insurers. Routes `CoverageReq
 
 ## 4. Pricing
 
-### §4.1 Actuarial channel `[PLANNED]`
+### §4.1 Actuarial channel `[PARTIAL]`
 
 The actuarial channel produces a long-run expected loss cost estimate for a submitted risk. It is one of two inputs to the syndicate's final quote.
 
@@ -148,13 +148,13 @@ The actuarial channel produces a long-run expected loss cost estimate for a subm
 1. Apply line-of-business base loss cost from the syndicate's actuarial tables.
 2. Blend own experience (EWMA loss ratio) with the industry benchmark using a credibility weight that increases with volume. Low-volume syndicates weight the benchmark heavily; specialists weight their own experience.
 3. Apply risk-specific loadings: territory catastrophe factor, coverage trigger severity factor, attachment/limit adjustment.
-4. Output: actuarial technical price (ATP) — the minimum premium at which the syndicate breaks even in expectation.
+4. Output: actuarial technical price (ATP) — the technically priced premium at which the syndicate expects to achieve its `target_loss_ratio`. With `target_loss_ratio < 1` the ATP exceeds expected loss by a built-in profit margin (`ATP = E[loss] / target_loss_ratio`). ATP is the technical premium, not merely a break-even floor.
 
-The ATP is not the quoted premium; it is a floor and an input.
+In Step 0 (technical pricing baseline), ATP is the quoted premium. The underwriter channel [§4.2] applies a multiplicative adjustment on top of ATP; with no underwriter signal active the adjustment is 1.0 and `premium = ATP`.
 
 *[TBD: EWMA decay parameter — per-line or per-syndicate?]*
 
-**Current simplified implementation (`[PARTIAL]`):** `actuarial_price()` computes `expected_loss_fraction × sum_insured / target_loss_ratio` using a fixed per-insurer prior for `expected_loss_fraction` (calibrated from peril model parameters). The ATP is logged in `LeadQuoteIssued.atp`. `underwriter_premium()` returns `rate × sum_insured` independently (currently ≈ ATP). Both channels exist as separate code paths; neither yet uses runtime experience data.
+**Current simplified implementation:** `actuarial_price()` computes `expected_loss_fraction × sum_insured / target_loss_ratio` using a fixed per-insurer prior for `expected_loss_fraction` (calibrated from peril model parameters). The ATP is logged in `LeadQuoteIssued.atp` and is also the quoted `premium` (Step 0: `underwriter_adjustment = 0`). Runtime experience (EWMA loss ratio) is not yet implemented.
 
 ```
 ATP = E[annual_loss] / target_loss_ratio
@@ -168,7 +168,9 @@ Canonical values: `expected_loss_fraction = 0.239`, `target_loss_ratio = 0.70` �
 
 ### §4.2 Underwriter channel `[PLANNED]`
 
-The underwriter channel reflects non-actuarial market intelligence: the current cycle position, relationship with the placing broker, and the observed lead quote (if any). It produces a market rate adjustment applied on top of the ATP.
+The underwriter channel reflects non-actuarial market intelligence: the current cycle position, relationship with the placing broker, and the observed lead quote (if any). It produces a multiplicative adjustment applied to the ATP: `premium = ATP × underwriter_factor`.
+
+**Step 0 — Technical baseline (current):** `underwriter_factor = 1.0` for all syndicates. The quoted premium equals ATP. No cycle, relationship, or herding signal is active.
 
 **Inputs:**
 - Current market cycle indicator (coordinator-published annually; derived from aggregate premium movement — see §8).
