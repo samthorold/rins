@@ -12,6 +12,9 @@ pub struct InsurerConfig {
     /// EWMA credibility weight α ∈ (0, 1): new_elf = α × realized_lf + (1-α) × old_elf.
     /// Higher α = faster response to recent experience; lower α = more weight on history.
     pub ewma_credibility: f64,
+    /// Fraction of gross premium consumed by acquisition costs + overhead.
+    /// Lloyd's 2024: 22.6% acquisition + 11.8% management ≈ 34.4%.
+    pub expense_ratio: f64,
     /// Max WindstormAtlantic aggregate sum_insured across all in-force policies (None = unlimited).
     pub max_cat_aggregate: Option<u64>,
     /// Max sum_insured on any single risk (None = unlimited).
@@ -62,8 +65,9 @@ impl SimulationConfig {
                     id: InsurerId(i),
                     initial_capital: 100_000_000_000, // 1B USD in cents
                     expected_loss_fraction: 0.239, // E_att(0.164) + E_cat(0.075)
-                    target_loss_ratio: 0.70,
+                    target_loss_ratio: 0.55, // 1 − 0.344 expenses − 0.106 profit → CR ≈ 89.4%
                     ewma_credibility: 0.3,
+                    expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
                     max_cat_aggregate: None,
                     max_line_size: None,
                 })

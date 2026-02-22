@@ -17,6 +17,8 @@ pub struct Insurer {
     target_loss_ratio: f64,
     /// EWMA credibility weight α: new_elf = α × realized_lf + (1-α) × old_elf.
     ewma_credibility: f64,
+    /// Fraction of gross premium consumed by acquisition costs + overhead.
+    expense_ratio: f64,
     /// YTD settled claims (cents); accumulated by on_claim_settled; reset at YearEnd.
     year_claims: u64,
     /// YTD written exposure (sum_insured, cents); accumulated by on_policy_bound; reset at YearEnd.
@@ -38,6 +40,7 @@ impl Insurer {
         expected_loss_fraction: f64,
         target_loss_ratio: f64,
         ewma_credibility: f64,
+        expense_ratio: f64,
         max_cat_aggregate: Option<u64>,
         max_line_size: Option<u64>,
     ) -> Self {
@@ -48,6 +51,7 @@ impl Insurer {
             expected_loss_fraction,
             target_loss_ratio,
             ewma_credibility,
+            expense_ratio,
             year_claims: 0,
             year_exposure: 0,
             cat_aggregate: 0,
@@ -92,8 +96,16 @@ impl Insurer {
         )
     }
 
-    /// A policy has been bound. Accumulate written exposure for EWMA; update cat aggregate.
-    pub fn on_policy_bound(&mut self, policy_id: PolicyId, sum_insured: u64, perils: &[Peril]) {
+    /// A policy has been bound. Credit net premium to capital, accumulate written exposure for EWMA; update cat aggregate.
+    pub fn on_policy_bound(
+        &mut self,
+        policy_id: PolicyId,
+        sum_insured: u64,
+        premium: u64,
+        perils: &[Peril],
+    ) {
+        let net_premium = (premium as f64 * (1.0 - self.expense_ratio)).round() as i64;
+        self.capital += net_premium;
         self.year_exposure += sum_insured;
         if perils.contains(&Peril::WindstormAtlantic) {
             self.cat_aggregate += sum_insured;
@@ -155,7 +167,7 @@ mod tests {
     }
 
     fn make_insurer(id: InsurerId, capital: i64) -> Insurer {
-        Insurer::new(id, capital, 0.239, 0.70, 0.3, None, None)
+        Insurer::new(id, capital, 0.239, 0.70, 0.3, 0.0, None, None)
     }
 
     /// Helper: quote and return the ATP for a standard small_risk().
@@ -312,14 +324,14 @@ mod tests {
     #[test]
     fn on_policy_bound_increments_cat_aggregate() {
         let mut ins = make_insurer(InsurerId(1), 0);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
         assert_eq!(ins.cat_aggregate, ASSET_VALUE, "cat_aggregate must equal sum_insured after binding one cat policy");
     }
 
     #[test]
     fn on_policy_expired_releases_cat_aggregate() {
         let mut ins = make_insurer(InsurerId(1), 0);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
         assert_eq!(ins.cat_aggregate, ASSET_VALUE);
         ins.on_policy_expired(PolicyId(1));
         assert_eq!(ins.cat_aggregate, 0, "cat_aggregate must return to 0 after policy expiry");
@@ -328,7 +340,7 @@ mod tests {
     #[test]
     fn non_cat_policy_does_not_affect_cat_aggregate() {
         let mut ins = make_insurer(InsurerId(1), 0);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
         assert_eq!(ins.cat_aggregate, 0, "attritional-only policy must not affect cat_aggregate");
     }
 
@@ -336,7 +348,7 @@ mod tests {
     fn cat_exposure_at_quote_reflects_aggregate() {
         let mut ins = make_insurer(InsurerId(1), 0);
         // Bind a cat policy first.
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
 
         // Quote a second cat risk — exposure_at_quote should reflect the already-bound aggregate.
         let risk = cat_risk();
@@ -354,7 +366,7 @@ mod tests {
     #[test]
     fn cat_exposure_at_quote_is_zero_for_non_cat_risk() {
         let mut ins = make_insurer(InsurerId(1), 0);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::WindstormAtlantic]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
 
         let risk = att_only_risk();
         let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk);
@@ -376,7 +388,7 @@ mod tests {
         // Realized LF = 1.0 >> prior ELF = 0.239 → ATP must increase.
         let mut ins = make_insurer(InsurerId(1), 0);
         let atp_before = quote_atp(&ins);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
         ins.on_claim_settled(ASSET_VALUE);
         ins.on_year_end();
         let atp_after = quote_atp(&ins);
@@ -388,7 +400,7 @@ mod tests {
         // Bind one policy; no claims. Realized LF = 0 < prior ELF = 0.239 → ATP must fall.
         let mut ins = make_insurer(InsurerId(1), 0);
         let atp_before = quote_atp(&ins);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
         // no claims
         ins.on_year_end();
         let atp_after = quote_atp(&ins);
@@ -400,7 +412,7 @@ mod tests {
         // α=0.3, realized LF = 0.5 (claim = ASSET_VALUE/2, exposure = ASSET_VALUE).
         // New ELF = 0.3 × 0.5 + 0.7 × 0.239 = 0.15 + 0.1673 = 0.3173.
         let mut ins = make_insurer(InsurerId(1), 0);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
         ins.on_claim_settled(ASSET_VALUE / 2);
         ins.on_year_end();
         let expected_elf = 0.3 * 0.5 + 0.7 * 0.239;
@@ -421,7 +433,7 @@ mod tests {
         // After on_year_end resets counters, a second on_year_end with no new
         // policies or claims must leave ATP unchanged.
         let mut ins = make_insurer(InsurerId(1), 0);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
         ins.on_claim_settled(ASSET_VALUE);
         ins.on_year_end(); // ELF updated, counters reset
         let atp_year1 = quote_atp(&ins);
@@ -433,16 +445,30 @@ mod tests {
     fn ewma_compounds_over_multiple_years() {
         // Two consecutive high-loss years should push ELF higher than one.
         let mut ins = make_insurer(InsurerId(1), 0);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
         ins.on_claim_settled(ASSET_VALUE);
         ins.on_year_end();
         let atp_after_year1 = quote_atp(&ins);
 
-        ins.on_policy_bound(PolicyId(2), ASSET_VALUE, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(2), ASSET_VALUE, 0, &[Peril::Attritional]);
         ins.on_claim_settled(ASSET_VALUE);
         ins.on_year_end();
         let atp_after_year2 = quote_atp(&ins);
 
         assert!(atp_after_year2 > atp_after_year1, "consecutive bad years must compound ELF upward");
+    }
+
+    #[test]
+    fn on_policy_bound_credits_net_premium_to_capital() {
+        // expense_ratio=0.25 → net = 75% of gross premium.
+        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.55, 0.3, 0.25, None, None);
+        let gross_premium = 400_000u64;
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
+        let expected_net = (gross_premium as f64 * 0.75).round() as i64;
+        assert_eq!(
+            ins.capital,
+            1_000_000 + expected_net,
+            "capital must increase by net premium (gross × (1 − expense_ratio))"
+        );
     }
 }

@@ -45,6 +45,7 @@ impl Simulation {
                     c.expected_loss_fraction,
                     c.target_loss_ratio,
                     c.ewma_credibility,
+                    c.expense_ratio,
                     c.max_cat_aggregate,
                     c.max_line_size,
                 )
@@ -232,7 +233,7 @@ impl Simulation {
                 // No-op in this model.
             }
 
-            Event::PolicyBound { policy_id, .. } => {
+            Event::PolicyBound { policy_id, premium, .. } => {
                 // Activate the policy for loss routing.
                 self.market.on_policy_bound(policy_id);
 
@@ -254,7 +255,7 @@ impl Simulation {
                         self.schedule(d, e);
                     }
                     if let Some(ins) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
-                        ins.on_policy_bound(policy_id, sum_insured, &perils);
+                        ins.on_policy_bound(policy_id, sum_insured, premium, &perils);
                     }
                 }
             }
@@ -374,6 +375,7 @@ mod tests {
                 expected_loss_fraction: 0.239,
                 target_loss_ratio: 0.70,
                 ewma_credibility: 0.3,
+                expense_ratio: 0.0,
                 max_cat_aggregate: None,
                 max_line_size: None,
             }],
@@ -625,6 +627,7 @@ mod tests {
                 expected_loss_fraction: 0.239,
                 target_loss_ratio: 0.70,
                 ewma_credibility: 0.3,
+                expense_ratio: 0.0,
                 max_cat_aggregate: None,
                 max_line_size: None,
             })

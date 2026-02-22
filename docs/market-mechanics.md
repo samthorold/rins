@@ -21,6 +21,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Fixed-rate pricing (underwriter channel) | ACTIVE (PARTIAL — simplification of underwriter channel) | `src/insurer.rs::underwriter_premium` |
 | Lead-follow quoting (round-robin) | ACTIVE (PARTIAL — simplification of lead-follow) | `src/broker.rs` |
 | Actuarial channel (structural scaffold) | PARTIAL — prior-based ATP, no EWMA yet | `src/insurer.rs::actuarial_price` |
+| Expense loading and broker fees | PLANNED | — |
 | Underwriter channel / cycle adjustment | PLANNED | — |
 | Broker relationship scores | PLANNED | — |
 | Syndicate entry / exit | PLANNED | — |
@@ -171,6 +172,76 @@ where `E[annual_loss]` summed two peril contributions:
 - Cat (WindstormAtlantic): `annual_frequency × (scale × shape / (shape − 1)) × sum_insured` ≈ 0.075 × sum_insured
 
 Canonical values: `expected_loss_fraction = 0.239`, `target_loss_ratio = 0.70` → ATP rate ≈ 0.34. Source: `src/insurer.rs`.
+
+### §4.3 Expense loading and broker fees `[PLANNED]`
+
+The premium charged to an insured must recover not just expected claims but also the syndicate's acquisition costs, management overheads, Lloyd's levies, and cost of capital. Expenses are expressed as a percentage of **gross written premium (GWP)**, making the loading formula multiplicative, not additive:
+
+```
+Gross Premium = Pure Risk Premium / (1 − Expense Ratio)
+```
+
+Using an additive form (gross = pure + load × pure) systematically underprices, because each unit of loading must itself be covered by that loading. If the pure premium is £60 and the total expense ratio is 40%, the gross premium is £60 / 0.60 = £100, not £84.
+
+#### Brokerage
+
+Brokerage is the broker's fee for placing the risk. It is embedded in the gross premium — the insured pays one number; the Lloyd's broker deducts brokerage and remits the remainder to the Premium Trust Fund. The syndicate's accounts then record the **full gross premium as GWP**; brokerage appears as an **acquisition cost on the expense side** of the technical account, not as a deduction from revenue. The brokerage rate is agreed between broker and syndicate and documented on the Market Reform Contract (MRC).
+
+**Typical brokerage rates:**
+
+| Channel | Rate |
+|---------|------|
+| XoL reinsurance (open market) | ~15% of gross premium |
+| Direct specialty (open market) | 10–20% of gross premium |
+| Facultative reinsurance | 5–10% |
+| Large treaty reinsurance | 1–5% |
+| Coverholder / binding authority (ceding commission) | 25–35% of gross premium |
+
+Approximately 45% of Lloyd's premium is written through coverholders (binding authorities), which carry higher total acquisition costs because a ceding commission, a Lloyd's broker fee, and the managing agent's overhead are all levied on the same premium.
+
+#### Expense loading components
+
+| Component | Lloyd's market (2024) |
+|-----------|----------------------|
+| Brokerage and other acquisition costs | ~22.6% of NEP |
+| Management expenses | ~11.8% of NEP |
+| **Total operating expense ratio** | **~34.4% of NEP** |
+| Annual subscription (Lloyd's levy) | 0.36% of GWP |
+| Central Fund contribution | 0.35% of GWP |
+
+**Net Earned Premium (NEP)** — GWP minus outward reinsurance ceded, adjusted for unearned premium movements — is the denominator for all Lloyd's ratio calculations. The combined ratio is `loss_ratio + expense_ratio`; at 86.9% (2024) with a 34.4% expense ratio, the implied loss ratio is ~52.5%.
+
+#### Profit / cost of capital loading
+
+The cost of capital loading is the return the syndicate requires to justify allocating capital to a risk. Lloyd's Minimum Standards MS3 requires this loading to be included in the technical price and grounded in actual capital allocation. Representative benchmarks:
+
+- Primary / working layers: ~5% cost of capital loading
+- Upper / cat-exposed excess layers: up to ~30%
+
+The higher loading for upper layers reflects their greater capital consumption — they carry rare but catastrophic losses that require substantially more risk capital per unit of limit.
+
+#### The premium flow
+
+```
+Insured pays Gross Premium to Lloyd's Broker
+  → Broker deducts Brokerage (~10–20%)
+    → Net-of-brokerage enters Premium Trust Fund (ringfenced for claims)
+      → Distributed to Syndicates pro-rata by line
+        → Syndicate books GWP; brokerage appears as acquisition cost
+          → Syndicate pays outward RI premium (RI broker takes ~15%)
+```
+
+For coverholder business: coverholder collects premium, deducts ceding commission (25–35%), remits net to managing agent via Lloyd's broker, who also takes a fee. Multiple deduction stages produce the highest total acquisition cost structure.
+
+#### Implementation note
+
+The current model has no explicit expense loading (`[PLANNED]`). The actuarial channel uses `target_loss_ratio` to build profit margin into the ATP, but does not separately model brokerage or operating expenses. When expense loadings are added:
+
+1. The ATP formula should separate components: `ATP = E[loss] / (1 − expense_ratio − profit_margin)`.
+2. Brokerage should be modelled as a deduction from premium received by the syndicate, logged separately from the operating expense ratio used in pricing.
+3. The combined ratio constraint (84–91% at Lloyd's) implies `expense_ratio ≈ 34%` and an attainable loss ratio of 50–57%.
+
+---
 
 ### §4.2 Underwriter channel `[PLANNED]`
 

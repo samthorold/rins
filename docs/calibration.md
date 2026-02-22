@@ -107,6 +107,8 @@ A rate of 0.5/yr sits in the middle of the 0.3–0.6/yr empirical range for Lloy
 
 The attritional LR of **~47%** almost exactly matches Lloyd's 2024 figure (47.1%) — a strong calibration result. The implied combined ratio of ~102% is slightly above Lloyd's 84–91% range; the gap is expected: no expense model yet, and rate=0.35 reflects a hard market that should soften when cycle dynamics are added.
 
+**Expense loading note:** when the expense model is added, the premium must be loaded multiplicatively — `gross = pure / (1 − expense_ratio)`, not additively. At Lloyd's 2024 expense ratio of 34.4%, the implied break-even loss ratio is 65.6% (= 1 − 0.344); Lloyd's achieved ~52.5% loss ratio in 2024 (86.9% CR − 34.4% expense ratio), generating an 13% underwriting profit margin. A correct expense model will require the rate to rise by roughly 1/(1 − 0.344) ≈ 52% relative to the pure loss rate to match market economics.
+
 The current rate is **fixed** and does not yet reflect:
 - Attachment point (currently zero — first-dollar cover)
 - Layer width (currently full limit)
@@ -127,6 +129,7 @@ The following metrics should be checked after a canonical 5-year run (`cargo run
 | Cat loss year std dev / mean | >1 | Pareto tail (infinite variance); should be highly volatile year-to-year | `[ACTIVE]` — computable from events.ndjson |
 | Premium / TIV (effective RoL) | 25–80% | Post-Katrina 25–50%; post-Ian 40–80%; current model 35% | `[ACTIVE]` — currently fixed at 35% |
 | Attritional loss ratio | 45–50% | Lloyd's 2023–2024: 48.3% / 47.1% | `[ACTIVE]` — implied ~47% at rate=0.35; verify from events.ndjson |
+| Expense ratio (acquisition + management) | ~34% of NEP | Lloyd's 2024: 22.6% acquisition + 11.8% management = 34.4% | `[PLANNED]` — no expense model yet |
 | Lloyd's-equivalent combined ratio | 84–95% | Lloyd's 84.0% (2023), 86.9% (2024); softening toward 90–95% in 2025–26 | `[PLANNED]` — requires expense model |
 | Insurer capital surviving 5 yr | >0 (all) | Solvency floor not yet enforced; check manually | `[ACTIVE]` — visible in final YearEnd events |
 | Renewal retention rate | ~90–95% | Specialty market broker relationships | `[PLANNED]` — no lapse model yet |
@@ -147,3 +150,4 @@ The following real-world features are absent from the current model. They are li
 | All insureds hit equally in a cat event | No spatial footprint; understates diversification benefit and overstates frequency of total-portfolio events | `[PLANNED]` |
 | No demand surge / loss amplification post-cat | Real losses increase 10–20% due to labour/materials scarcity after major events | `[TBD]` |
 | Fixed rate; no cycle response | Pricing does not harden after losses; underwriting cycle cannot emerge until rate responds | `[PLANNED]` — target phenomenon §1 |
+| No expense or brokerage model | Premiums are treated as fully retained by syndicates; acquisition costs (~22.6% of NEP) and management expenses (~11.8%) are not deducted. Combined ratio cannot be computed without an expense model. The correct loading formula is `gross = pure / (1 − expense_ratio)`, not additive | `[PLANNED]` — see market-mechanics.md §4.3 |
