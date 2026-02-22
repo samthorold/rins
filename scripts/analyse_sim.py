@@ -18,39 +18,32 @@ def loss_type(peril): return 'Attritional' if peril == 'Attritional' else 'Cat'
 type_counts = collections.Counter(etype(e) for e in events)
 
 # --- per-year buckets ---
-submissions   = collections.Counter()  # year -> count
+submissions   = collections.Counter()
 policies      = collections.Counter()
 declines      = collections.Counter()
 quote_req     = collections.Counter()
-premiums      = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> syn_id -> sum
-loss_counts   = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> (peril,region) -> count
-insured_losses= collections.defaultdict(lambda: collections.defaultdict(int))  # year -> peril -> total GUL
-insured_gul   = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insured_id -> total GUL
-insured_gul_split = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(int)))  # year -> insured_id -> type -> GUL
+quote_iss     = collections.Counter()
+loss_events   = collections.Counter()  # year -> count
+insured_losses= collections.defaultdict(lambda: collections.defaultdict(int))  # year -> peril -> GUL
+insured_gul   = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insured_id -> GUL
+insured_gul_split = collections.defaultdict(  # year -> insured_id -> type -> GUL
+    lambda: collections.defaultdict(lambda: collections.defaultdict(int)))
 gul_split     = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> type -> GUL
-claims        = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> syn_id -> sum
+claims        = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insurer_id -> sum
 claims_split  = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> type -> amount
-claims_split_syn = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(int)))  # year -> syn_id -> type -> amount
 
-# lead/follower quoting funnel
-lead_req      = collections.Counter()   # year -> count
-lead_iss      = collections.Counter()
-lead_dec      = collections.Counter()
-foll_req      = collections.Counter()
-foll_iss      = collections.Counter()
+# Per-insurer premiums (from QuoteIssued, linked via submission_id → PolicyBound insurer)
+# submission_id → premium (from QuoteIssued)
+sub_premium   = {}
+# submission_id → insurer_id (from PolicyBound)
+sub_insurer   = {}
+premiums      = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insurer_id -> sum
 
-# lead role frequency: syn_id -> count of times acted as lead
-lead_freq     = collections.Counter()
+# Policy count per insurer per year
+insurer_policy_count = collections.defaultdict(lambda: collections.defaultdict(int))
 
-# per-syndicate premiums from PolicyBound panel entries
-bound_premiums = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> syn_id -> sum
-
-# panel size per policy
-panel_sizes   = collections.defaultdict(list)  # year -> [n_syndicates, ...]
-
-# capacity: running active syndicate count (SyndicateEntered / SyndicateInsolvency)
-entries       = collections.Counter()      # year -> count
-insolvencies  = collections.Counter()      # year -> count
+# Policy metadata: policy_id -> {insured_id, insurer_id, submission_id}
+policy_meta   = {}
 
 for e in events:
     d, ev = e['day'], e['event']
@@ -58,26 +51,28 @@ for e in events:
     y = year(d)
     k = next(iter(ev))
     v = ev[k]
-    if k == 'SubmissionArrived':  submissions[y] += 1
-    elif k == 'PolicyBound':
-        policies[y] += 1
-        panel_sizes[y].append(len(v['panel']['entries']))
-        for entry in v['panel']['entries']:
-            bound_premiums[y][entry['syndicate_id']] += entry['premium']
-    elif k == 'QuoteDeclined':    declines[y] += 1
+
+    if k == 'SubmissionArrived':
+        submissions[y] += 1
     elif k == 'QuoteRequested':
         quote_req[y] += 1
-        if v.get('is_lead'):  lead_req[y] += 1
-        else:                 foll_req[y] += 1
     elif k == 'QuoteIssued':
-        if v.get('is_lead'):
-            lead_iss[y] += 1
-            lead_freq[v['syndicate_id']] += 1
-            premiums[y][v['syndicate_id']] += v['premium']
-        else:
-            foll_iss[y] += 1
+        quote_iss[y] += 1
+        sub_premium[v['submission_id']] = v['premium']
+    elif k == 'QuoteDeclined':
+        declines[y] += 1
+    elif k == 'PolicyBound':
+        policies[y] += 1
+        sid  = v['submission_id']
+        iid  = v['insurer_id']
+        pid  = v['policy_id']
+        sub_insurer[sid] = iid
+        insurer_policy_count[y][iid] += 1
+        prem = sub_premium.get(sid, 0)
+        premiums[y][iid] += prem
+        policy_meta[pid] = {'insurer_id': iid, 'submission_id': sid}
     elif k == 'LossEvent':
-        loss_counts[y][(v['peril'], v['region'])] += 1
+        loss_events[y] += 1
     elif k == 'InsuredLoss':
         insured_losses[y][v['peril']] += v['ground_up_loss']
         insured_gul[y][v['insured_id']] += v['ground_up_loss']
@@ -85,46 +80,47 @@ for e in events:
         gul_split[y][lt] += v['ground_up_loss']
         insured_gul_split[y][v['insured_id']][lt] += v['ground_up_loss']
     elif k == 'ClaimSettled':
-        claims[y][v['syndicate_id']] += v['amount']
+        iid = v['insurer_id']
+        claims[y][iid] += v['amount']
         ct = loss_type(v['peril'])
         claims_split[y][ct] += v['amount']
-        claims_split_syn[y][v['syndicate_id']][ct] += v['amount']
-    elif k == 'SyndicateEntered':
-        entries[y] += 1
-    elif k == 'SyndicateInsolvency':
-        insolvencies[y] += 1
 
 years = sorted(set(submissions) | set(policies))
+all_insurers = sorted({i for yy in premiums.values() for i in yy} |
+                      {i for yy in claims.values() for i in yy})
 
 print("=== Event type counts ===")
 for t, n in type_counts.most_common(): print(f"  {t}: {n}")
 
 print("\n=== Year-over-year summary ===")
-print(f"{'Year':>4}  {'Subs':>5}  {'Bound':>5}  {'Bind%':>6}  {'QReq':>5}  {'QDec':>5}  {'Dec%':>6}")
+print(f"{'Year':>4}  {'Subs':>5}  {'Bound':>5}  {'Bind%':>6}  {'QReq':>5}  {'QIss':>5}  {'Dec':>5}  {'LossEv':>6}")
 for y in years:
-    s, p, qr, qd = submissions[y], policies[y], quote_req[y], declines[y]
+    s, p = submissions[y], policies[y]
+    qr, qi, qd = quote_req[y], quote_iss[y], declines[y]
     bind_pct = f"{100*p/s:.1f}" if s else "-"
-    dec_pct  = f"{100*qd/qr:.1f}" if qr else "-"
-    print(f"  {y:>2}    {s:>5}  {p:>5}  {bind_pct:>6}  {qr:>5}  {qd:>5}  {dec_pct:>6}")
+    print(f"  {y:>2}    {s:>5}  {p:>5}  {bind_pct:>6}  {qr:>5}  {qi:>5}  {qd:>5}  {loss_events[y]:>6}")
 
-print("\n=== Lead premium by syndicate (pence) ===")
-all_syns = sorted({s for yy in premiums.values() for s in yy})
-hdr = f"{'Year':>4}" + "".join(f"  Syn{s:>2}" for s in all_syns)
+print("\n=== Premiums by insurer per year (cents) ===")
+hdr = f"{'Year':>4}" + "".join(f"  Ins{i:>2}" for i in all_insurers)
 print(hdr)
 for y in years:
-    row = f"  {y:>2}" + "".join(f"  {premiums[y].get(s,0):>6}" for s in all_syns)
+    row = f"  {y:>2}" + "".join(f"  {premiums[y].get(i,0):>8}" for i in all_insurers)
     print(row)
 
-print("\n=== Loss events by (peril, territory) per year ===")
-all_perils = sorted({pk for yy in loss_counts.values() for pk in yy})
-for pk in all_perils:
-    row = f"  {pk[0]:<22} {pk[1]:<8}" + "".join(f"  Y{y}:{loss_counts[y].get(pk,0):>4}ev" for y in years)
+print("\n=== Policies written per insurer per year ===")
+print(hdr)
+for y in years:
+    row = f"  {y:>2}" + "".join(f"  {insurer_policy_count[y].get(i,0):>8}" for i in all_insurers)
     print(row)
 
-print("\n=== Ground-up insured loss by peril per year (pence) ===")
+print("\n=== Loss events per year ===")
+for y in years:
+    print(f"  Year {y}: {loss_events[y]} LossEvent(s)")
+
+print("\n=== Ground-up insured loss by peril per year (cents) ===")
 all_il_perils = sorted({p for yy in insured_losses.values() for p in yy})
 for p in all_il_perils:
-    row = f"  {p:<22}" + "".join(f"  Y{y}:{insured_losses[y].get(p,0):>14}" for y in years)
+    row = f"  {p:<22}" + "".join(f"  Y{y}:{insured_losses[y].get(p,0):>16}" for y in years)
     print(row)
 
 print("\n=== GUL split: Attritional vs Cat per year ===")
@@ -151,18 +147,19 @@ for y in years:
     print(f"  {y:>2}    {len(ig):>8}  {total_gul:>16}  {top_id:>10}  {top_gul:>16}  {top_pct:>6.1f}  {hhi_gul:>8.0f}")
 
 print("\n=== Top 10 insureds by total GUL (all years) ===")
-all_insured_gul: dict[int, int] = collections.defaultdict(int)
+all_insured_gul: dict = collections.defaultdict(int)
 for yy in insured_gul.values():
     for ins_id, gul in yy.items():
         all_insured_gul[ins_id] += gul
 print(f"  {'InsuredId':>10}  {'TotalGUL':>16}  {'Share%':>7}")
 total_all_gul = sum(all_insured_gul.values())
-for ins_id, gul in sorted(all_insured_gul.items(), key=lambda x: -x[1])[:10]:
+top_insureds = [i for i, _ in sorted(all_insured_gul.items(), key=lambda x: -x[1])[:10]]
+for ins_id in top_insureds:
+    gul = all_insured_gul[ins_id]
     share = 100 * gul / total_all_gul if total_all_gul else 0
     print(f"  {ins_id:>10}  {gul:>16}  {share:>7.1f}")
 
 print("\n=== Per-insured GUL by year (top 10 by lifetime GUL) ===")
-top_insureds = [i for i, _ in sorted(all_insured_gul.items(), key=lambda x: -x[1])[:10]]
 hdr_ins = f"  {'InsuredId':>10}" + "".join(f"  {'Y'+str(y):>16}" for y in years)
 print(hdr_ins)
 for ins_id in top_insureds:
@@ -179,12 +176,11 @@ for ins_id in top_insureds:
     cp = f"{100*cg/tg:.1f}" if tg else "-"
     print(f"  {ins_id:>10}  {ag:>16}  {cg:>16}  {ap:>6}  {cp:>6}")
 
-print("\n=== Claims settled by syndicate per year (pence) ===")
-all_csyn = sorted({s for yy in claims.values() for s in yy})
-hdr2 = f"{'Year':>4}" + "".join(f"  Syn{s:>2}" for s in all_csyn)
+print("\n=== Claims settled by insurer per year (cents) ===")
+hdr2 = f"{'Year':>4}" + "".join(f"  Ins{i:>2}" for i in all_insurers)
 print(hdr2)
 for y in years:
-    row2 = f"  {y:>2}" + "".join(f"  {claims[y].get(s,0):>9}" for s in all_csyn)
+    row2 = f"  {y:>2}" + "".join(f"  {claims[y].get(i,0):>9}" for i in all_insurers)
     print(row2)
 
 print("\n=== Claims split: Attritional vs Cat per year ===")
@@ -192,40 +188,25 @@ print(f"{'Year':>4}  {'AttrClaims':>16}  {'CatClaims':>16}  {'TotalClaims':>16} 
 for y in years:
     ac = claims_split[y].get('Attritional', 0)
     cc = claims_split[y].get('Cat', 0)
-    uc = claims_split[y].get('Unknown', 0)
-    tc = ac + cc + uc
+    tc = ac + cc
     ap = f"{100*ac/tc:.1f}" if tc else "-"
     cp = f"{100*cc/tc:.1f}" if tc else "-"
-    suffix = f"  (unknown={uc})" if uc else ""
-    print(f"  {y:>2}    {ac:>16}  {cc:>16}  {tc:>16}  {ap:>6}  {cp:>6}{suffix}")
+    print(f"  {y:>2}    {ac:>16}  {cc:>16}  {tc:>16}  {ap:>6}  {cp:>6}")
 
-print("\n=== Lead vs follower quoting funnel ===")
-print(f"{'Year':>4}  {'LdReq':>6}  {'LdIss':>6}  {'LdDec':>6}  {'LdConv%':>8}  |  {'FlReq':>6}  {'FlIss':>6}  {'FlDec':>6}  {'FlConv%':>8}")
-for y in years:
-    lr, li = lead_req[y], lead_iss[y]
-    ld = lead_dec[y]  # QuoteDeclined has no is_lead; this will be 0 (see note below)
-    fr, fi = foll_req[y], foll_iss[y]
-    fd = fr - fi  # inferred: follower declines = follower requests - follower quotes issued
-    lc = f"{100*li/lr:.1f}" if lr else "-"
-    fc = f"{100*fi/fr:.1f}" if fr else "-"
-    print(f"  {y:>2}    {lr:>6}  {li:>6}  {ld:>6}  {lc:>8}  |  {fr:>6}  {fi:>6}  {fd:>6}  {fc:>8}")
-print("  Note: LdDec is always 0 (QuoteDeclined has no is_lead field); FlDec is inferred.")
-
-print("\n=== Per-syndicate loss ratio (bound premium vs claims) ===")
-all_lr_syns = sorted({s for yy in bound_premiums.values() for s in yy} | {s for yy in claims.values() for s in yy})
-hdr3 = f"{'Year':>4}" + "".join(f"  Syn{s:>2} LR%" for s in all_lr_syns)
+print("\n=== Per-insurer loss ratio per year ===")
+hdr3 = f"{'Year':>4}" + "".join(f"  Ins{i:>2} LR%" for i in all_insurers)
 print(hdr3)
 flagged = []
 for y in years:
     row3 = f"  {y:>2}"
-    for s in all_lr_syns:
-        prem = bound_premiums[y].get(s, 0)
-        clm  = claims[y].get(s, 0)
+    for i in all_insurers:
+        prem = premiums[y].get(i, 0)
+        clm  = claims[y].get(i, 0)
         if prem > 0:
             lr_pct = 100 * clm / prem
             cell = f"{lr_pct:>8.1f}"
             if lr_pct > 100:
-                flagged.append(f"  WARN year={y} syndicate={s}: LR={lr_pct:.1f}% (claims={clm} premium={prem})")
+                flagged.append(f"  WARN year={y} insurer={i}: LR={lr_pct:.1f}% (claims={clm} premium={prem})")
         else:
             cell = f"{'n/a':>8}"
         row3 += f"  {cell}"
@@ -235,45 +216,21 @@ if flagged:
     for w in flagged: print(w)
 
 print("\n=== Market-level Attritional vs Cat loss ratio per year ===")
-print(f"  (claims / total bound premium for all syndicates combined)")
 print(f"{'Year':>4}  {'TotalPrem':>16}  {'AttrClaims':>14}  {'AttrLR%':>8}  {'CatClaims':>14}  {'CatLR%':>8}")
 for y in years:
-    total_prem = sum(bound_premiums[y].values())
+    total_prem = sum(premiums[y].values())
     ac = claims_split[y].get('Attritional', 0)
     cc = claims_split[y].get('Cat', 0)
     alr = f"{100*ac/total_prem:.1f}" if total_prem else "-"
     clr = f"{100*cc/total_prem:.1f}" if total_prem else "-"
     print(f"  {y:>2}    {total_prem:>16}  {ac:>14}  {alr:>8}  {cc:>14}  {clr:>8}")
 
-print("\n=== Syndicate capacity (entries / insolvencies / active) ===")
-print(f"{'Year':>4}  {'Entered':>7}  {'Insolvent':>9}  {'ActiveEoY':>9}")
-active = 0
-for y in years:
-    active += entries[y] - insolvencies[y]
-    print(f"  {y:>2}    {entries[y]:>7}  {insolvencies[y]:>9}  {active:>9}")
-
-print("\n=== Market share HHI per year (bound premium) ===")
+print("\n=== Market HHI per year (by insurer bound premium) ===")
 print(f"{'Year':>4}  {'HHI':>6}  (0=perfect competition, 10000=monopoly)")
 for y in years:
-    total = sum(bound_premiums[y].values())
+    total = sum(premiums[y].values())
     if total:
-        hhi = sum((v / total * 100) ** 2 for v in bound_premiums[y].values())
+        hhi = sum((v / total * 100) ** 2 for v in premiums[y].values())
         print(f"  {y:>2}    {hhi:>6.0f}")
     else:
         print(f"  {y:>2}      n/a")
-
-print("\n=== Average panel size per year ===")
-print(f"{'Year':>4}  {'AvgPanel':>8}  {'MinPanel':>8}  {'MaxPanel':>8}")
-for y in years:
-    ps = panel_sizes[y]
-    if ps:
-        print(f"  {y:>2}    {sum(ps)/len(ps):>8.2f}  {min(ps):>8}  {max(ps):>8}")
-    else:
-        print(f"  {y:>2}         n/a")
-
-print("\n=== Lead role concentration (top 10 syndicates, all years) ===")
-print(f"  {'SynId':>5}  {'LeadCount':>9}  {'Share%':>7}")
-total_leads = sum(lead_freq.values())
-for syn_id, cnt in lead_freq.most_common(10):
-    share = 100 * cnt / total_leads if total_leads else 0
-    print(f"  {syn_id:>5}  {cnt:>9}  {share:>7.1f}")

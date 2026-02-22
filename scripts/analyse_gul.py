@@ -19,7 +19,7 @@ def year(day): return day // 360 + 1
 def etype(e):  return next(iter(e['event'])) if isinstance(e['event'], dict) else e['event']
 def pence_to_gbp(p): return p / 100
 
-CAT_PERILS = {"WindstormAtlantic", "WindstormEuropean", "EarthquakeUS", "EarthquakeJapan", "Flood"}
+CAT_PERILS = {"WindstormAtlantic"}
 
 # ── Pass 1: build insured metadata from SubmissionArrived ────────────────────
 # Each insured submits once per year; all submissions carry the same fixed risk.
@@ -44,9 +44,9 @@ for e in events:
     if etype(e) == "LossEvent":
         d = e['event']['LossEvent']
         y = year(e['day'])
-        cat_events_by_year[y].append((d['peril'], d['region']))
+        cat_events_by_year[y].append((d['peril'],))
 
-cat_years = {y for y, evs in cat_events_by_year.items() if any(p in CAT_PERILS for p, _ in evs)}
+cat_years = {y for y, evs in cat_events_by_year.items() if any(p in CAT_PERILS for (p,) in evs)}
 
 # ── Pass 3: collect InsuredLoss events ────────────────────────────────────────
 #
@@ -340,6 +340,6 @@ else:
         evs = cat_events_by_year.get(y, [])
         flag = " <-- cat year" if y in cat_years else ""
         print(f"  Year {y}: {len(evs)} LossEvent(s){flag}")
-        for peril, region in evs:
-            print(f"    - {peril} / {region}")
+        for (peril,) in evs:
+            print(f"    - {peril}")
 print()
