@@ -36,8 +36,9 @@ impl DamageFractionModel {
 /// Schedule market-wide catastrophe `LossEvent`s for `year`.
 ///
 /// Draws a Poisson count from `cat.annual_frequency`, then for each event
-/// draws a uniform day-offset within the year. Damage fractions are sampled
-/// per-policy at dispatch time.
+/// draws a uniform day-offset within the year. A single damage fraction is
+/// drawn at dispatch time (in `Market::on_loss_event`) and shared across all
+/// affected policies, modelling the correlated intensity of a physical event.
 ///
 /// `next_id` is mutated in-place; the caller owns the event-id counter.
 pub fn schedule_loss_events(

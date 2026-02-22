@@ -108,6 +108,10 @@ impl Market {
 
     /// A catastrophe loss event has fired. Emit InsuredLoss for every active policy
     /// that covers this peril. Full coverage: ground_up_loss = damage_fraction × sum_insured.
+    ///
+    /// A single damage fraction is drawn once for the entire event and applied to every
+    /// affected policy. This reflects the physical reality: a cat event's intensity field
+    /// (wind speed, ground motion) is a property of the occurrence, not of individual assets.
     pub fn on_loss_event(
         &self,
         day: Day,
@@ -118,11 +122,11 @@ impl Market {
         let Some(model) = damage_models.get(&peril) else {
             return vec![];
         };
+        let df = model.sample(rng);
         self.policies
             .values()
             .filter(|p| p.risk.perils_covered.contains(&peril))
             .filter_map(|policy| {
-                let df = model.sample(rng);
                 let gul = (df * policy.risk.sum_insured as f64) as u64;
                 if gul == 0 {
                     return None;
@@ -358,6 +362,37 @@ mod tests {
     }
 
     // ── on_loss_event ─────────────────────────────────────────────────────────
+
+    /// Damage fraction must be drawn once per cat event and shared across all
+    /// affected policies. Two identical policies in the same event must receive
+    /// the same ground_up_loss. This test fails with per-policy draws.
+    #[test]
+    fn cat_loss_uses_shared_damage_fraction() {
+        let mut market = Market::new();
+        bind_policy(&mut market, 1, 1);
+        bind_policy(&mut market, 2, 2);
+        // Both policies have SMALL_ASSET_VALUE. Use a variable model (not the
+        // degenerate Pareto(1,2) that always clips to 1.0).
+        let models: HashMap<Peril, DamageFractionModel> = [(
+            Peril::WindstormAtlantic,
+            DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 },
+        )]
+        .into_iter()
+        .collect();
+        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, &models, &mut rng());
+        assert_eq!(events.len(), 2);
+        let guls: Vec<u64> = events
+            .iter()
+            .filter_map(|(_, e)| {
+                if let Event::InsuredLoss { ground_up_loss, .. } = e { Some(*ground_up_loss) }
+                else { None }
+            })
+            .collect();
+        assert_eq!(
+            guls[0], guls[1],
+            "all policies in the same cat event must share the damage fraction"
+        );
+    }
 
     #[test]
     fn on_loss_event_emits_insured_loss_per_policy() {
