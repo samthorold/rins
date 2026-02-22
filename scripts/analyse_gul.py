@@ -21,16 +21,17 @@ def pence_to_gbp(p): return p / 100
 
 CAT_PERILS = {"WindstormAtlantic"}
 
-# ── Pass 1: build insured metadata from SubmissionArrived ────────────────────
-# Each insured submits once per year; all submissions carry the same fixed risk.
-# We use the first submission per insured to capture territory and sum_insured.
+# ── Pass 1: build insured metadata from LeadQuoteRequested ───────────────────
+# Each insured submits the same fixed risk each year. We use the first
+# LeadQuoteRequested per insured to capture territory and sum_insured.
+# (SubmissionArrived no longer exists; risk is carried on LeadQuoteRequested.)
 
 insured_territory = {}   # insured_id (int) -> territory (str)
 insured_si        = {}   # insured_id (int) -> sum_insured (pence)
 
 for e in events:
-    if etype(e) == "SubmissionArrived":
-        d = e['event']['SubmissionArrived']
+    if etype(e) == "LeadQuoteRequested":
+        d = e['event']['LeadQuoteRequested']
         iid = d['insured_id']
         if iid not in insured_territory:
             risk = d['risk']
