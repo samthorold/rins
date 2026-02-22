@@ -17,23 +17,53 @@ use simulation::Simulation;
 use types::{Day, Year};
 
 fn main() {
-    let mut sim = Simulation::from_config(SimulationConfig::canonical());
+    let args: Vec<String> = std::env::args().collect();
+
+    let mut seed_override: Option<u64> = None;
+    let mut output_path = "events.ndjson".to_string();
+    let mut quiet = false;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--seed" => {
+                i += 1;
+                seed_override = Some(args[i].parse().expect("--seed requires a u64"));
+            }
+            "--output" => {
+                i += 1;
+                output_path = args[i].clone();
+            }
+            "--quiet" => quiet = true,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let mut config = SimulationConfig::canonical();
+    if let Some(s) = seed_override {
+        config.seed = s;
+    }
+
+    let mut sim = Simulation::from_config(config);
 
     sim.schedule(Day(0), Event::SimulationStart { year_start: Year(1) });
     sim.run();
 
-    let file = File::create("events.ndjson").expect("failed to create events.ndjson");
+    let file = File::create(&output_path).expect("failed to create output file");
     let mut writer = BufWriter::new(file);
     for e in &sim.log {
         serde_json::to_writer(&mut writer, e).expect("failed to serialize event");
         writeln!(writer).expect("failed to write newline");
     }
 
-    println!("Events fired: {}", sim.log.len());
+    if !quiet {
+        println!("Events fired: {}", sim.log.len());
 
-    // Report final insurer capitals.
-    println!("\nFinal insurer capitals (end of simulation):");
-    for ins in &sim.insurers {
-        println!("  Insurer {:?}: {} cents", ins.id, ins.capital);
+        // Report final insurer capitals.
+        println!("\nFinal insurer capitals (end of simulation):");
+        for ins in &sim.insurers {
+            println!("  Insurer {:?}: {} cents", ins.id, ins.capital);
+        }
     }
 }

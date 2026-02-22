@@ -22,11 +22,18 @@ This is a living document. Phenomena are added as the literature review progress
 
 ## 0. Risk Pooling (Law of Large Numbers) `[EMERGING]`
 
-**What it is:** When a pool of independent (or weakly-correlated) risks is assembled, the portfolio loss ratio becomes more predictable as pool size grows. The coefficient of variation (CV) of aggregate attritional losses declines with the square root of N independent risks — the law of large numbers. This is the mathematical basis for insurance viability. Catastrophe risk is the structural contrast: a single shared occurrence strikes all exposed risks simultaneously; adding more risks in the same territory does not reduce the CV of the cat component — only diversification across uncorrelated territories and perils does.
+**What it is:** Risk pooling is a benefit to *insureds*, not insurers. Each individual faces highly uncertain annual losses: most years modest attritional claims, rare years a large hit. Insurance lets the insured swap that uncertain outcome for a fixed, known premium. The insurer can offer this exchange because the Law of Large Numbers makes *aggregate* losses predictable — the CV of total attritional claims declines as 1/√N as the pool grows.
 
-**Why it matters:** Validates the attritional loss model and demonstrates that the cat/attritional split is not cosmetic — the two components behave structurally differently under pooling. A correct simulation will show stable attritional loss ratios year-over-year and volatile cat loss ratios that do not narrow as insured count grows (for a single-territory book). The contrast between the two is a first-principles sanity check on the entire loss architecture.
+Attritional and catastrophe losses behave structurally differently under pooling. Attritional losses are independent across insureds — each draws from the same distribution independently — so pooling compresses aggregate variance efficiently (CV scales as 1/√N). Catastrophe losses arise from a single shared occurrence that strikes all exposed risks simultaneously; adding more risks in the same territory does not reduce the CV of the cat component, because the dominant variance is the event-level severity which is perfectly correlated across the pool. Only diversification across uncorrelated perils and territories reduces cat variance.
 
-**Already measurable:** With 100 insureds (90 small + 10 large), the attritional market loss ratio is stable across years while the cat loss ratio is zero in most years and spikes sharply in catastrophe years. Per-insurer loss ratios in quiet years are driven primarily by attritional variance at the syndicate scale (N≈20 policies per insurer), while market-level attritional variance is visibly tighter — demonstrating pooling at market scale vs. syndicate scale. No hardcoded smoothing produces this; it arises from the LogNormal attritional model and independent per-policy draws.
+**Why it matters:** Validates that the loss architecture produces correct individual-to-aggregate variance compression for attritional losses while correctly failing to compress cat losses. The distinction is not cosmetic: it is why catastrophe-exposed books remain volatile regardless of their size, and why cat loading in premium is structurally different from attritional loading.
+
+**Already measurable:** Over 50 seeds × 20 years with 100 insureds, `scripts/pooling_cdf.py` shows:
+- Attritional individual insured annual GUL: mean 16%, CV **1.12**. Market-average attritional GUL per insured: mean 16%, CV **0.11**. CV ratio **10.0×** — almost exactly the √100 = 10× predicted by LLN. Pooling works perfectly for independent losses.
+- Cat individual GUL (cat years only): CV **1.18**. Market-average cat GUL per insured: CV **1.18**. CV ratio **1.00×** — pooling within a single territory provides zero diversification for correlated losses.
+- The fixed premium (35% of asset value) lies well above mean total losses (16%), reflecting cat loading and the insurer's capital charge — visible in the left panel of the CDF plot as a large gap between the premium line and the mean individual attritional loss.
+
+No hardcoded smoothing produces this; it arises from the LogNormal attritional model (independent per-policy draws) and the shared-occurrence cat model.
 
 ---
 
