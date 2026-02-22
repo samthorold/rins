@@ -98,20 +98,6 @@ Report: market CV, median insurer CV, the ratio (market CV / median insurer CV),
 
 ---
 
-#### §8 Geographic and Peril Accumulation Risk — `[PARTIAL]`
-
-*Claim: in cat years, the shared occurrence hits all insurers simultaneously; per-insurer LR spread in cat years is narrower than in attritional-only years, confirming correlated (not independent) exposure.*
-
-1. In each cat year, note the range (max − min) of per-insurer LR across all five insurers.
-2. In pure quiet years, note the same range.
-3. Confirm: median insurer LR range in cat years < median range in quiet years (shared cat shock compresses divergence; attritional is independent across policies → wider spread).
-
-**Verdict thresholds:**
-- **PARTIAL CONFIRMED** — insurer LR range in cat years is materially narrower than in quiet years; cross-territory contrast not yet measurable (single territory model)
-- **NOT VISIBLE** — insurer LR range in cat years is as wide or wider than in quiet years
-
----
-
 ### Tier 2 — Year Character Table (always)
 
 Produce one row per year:

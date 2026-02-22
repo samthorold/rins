@@ -14,7 +14,7 @@ This is a living document. Phenomena are added as the literature review progress
 | 5 | Relationship-Driven Placement Stickiness | PLANNED |
 | 6 | Counter-cyclical Capacity Supply | PLANNED |
 | 7 | Post-Catastrophe Market Concentration Surge | PLANNED |
-| 8 | Geographic and Peril Accumulation Risk | PARTIAL |
+| 8 | Geographic and Peril Accumulation Risk | PLANNED |
 | 9 | Experience Rating and Insured Risk Quality | PLANNED |
 | 10 | Layer-Position Premium Gradient | PLANNED |
 
@@ -116,7 +116,7 @@ This is a living document. Phenomena are added as the literature review progress
 
 ---
 
-## 8. Geographic and Peril Accumulation Risk `[PARTIAL]`
+## 8. Geographic and Peril Accumulation Risk `[PLANNED]`
 
 **What it is:** Catastrophe losses are geographically and peril-correlated: a single event strikes all syndicates holding exposure in the affected region simultaneously. The routing patterns that emerge from relationship scores and specialism parameters produce systematic accumulation of correlated exposure within syndicates and across panels. Syndicates that fail to spread exposure across regions and perils face amplified catastrophe losses relative to the market average, increasing their insolvency probability.
 
@@ -126,7 +126,7 @@ This is a living document. Phenomena are added as the literature review progress
 
 **Accumulation at the Insured level:** accumulation risk exists on the demand side too. An Insured holding multiple risks in the same territory — a manufacturing group with plants across US-SE, for example — accumulates correlated ground-up losses across all of its assets in a single cat event. The sum of GUL across policies can far exceed any single policy limit, and the insured absorbs whatever portion falls below attachments or above limits. This creates demand-side pressure: insureds that suffer repeated large events may restructure their coverage (higher limits, lower attachments, multi-year contracts) or seek alternative risk transfer. That feedback is not yet modelled but is a future target, because it would alter the size and structure of the submission population over time.
 
-*Cat correlation visible in current output. Cross-territory contrast not yet measurable (single territory model); full divergence requires multi-territory specialism (market-mechanics.md §5).*
+*Not yet emergent. Requires multi-territory specialism (market-mechanics.md §5) before cross-territory accumulation contrast can be measured.*
 
 ---
 
