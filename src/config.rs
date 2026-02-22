@@ -48,13 +48,13 @@ impl SimulationConfig {
     pub fn canonical() -> Self {
         SimulationConfig {
             seed: 42,
-            years: 5,
+            years: 20,
             // 5 insurers, each endowed with 1B USD capital each year.
             insurers: (1..=5)
                 .map(|i| InsurerConfig {
                     id: InsurerId(i),
                     initial_capital: 100_000_000_000, // 1B USD in cents
-                    rate: 0.1,
+                    rate: 0.35,
                 })
                 .collect(),
             n_small_insureds: 90,
