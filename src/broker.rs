@@ -5,11 +5,15 @@ use crate::insured::Insured;
 use crate::types::{Day, InsuredId, InsurerId, SubmissionId};
 
 /// Transient state while a submission is in flight.
-/// Fields are kept for future extensions (e.g. broker relationship scoring).
-#[allow(dead_code)]
 struct PendingQuote {
     insured_id: InsuredId,
     insurer_id: InsurerId,
+    /// Index into `insurer_ids` of the first insurer tried.
+    insurer_idx: usize,
+    /// How many insurers have been tried (including the current one).
+    attempts: usize,
+    /// Original risk — needed to re-issue `LeadQuoteRequested` on re-route.
+    risk: Risk,
 }
 
 /// Single broker that services all insureds.
@@ -41,17 +45,55 @@ impl Broker {
         insured_id: InsuredId,
         risk: Risk,
     ) -> Vec<(Day, Event)> {
-        if self.insurer_ids.is_empty() {
+        let n = self.insurer_ids.len();
+        if n == 0 {
             return vec![];
         }
-        let insurer_id = self.insurer_ids[self.next_insurer_idx % self.insurer_ids.len()];
+        let insurer_idx = self.next_insurer_idx % n;
+        let insurer_id = self.insurer_ids[insurer_idx];
         self.next_insurer_idx += 1;
         let submission_id = SubmissionId(self.next_submission_id);
         self.next_submission_id += 1;
-        self.pending.insert(submission_id, PendingQuote { insured_id, insurer_id });
+        self.pending.insert(
+            submission_id,
+            PendingQuote { insured_id, insurer_id, insurer_idx, attempts: 1, risk: risk.clone() },
+        );
         vec![(
             day.offset(1),
             Event::LeadQuoteRequested { submission_id, insured_id, insurer_id, risk },
+        )]
+    }
+
+    /// The lead insurer declined — re-route to the next insurer in the round-robin.
+    /// Drops the submission silently if all insurers have declined.
+    pub fn on_lead_quote_declined(
+        &mut self,
+        day: Day,
+        submission_id: SubmissionId,
+    ) -> Vec<(Day, Event)> {
+        let n = self.insurer_ids.len();
+        let pq = match self.pending.get_mut(&submission_id) {
+            Some(pq) => pq,
+            None => return vec![],
+        };
+        if pq.attempts >= n {
+            self.pending.remove(&submission_id);
+            return vec![];
+        }
+        let next_idx = (pq.insurer_idx + pq.attempts) % n;
+        let next_insurer_id = self.insurer_ids[next_idx];
+        pq.insurer_id = next_insurer_id;
+        pq.attempts += 1;
+        let risk = pq.risk.clone();
+        let insured_id = pq.insured_id;
+        vec![(
+            day.offset(1),
+            Event::LeadQuoteRequested {
+                submission_id,
+                insured_id,
+                insurer_id: next_insurer_id,
+                risk,
+            },
         )]
     }
 
@@ -265,5 +307,35 @@ mod tests {
     fn insured_sum_insured_is_correct() {
         let broker = broker_with_insurers(1, vec![1]);
         assert_eq!(broker.insureds[0].sum_insured(), ASSET_VALUE);
+    }
+
+    // ── on_lead_quote_declined ────────────────────────────────────────────────
+
+    #[test]
+    fn on_lead_quote_declined_retries_next_insurer() {
+        let mut broker = broker_with_insurers(1, vec![1, 2]);
+        // Set up a pending submission routed to insurer 1.
+        broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
+        let events = broker.on_lead_quote_declined(Day(1), SubmissionId(0));
+        assert_eq!(events.len(), 1, "declined → must emit one LeadQuoteRequested to next insurer");
+        if let Event::LeadQuoteRequested { insurer_id, submission_id, .. } = events[0].1 {
+            assert_eq!(insurer_id, InsurerId(2), "must re-route to insurer 2");
+            assert_eq!(submission_id, SubmissionId(0), "same submission_id");
+        } else {
+            panic!("expected LeadQuoteRequested");
+        }
+        assert_eq!(events[0].0, Day(2), "re-route fires at day+1");
+    }
+
+    #[test]
+    fn on_lead_quote_declined_cycles_through_all_insurers_then_drops() {
+        let mut broker = broker_with_insurers(1, vec![1, 2]);
+        broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
+        // First decline: re-route to insurer 2.
+        let ev1 = broker.on_lead_quote_declined(Day(1), SubmissionId(0));
+        assert_eq!(ev1.len(), 1, "first decline must re-route");
+        // Second decline: both insurers exhausted → drop.
+        let ev2 = broker.on_lead_quote_declined(Day(2), SubmissionId(0));
+        assert!(ev2.is_empty(), "all insurers declined → must return empty");
     }
 }

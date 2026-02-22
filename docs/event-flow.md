@@ -35,6 +35,7 @@ flowchart TD
 
     subgraph Insurer["Insurer\n(ATP pricing + exposure tracking)"]
         LQI["**LeadQuoteIssued**\n{submission_id, insured_id, insurer_id, atp, premium,\n cat_exposure_at_quote}\n(same day as LeadQuoteRequested)"]
+        LQD["**LeadQuoteDeclined**\n{submission_id, insured_id, insurer_id, reason}\n(same day as LeadQuoteRequested)"]
         CS_I["on_claim_settled\ncapital −= amount\nyear_claims += amount"]
         INS_PB["on_policy_bound\nyear_exposure += sum_insured\ncat_aggregate += sum_insured (cat only)"]
         INS_PE["on_policy_expired\ncat_aggregate −= sum_insured"]
@@ -49,7 +50,9 @@ flowchart TD
     end
 
     CR -->|"+1 day"| LQR
-    LQR -->|"same day"| LQI
+    LQR -->|"same day (within limits)"| LQI
+    LQR -->|"same day (limit breached)"| LQD
+    LQD -->|"+1 day via Broker::on_lead_quote_declined\nre-route or drop"| LQR
     LQI -->|"+1 day via Broker"| QP
     QP -->|"same day"| QA
     QA -->|"+1 day"| PB
@@ -86,6 +89,7 @@ flowchart TD
 | 4 | `CoverageRequested { insured_id, risk }` | `YearStart` handler | `Broker::on_coverage_requested` → emit `LeadQuoteRequested` | spread days 0–179 of year | §5 Placement |
 | 5 | `LeadQuoteRequested { submission_id, insured_id, insurer_id, risk }` | `Broker` | `Insurer::on_lead_quote_requested` → emit `LeadQuoteIssued` | +1 from `CoverageRequested` | §5 Placement, §4.1 Actuarial channel |
 | 6 | `LeadQuoteIssued { submission_id, insured_id, insurer_id, atp, premium, cat_exposure_at_quote }` | `Insurer` | `Broker::on_lead_quote_issued` → emit `QuotePresented` | same day as `LeadQuoteRequested` | §4 Pricing, §5 Placement |
+| 6b | `LeadQuoteDeclined { submission_id, insured_id, insurer_id, reason }` | `Insurer` | `Broker::on_lead_quote_declined` → emit `LeadQuoteRequested` to next insurer (or drop if all declined) | same day as `LeadQuoteRequested` | §4 Pricing, §5 Placement |
 | 7 | `QuotePresented { submission_id, insured_id, insurer_id, premium }` | `Broker` | `Insured::on_quote_presented` → emit `QuoteAccepted` | +1 from `LeadQuoteIssued` | §5 Placement |
 | 8 | `QuoteAccepted { submission_id, insured_id, insurer_id, premium }` | `Insured` | `Market::on_quote_accepted` → create `BoundPolicy` (pending), emit `PolicyBound` + `PolicyExpired` | same day as `QuotePresented` | §5 Placement, §2.2 Annual policy terms |
 | 9 | `QuoteRejected { submission_id, insured_id }` | `Insured` (not fired in this model) | `Market::on_quote_rejected` (no-op) | same day as `QuotePresented` | §5 Placement |

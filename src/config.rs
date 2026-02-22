@@ -78,7 +78,7 @@ impl SimulationConfig {
                     target_loss_ratio: 0.55, // 1 − 0.344 expenses − 0.106 profit → CR ≈ 89.4%
                     ewma_credibility: 0.3,
                     expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
-                    max_cat_aggregate: None,
+                    max_cat_aggregate: Some(75_000_000_000), // 750M USD = 15 × ASSET_VALUE
                     max_line_size: None,
                 })
                 .collect(),

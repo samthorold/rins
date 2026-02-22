@@ -182,8 +182,16 @@ impl Simulation {
 
             Event::LeadQuoteRequested { submission_id, insured_id, insurer_id, risk } => {
                 if let Some(insurer) = self.insurers.iter().find(|i| i.id == insurer_id) {
-                    let (d, e) =
-                        insurer.on_lead_quote_requested(day, submission_id, insured_id, &risk);
+                    for (d, e) in
+                        insurer.on_lead_quote_requested(day, submission_id, insured_id, &risk)
+                    {
+                        self.schedule(d, e);
+                    }
+                }
+            }
+
+            Event::LeadQuoteDeclined { submission_id, .. } => {
+                for (d, e) in self.broker.on_lead_quote_declined(day, submission_id) {
                     self.schedule(d, e);
                 }
             }
@@ -801,5 +809,66 @@ mod tests {
                 "cat_exposure_at_quote {exp} exceeds 2×ASSET_VALUE — aggregate not released properly"
             );
         }
+    }
+
+    // ── Exposure limit + re-routing ───────────────────────────────────────────
+
+    #[test]
+    fn declined_by_first_insurer_binds_with_second() {
+        // Insurer 1: max_cat_aggregate = 0 → always declines cat risks.
+        // Insurer 2: unlimited → always quotes.
+        // All policies must bind with insurer 2.
+        use crate::config::ASSET_VALUE;
+
+        let mut config = minimal_config(1, 3);
+        config.insurers = vec![
+            InsurerConfig {
+                id: InsurerId(1),
+                initial_capital: 100_000_000_000,
+                expected_loss_fraction: 0.239,
+                target_loss_ratio: 0.70,
+                ewma_credibility: 0.3,
+                expense_ratio: 0.0,
+                max_cat_aggregate: Some(0), // always declines cat risks
+                max_line_size: None,
+            },
+            InsurerConfig {
+                id: InsurerId(2),
+                initial_capital: 100_000_000_000,
+                expected_loss_fraction: 0.239,
+                target_loss_ratio: 0.70,
+                ewma_credibility: 0.3,
+                expense_ratio: 0.0,
+                max_cat_aggregate: None,
+                max_line_size: None,
+            },
+        ];
+
+        let sim = run_sim(config);
+
+        // Every PolicyBound must be with insurer 2.
+        for e in &sim.log {
+            if let Event::PolicyBound { insurer_id, .. } = &e.event {
+                assert_eq!(
+                    *insurer_id,
+                    InsurerId(2),
+                    "all policies must bind with insurer 2 (insurer 1 always declines)"
+                );
+            }
+        }
+
+        // LeadQuoteDeclined events must appear (one per insured from insurer 1).
+        let declined_count = sim
+            .log
+            .iter()
+            .filter(|e| matches!(e.event, Event::LeadQuoteDeclined { .. }))
+            .count();
+        assert!(declined_count > 0, "expected LeadQuoteDeclined events, got none");
+        assert!(
+            sim.log.iter().any(|e| matches!(e.event, Event::PolicyBound { .. })),
+            "policies must still bind after re-routing"
+        );
+
+        let _ = ASSET_VALUE; // suppress unused warning
     }
 }

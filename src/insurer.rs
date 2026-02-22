@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::events::{Event, Peril, Risk};
+use crate::events::{DeclineReason, Event, Peril, Risk};
 use crate::types::{Day, InsuredId, InsurerId, PolicyId, SubmissionId};
 
 /// A single insurer in the minimal property market.
@@ -66,16 +66,42 @@ impl Insurer {
         self.capital = self.initial_capital;
     }
 
-    /// Price and issue a lead quote for a risk. Always quotes (no capacity checks).
-    /// Logs both the actuarial technical price (ATP) and the underwriter premium.
-    /// Future: check max_cat_aggregate / max_line_size and return LeadQuoteRejected if breached.
+    /// Price and issue a lead quote for a risk, or decline if an exposure limit is breached.
+    /// Returns a single `LeadQuoteIssued` or `LeadQuoteDeclined` event.
     pub fn on_lead_quote_requested(
         &self,
         day: Day,
         submission_id: SubmissionId,
         insured_id: InsuredId,
         risk: &Risk,
-    ) -> (Day, Event) {
+    ) -> Vec<(Day, Event)> {
+        if let Some(max_line) = self.max_line_size
+            && risk.sum_insured > max_line
+        {
+            return vec![(
+                day,
+                Event::LeadQuoteDeclined {
+                    submission_id,
+                    insured_id,
+                    insurer_id: self.id,
+                    reason: DeclineReason::MaxLineSizeExceeded,
+                },
+            )];
+        }
+        if let Some(max_agg) = self.max_cat_aggregate
+            && risk.perils_covered.contains(&Peril::WindstormAtlantic)
+            && self.cat_aggregate + risk.sum_insured > max_agg
+        {
+            return vec![(
+                day,
+                Event::LeadQuoteDeclined {
+                    submission_id,
+                    insured_id,
+                    insurer_id: self.id,
+                    reason: DeclineReason::MaxCatAggregateBreached,
+                },
+            )];
+        }
         let atp = self.actuarial_price(risk);
         let premium = self.underwriter_premium(risk);
         let cat_exposure_at_quote = if risk.perils_covered.contains(&Peril::WindstormAtlantic) {
@@ -83,7 +109,7 @@ impl Insurer {
         } else {
             0
         };
-        (
+        vec![(
             day,
             Event::LeadQuoteIssued {
                 submission_id,
@@ -93,7 +119,7 @@ impl Insurer {
                 premium,
                 cat_exposure_at_quote,
             },
-        )
+        )]
     }
 
     /// A policy has been bound. Credit net premium to capital, accumulate written exposure for EWMA; update cat aggregate.
@@ -177,7 +203,8 @@ mod tests {
             territory: "US-SE".to_string(),
             perils_covered: vec![Peril::Attritional],
         };
-        let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
+        let events = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
+        let (_, event) = events.into_iter().next().unwrap();
         if let Event::LeadQuoteIssued { atp, .. } = event { atp } else { panic!("expected LeadQuoteIssued") }
     }
 
@@ -203,11 +230,15 @@ mod tests {
         assert!(ins.capital < 0, "capital should go negative without panicking");
     }
 
+    fn first_event(events: Vec<(Day, Event)>) -> (Day, Event) {
+        events.into_iter().next().unwrap()
+    }
+
     #[test]
     fn on_lead_quote_requested_always_quotes() {
         let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
-        let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         assert!(
             matches!(event, Event::LeadQuoteIssued { .. }),
             "insurer must always issue a lead quote, got {event:?}"
@@ -218,7 +249,7 @@ mod tests {
     fn premium_equals_atp() {
         let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
-        let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         if let Event::LeadQuoteIssued { atp, premium, .. } = event {
             assert_eq!(premium, atp, "Step 0 technical pricing: premium must equal ATP");
         }
@@ -229,7 +260,7 @@ mod tests {
         let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
         let (_, event) =
-            ins.on_lead_quote_requested(Day(0), SubmissionId(5), InsuredId(42), &risk);
+            first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(5), InsuredId(42), &risk));
         if let Event::LeadQuoteIssued { insured_id, submission_id, insurer_id, .. } = event {
             assert_eq!(insured_id, InsuredId(42));
             assert_eq!(submission_id, SubmissionId(5));
@@ -253,9 +284,9 @@ mod tests {
             perils_covered: vec![Peril::Attritional],
         };
         let (_, e_small) =
-            ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &small);
+            first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &small));
         let (_, e_large) =
-            ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &large);
+            first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &large));
         let p_small =
             if let Event::LeadQuoteIssued { premium, .. } = e_small { premium } else { 0 };
         let p_large =
@@ -270,7 +301,7 @@ mod tests {
     fn quote_premium_is_positive_for_nonzero_risk() {
         let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
-        let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         if let Event::LeadQuoteIssued { premium, .. } = event {
             assert!(premium > 0, "premium must be positive for a non-trivial risk");
         }
@@ -281,7 +312,7 @@ mod tests {
         let ins = make_insurer(InsurerId(1), 0);
         let risk = small_risk();
         let expected = (0.239 * ASSET_VALUE as f64 / 0.70).round() as u64;
-        let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         if let Event::LeadQuoteIssued { atp, .. } = event {
             assert_eq!(atp, expected, "ATP must equal expected_loss_fraction × sum_insured / target_loss_ratio");
         } else {
@@ -295,7 +326,7 @@ mod tests {
         let ins = make_insurer(InsurerId(1), 0);
         let risk = small_risk();
         let expected = (0.239 * ASSET_VALUE as f64 / 0.70).round() as u64;
-        let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         if let Event::LeadQuoteIssued { premium, .. } = event {
             assert_eq!(premium, expected, "premium must equal expected_loss_fraction × sum_insured / target_loss_ratio");
         } else {
@@ -352,7 +383,7 @@ mod tests {
 
         // Quote a second cat risk — exposure_at_quote should reflect the already-bound aggregate.
         let risk = cat_risk();
-        let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk);
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk));
         if let Event::LeadQuoteIssued { cat_exposure_at_quote, .. } = event {
             assert_eq!(
                 cat_exposure_at_quote, ASSET_VALUE,
@@ -369,7 +400,7 @@ mod tests {
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
 
         let risk = att_only_risk();
-        let (_, event) = ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk);
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk));
         if let Event::LeadQuoteIssued { cat_exposure_at_quote, .. } = event {
             assert_eq!(
                 cat_exposure_at_quote, 0,
@@ -378,6 +409,43 @@ mod tests {
         } else {
             panic!("expected LeadQuoteIssued");
         }
+    }
+
+    // ── Exposure limit enforcement ────────────────────────────────────────────
+
+    #[test]
+    fn max_line_size_exceeded_emits_declined() {
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.70, 0.3, 0.0, None, Some(ASSET_VALUE - 1));
+        let risk = cat_risk(); // sum_insured = ASSET_VALUE > max_line_size
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
+        assert!(
+            matches!(event, Event::LeadQuoteDeclined { reason: DeclineReason::MaxLineSizeExceeded, .. }),
+            "expected LeadQuoteDeclined(MaxLineSizeExceeded), got {event:?}"
+        );
+    }
+
+    #[test]
+    fn max_cat_aggregate_breached_emits_declined() {
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.70, 0.3, 0.0, Some(0), None);
+        let risk = cat_risk(); // cat_aggregate(0) + sum_insured > max_cat_aggregate(0)
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
+        assert!(
+            matches!(event, Event::LeadQuoteDeclined { reason: DeclineReason::MaxCatAggregateBreached, .. }),
+            "expected LeadQuoteDeclined(MaxCatAggregateBreached), got {event:?}"
+        );
+    }
+
+    #[test]
+    fn within_limits_after_partial_fill_emits_quote_issued() {
+        let mut ins = Insurer::new(InsurerId(1), 0, 0.239, 0.70, 0.3, 0.0, Some(2 * ASSET_VALUE), None);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
+        // cat_aggregate = ASSET_VALUE, max = 2×ASSET_VALUE → still room for one more
+        let risk = cat_risk();
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk));
+        assert!(
+            matches!(event, Event::LeadQuoteIssued { .. }),
+            "still within limit — must emit LeadQuoteIssued, got {event:?}"
+        );
     }
 
     // ── EWMA experience update ────────────────────────────────────────────────

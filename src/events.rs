@@ -20,6 +20,12 @@ pub struct Risk {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum DeclineReason {
+    MaxLineSizeExceeded,
+    MaxCatAggregateBreached,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Event {
     /// Fires once at Day(0) to bootstrap the simulation. Schedules YearStart(year_start).
     /// `warmup_years` warm-up years are prepended before the `analysis_years` analysis period;
@@ -37,6 +43,14 @@ pub enum Event {
         insured_id: InsuredId,
         insurer_id: InsurerId,
         risk: Risk,
+    },
+    /// Lead insurer declined to quote — exposure limit breached.
+    /// Broker will re-route to the next insurer.
+    LeadQuoteDeclined {
+        submission_id: SubmissionId,
+        insured_id: InsuredId,
+        insurer_id: InsurerId,
+        reason: DeclineReason,
     },
     /// Lead insurer has priced the risk and issued a quote.
     LeadQuoteIssued {
