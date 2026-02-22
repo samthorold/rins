@@ -89,8 +89,9 @@ pub enum Event {
     },
 }
 
-/// Unified event record — serves as both the immutable log entry and the
-/// priority queue entry. Ordering is by `day` only.
+/// A dispatched event with its simulation day. Position in `Simulation.log` is its implicit sequence number.
+///
+/// Serves as both the immutable log entry and the priority queue entry. Ordering is by `day` only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SimEvent {
     pub day: Day,

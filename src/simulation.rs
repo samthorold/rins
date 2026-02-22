@@ -18,6 +18,8 @@ use crate::types::{Day, InsuredId, InsurerId, Year};
 
 pub struct Simulation {
     queue: BinaryHeap<Reverse<SimEvent>>,
+    /// Completed events in dispatch order. `log[i]` has implicit sequence number `i`.
+    /// See `docs/event-sourcing.md §5` for the incremental-replay pattern.
     pub log: Vec<SimEvent>,
     rng: ChaCha20Rng,
     max_day: Option<Day>,

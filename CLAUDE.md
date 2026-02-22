@@ -54,7 +54,11 @@ Reference literature and calibration notes live in `~/Documents/Reference/ABM/` 
 
 **DES (clockless time):** Time advances by pulling the lowest-timestamp event from a priority queue. There is no fixed-tick loop. Events schedule future events.
 
-**Event sourcing:** The event stream is the ground truth. It is immutable. Agent state (capital, portfolio, relationship scores, actuarial estimates) is derived by replaying events. Where full event sourcing creates unacceptable complexity (e.g., floating-point EWMA accumulation), mutable in-agent state is acceptable — but the agent must be reconstructible from its event slice.
+**Event sourcing:** The event stream is the ground truth. It is append-only and immutable. Agent state is derived by replaying events. Where full event sourcing creates unacceptable complexity (e.g., floating-point EWMA accumulation), mutable in-agent state is acceptable — but the agent must be reconstructible from its event slice. `Simulation.log[i]` has implicit sequence number `i`; this is a stable invariant. See `docs/event-sourcing.md` for the full model.
+
+**Aggregates:** Each agent is an aggregate with a typed root ID. A handler (`on_*` method) may only mutate state within its own aggregate and must return new events for cross-aggregate effects. The coordinator routes events between aggregates; it never mutates a foreign aggregate's state directly.
+
+**Invariants belong in handlers.** Enforce invariants in the handler that owns the aggregate, not in the caller. The coordinator delegates unconditionally.
 
 **Randomness:** All randomness flows through a seeded RNG passed explicitly. Simulations must be reproducible given the same seed.
 
@@ -69,6 +73,8 @@ Prefer agents with complex internal logic over decomposing that logic into sub-a
 **Market (Coordinator)** orchestrates cross-agent interactions that cannot belong to a single agent: quoting rounds, loss distribution, insolvency processing, syndicate entry/exit, and industry-aggregate statistics. It makes no pricing decisions.
 
 Market mechanics — the structural rules and institutional invariants governing how the market operates — are documented in `docs/market-mechanics.md`. The document describes *what* the market does, not how the simulation implements it; implementation choices and calibration values belong in code and calibration notes, not here. It is ordered dependency-first (World Model → Contracts → Participants → Pricing → Placement → Settlement) and uses status badges (`[ACTIVE]`, `[PARTIAL]`, `[PLANNED]`, `[TBD]`) on every section so an agent can immediately determine what is running vs. what is aspirational.
+
+For handler contracts, aggregate boundary rules, and invariant placement, see `docs/event-sourcing.md`.
 
 **`docs/event-flow.md` must be kept in sync.** Update it whenever you add, remove, or rename an event variant in `src/events.rs`, change which agent produces or consumes an event, or alter the day-offset logic in `src/simulation.rs`, `src/market.rs`, or any agent handler.
 
@@ -95,5 +101,7 @@ Amendments and new skills are encouraged — but always check with the user befo
 Test-first. Write a failing test before implementing any behaviour.
 
 **Event injection pattern**: Tests build a synthetic historical event stream and feed it to an agent or coordinator to derive initial state. The test then fires a new event and asserts on output events or derived state. This avoids coupling tests to internal fields and exercises the event-sourcing path.
+
+**Incremental replay (future):** when building derived views or analytics, prefer an `AggregateCursor<T>` that advances through `Simulation.log` from `last_seen_seq + 1` rather than replaying from scratch. See `docs/event-sourcing.md §5`.
 
 Use property tests (proptest) for monotonicity properties where meaningful.
