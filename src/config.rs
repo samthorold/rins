@@ -55,7 +55,7 @@ impl SimulationConfig {
             territory: "EU".to_string(),
             limit: 500_000_000,
             attachment: 50_000_000,
-            perils_covered: vec![Peril::WindstormEuropean, Peril::Flood],
+            perils_covered: vec![Peril::WindstormEuropean, Peril::Flood, Peril::Attritional],
         };
 
         let uk_property = Risk {

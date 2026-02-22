@@ -109,18 +109,17 @@ pub struct AttritionalConfig {
 }
 
 /// Per-territory attritional claim rates and damage fractions.
-/// These are PLACEHOLDER calibration values — tune against desired LR targets.
 ///
-/// E[df] ≈ 0.03 for UK/EU (LogNormal mu=-4.0, sigma=1.0).
-/// With sum_insured=£5M, E[ground_up] ≈ £150K per occurrence.
-/// With rate=3.0 and uk_property attachment=£200K, penetration is low;
-/// attritional LR ~5-10% depending on policy size.
+/// mu=-3.0, sigma=1.0 → E[df] ≈ 8.2% (exp(-2.5)), median ≈ 5%.
+/// For uk_property (SI=£5M, attachment=£200K): E[GUL] ≈ £410K — above attachment.
+/// For eu_property (SI=£10M, attachment=£500K): E[GUL] ≈ £820K — above attachment.
+/// Target: attritional ≥ 50% of GUL in benign (low cat-frequency) years.
 pub fn default_attritional_configs() -> std::collections::HashMap<&'static str, AttritionalConfig> {
     [
-        ("UK",    AttritionalConfig { annual_rate: 3.0, damage_fraction: DamageFractionModel::LogNormal { mu: -4.0, sigma: 1.0 } }), // PLACEHOLDER
-        ("EU",    AttritionalConfig { annual_rate: 3.0, damage_fraction: DamageFractionModel::LogNormal { mu: -4.0, sigma: 1.0 } }), // PLACEHOLDER
-        ("US-SE", AttritionalConfig { annual_rate: 4.0, damage_fraction: DamageFractionModel::LogNormal { mu: -3.5, sigma: 1.0 } }), // PLACEHOLDER
-        ("US-CA", AttritionalConfig { annual_rate: 4.0, damage_fraction: DamageFractionModel::LogNormal { mu: -3.5, sigma: 1.0 } }), // PLACEHOLDER
+        ("UK",    AttritionalConfig { annual_rate: 3.0, damage_fraction: DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 } }),
+        ("EU",    AttritionalConfig { annual_rate: 3.0, damage_fraction: DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 } }),
+        ("US-SE", AttritionalConfig { annual_rate: 4.0, damage_fraction: DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 } }),
+        ("US-CA", AttritionalConfig { annual_rate: 4.0, damage_fraction: DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 } }),
     ]
     .into_iter()
     .collect()
