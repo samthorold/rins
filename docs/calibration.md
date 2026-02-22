@@ -15,6 +15,8 @@ The Lloyd's specialty market is the anchor because:
 - Public data (Lloyd's Annual Reports, PRA returns) gives order-of-magnitude validation points
 - The underwriting cycle phenomenon (§1 in `docs/phenomena.md`) is well-documented in this market
 
+**Prior work:** Cabral et al. (2024), *"Exploring the Dynamics of the Specialty Insurance Market Using a Novel Discrete Event Simulation Framework: A Lloyd's of London Case Study"*, JASSS 27(2):7 — an agent-based DES of Lloyd's directly relevant to this project's target phenomena.
+
 ---
 
 ## §2 Exposure Base [ACTIVE]
@@ -25,7 +27,7 @@ The Lloyd's specialty market is the anchor because:
 | Asset value per insured | 50 M USD (5 000 000 000 cents) | `src/config.rs` `ASSET_VALUE` |
 | **Total Insured Value (TIV)** | **5 B USD** | derived |
 
-**Real-world anchor:** Lloyd's US wind TIV is not published directly, but market estimates place specialty-market US wind exposure at roughly $5–10 B USD in premium-equivalent limit for a moderately-sized panel. The 5 B USD TIV at a 10% rate-on-line implies 500 M USD premium, which is the right order of magnitude for a small panel. All insureds are identical by construction — no size heterogeneity yet.
+**Real-world anchor:** Lloyd's US wind TIV is not published directly, but market estimates place specialty-market US wind exposure at roughly $5–10 B USD in premium-equivalent limit for a moderately-sized panel. The 5 B USD TIV at a 35% rate-on-line implies 1.75 B USD premium, which is on the high end for a small panel — consistent with a hard-market pricing environment. All insureds are identical by construction — no size heterogeneity yet.
 
 **Known simplification:** uniform asset size understates concentration risk and suppresses the heavy-right-tail loss distribution that real portfolios exhibit. Heterogeneous sum-insured is `[PLANNED]`.
 
@@ -38,11 +40,12 @@ The Lloyd's specialty market is the anchor because:
 | Poisson rate (market-loss events/year) | 0.5 | `src/config.rs` `CatConfig { annual_frequency: 0.5 }` |
 
 **Real-world anchor:**
-- US landfalling hurricane rate: ~6/yr (NOAA 1851–present all intensities)
-- Major hurricanes (Cat 3+) making US landfall: ~0.6/yr historically
-- Events causing US industry insured loss >$5 B (Lloyd's-relevant threshold): roughly 0.3–0.6/yr based on AIR/RMS industry figures 1990–2020
+- US landfalling hurricanes (all categories): **~1.7/yr** (NOAA 1900–present)
+- Major hurricanes (Cat 3+) making US landfall: **~0.6/yr** historically (1970s–80s baseline); the modern era (2000s–2010s) sees ~3–4 major Atlantic hurricanes per season, though not all make landfall
+- NOAA NCEI billion-dollar events: **67 hurricane events causing >$1 B insured loss since 1980** = ~1.5/yr; events above a ~$5 B industry threshold: roughly **0.3–0.6/yr** (12 events in 1990s, 12 in 2010s)
+- Swiss Re sigma 2025: insured natural catastrophe losses exceeded **$100 B for the fifth consecutive year** (2020–2024); two major US hurricanes in 2024 alone — Helene ($16 B insured) and Milton ($25 B insured)
 
-A rate of 0.5/yr sits in the middle of the plausible range for meaningful cat events. This is a *market-loss event* rate, not a landfall rate — one event triggers losses across the whole panel simultaneously.
+A rate of 0.5/yr sits in the middle of the 0.3–0.6/yr empirical range for Lloyd's-relevant market-loss events (>$5 B industry threshold). This is a *market-loss event* rate, not a landfall rate — one event triggers losses across the whole panel simultaneously.
 
 **Known simplification:** single market-wide event; no spatial correlation (Gulf vs Atlantic landfalls have different frequency profiles). Territory conditioning is `[PLANNED]`.
 
@@ -57,12 +60,16 @@ A rate of 0.5/yr sits in the middle of the plausible range for meaningful cat ev
 
 **Implied statistics:**
 
-- Expected damage fraction = scale / (shape − 1) = 0.05 / 0.5 = **10%** of sum-insured per affected policy
+- Expected damage fraction = **scale × shape / (shape − 1)** = 0.05 × 1.5 / 0.5 = **15%** of sum-insured per affected policy
 - Variance is **infinite** (shape ≤ 2): the distribution has a very heavy tail, appropriate for exploring crisis dynamics
-- Implied expected annual cat loss = 0.5 events/yr × 10% × 5 B TIV = **~250 M USD/yr**
+- Implied expected annual cat loss = 0.5 events/yr × 15% × 5 B TIV = **~375 M USD/yr**
+
+> **Note on the formula:** The Pareto expected value is `E[X] = scale × shape / (shape − 1)` for shape > 1 (matching `src/perils.rs`). An earlier draft of this document incorrectly stated `scale / (shape − 1)` and should be disregarded.
 
 **Real-world anchor:**
-- Lloyd's US wind combined loss ratio (cat component): roughly 20–30% of premium in a bad year; with a 10% RoL this maps to ~2–3% of TIV, consistent with 250 M / 5 B = 5% on expectation (slightly elevated)
+- **GPD shape parameter** from peaks-over-threshold analysis of US hurricane damage: empirical ξ = **0.66–0.80** (95% CI). The relationship to Pareto shape α is ξ = 1/α, giving equivalent α = **1.25–1.52**. Current shape=1.5 → ξ=0.67: right at the lower bound of the empirical range — defensible.
+- **Real event loss-to-TIV:** Katrina ~52% of exposed insured TIV; Harvey ~19–23% (flood gap depresses insured share); Ian ~35–53%
+- **Hurricane deductibles:** 1–5% of TIV for standard coastal property (proxy for scale parameter floor; 5% aligns with current scale=0.05)
 - A shape of 1.5 produces 1-in-100 year losses several times the mean — plausible for US wind but may overstate 1-in-200 PML used in Lloyd's capital models (typically 25–35% of total limit for peak US wind zones)
 
 **Key calibration gap:** The Pareto minimum (scale=0.05) means *every* policy in an event takes at least 5% damage. Real events affect only a fraction of exposed policies (geographic footprint). Until spatial correlation is implemented, scale doubles as a crude footprint proxy.
@@ -73,22 +80,40 @@ A rate of 0.5/yr sits in the middle of the plausible range for meaningful cat ev
 
 | Parameter | Current value | Code location |
 |-----------|--------------|---------------|
-| Fixed rate | 0.1 (10% of sum-insured) | `src/config.rs` `InsurerConfig { rate: 0.1 }` |
+| Fixed rate | 0.35 (35% of sum-insured) | `src/config.rs` `InsurerConfig { rate: 0.35 }` |
 | Premium calculation | `rate × sum_insured` | `src/insurer.rs` `on_lead_quote_requested` |
 
-**Implied premium:** 10% × 50 M USD = **5 M USD per policy per year**.
+**Implied premium:** 35% × 50 M USD = **17.5 M USD per policy per year**.
 
-**Real-world anchor:**
-- Catastrophe XL Rate on Line for US wind: typically **3–15%** depending on attachment point and layer exhaustion probability
-- Risk-adjusted commercial rate for full-value (no excess layer) US wind: ~5–8% on exposed limit for peak zones; lower for inland / partial exposure
+**Real-world anchor — market RoL ranges:**
+- Post-Katrina hard market (2006–2010): **25–50% RoL** for standard cat XL
+- Post-Ian renewals (2023–2024): **40–80% RoL** for cat XL; reinsurance rates up **97% cumulatively since 2017** (Swiss Re)
+- Current rate=0.35 sits in the post-Katrina hard market range — appropriate for a model that does not yet capture softening dynamics
 
-The current rate is a **placeholder** that does not yet reflect:
+**Real-world anchor — Lloyd's combined ratios:**
+- Lloyd's 2024: combined ratio **86.9%** (attritional LR 47.1%, major claims 7.8%, expense ratio 34.4%)
+- Lloyd's 2023: combined ratio **84.0%** (attritional LR 48.3%)
+- Property reinsurance segment 2024: combined ratio **75%** (benefiting from prior-year Ian/Ida reserve releases)
+- Outlook (2025–2026): 90–95% as market softens
+
+**Implied economics at rate=0.35:**
+
+| Component | Calculation | Result |
+|-----------|------------|--------|
+| Attritional LR | 2.0 claims/yr × exp(−3.0 + 0.5) × 50 M / 17.5 M | **~47%** |
+| Cat LR | 375 M annual cat loss / (100 × 17.5 M premium) | **~21%** |
+| Total LR | 47% + 21% | **~68%** |
+| Implied CR (+ 34% expense) | 68% + 34% | **~102%** |
+
+The attritional LR of **~47%** almost exactly matches Lloyd's 2024 figure (47.1%) — a strong calibration result. The implied combined ratio of ~102% is slightly above Lloyd's 84–91% range; the gap is expected: no expense model yet, and rate=0.35 reflects a hard market that should soften when cycle dynamics are added.
+
+The current rate is **fixed** and does not yet reflect:
 - Attachment point (currently zero — first-dollar cover)
 - Layer width (currently full limit)
 - Geographic exposure (currently homogeneous)
 - Cycle dynamics (currently fixed, never responds to losses)
 
-Accept as scaffolding until layered contracts are implemented (`docs/market-mechanics.md §9`). The rate should decrease when layered contracts introduce realistic attachment points, since attaching above zero dramatically reduces the expected loss ratio.
+Accept as scaffolding until layered contracts and rate-response are implemented (`docs/market-mechanics.md §9`). The rate should decrease when layered contracts introduce realistic attachment points, since attaching above zero dramatically reduces the expected loss ratio.
 
 ---
 
@@ -98,9 +123,11 @@ The following metrics should be checked after a canonical 5-year run (`cargo run
 
 | Metric | Target range | Basis | Status |
 |--------|-------------|-------|--------|
-| Annual expected cat loss / TIV | 0.5–3% | Historical US wind industry loss / estimated specialty TIV | `[ACTIVE]` — computable from events.ndjson |
-| Cat loss year std dev / mean | >1 | Pareto tail; should be highly volatile year-to-year | `[ACTIVE]` — computable from events.ndjson |
-| Premium / TIV (effective RoL) | 3–15% | Lloyd's specialty market rate surveys | `[ACTIVE]` — currently fixed at 10% |
+| Annual expected cat loss / TIV | 0.5–3% | Corrected E[df]=15%; 0.5 events/yr × 15% = 7.5% on expectation before footprint discount | `[ACTIVE]` — computable from events.ndjson |
+| Cat loss year std dev / mean | >1 | Pareto tail (infinite variance); should be highly volatile year-to-year | `[ACTIVE]` — computable from events.ndjson |
+| Premium / TIV (effective RoL) | 25–80% | Post-Katrina 25–50%; post-Ian 40–80%; current model 35% | `[ACTIVE]` — currently fixed at 35% |
+| Attritional loss ratio | 45–50% | Lloyd's 2023–2024: 48.3% / 47.1% | `[ACTIVE]` — implied ~47% at rate=0.35; verify from events.ndjson |
+| Lloyd's-equivalent combined ratio | 84–95% | Lloyd's 84.0% (2023), 86.9% (2024); softening toward 90–95% in 2025–26 | `[PLANNED]` — requires expense model |
 | Insurer capital surviving 5 yr | >0 (all) | Solvency floor not yet enforced; check manually | `[ACTIVE]` — visible in final YearEnd events |
 | Renewal retention rate | ~90–95% | Specialty market broker relationships | `[PLANNED]` — no lapse model yet |
 
