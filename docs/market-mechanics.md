@@ -1,32 +1,160 @@
 # Market Mechanics
 
-This is a living document. Mechanics are seeded from the reference literature and refined as implementation reveals what works. Sections marked *[TBD]* require calibration or design decisions not yet resolved.
+This is a living document. Mechanics are ordered by concept dependency — you cannot understand a policy without an asset, or a claim without an occurrence. Each section carries a status badge:
+
+- `[ACTIVE]` — implemented and running in canonical config; code location cited.
+- `[PARTIAL]` — structural scaffold exists but simplified relative to the full spec.
+- `[PLANNED]` — designed, not yet started.
+- `[TBD]` — requires design decisions before implementation.
 
 ---
 
-## 1. Syndicate Actuarial Channel
+## Summary table
 
-The actuarial channel produces a long-run expected loss cost estimate for a submitted risk. It is one of two inputs to the syndicate's final quote; the other is the underwriter channel (§2).
+| Mechanic | Status | Primary implementation |
+|---|---|---|
+| Asset / Peril / Occurrence model | ACTIVE | `src/perils.rs`, `src/insured.rs` |
+| Attritional loss scheduling | ACTIVE | `src/simulation.rs::schedule_attritional_claims_for_policy` |
+| Catastrophe loss distribution | ACTIVE | `src/market.rs::on_loss_event` |
+| Policy terms (full-value, zero attachment) | ACTIVE (PARTIAL — full-value simplification of layer mechanics) | `src/market.rs::on_insured_loss` |
+| Annual policy expiry | ACTIVE | `src/market.rs::expire_policies` |
+| Fixed-rate pricing | ACTIVE (PARTIAL — simplification of actuarial channel) | `src/insurer.rs` |
+| Lead-follow quoting (round-robin) | ACTIVE (PARTIAL — simplification of lead-follow) | `src/broker.rs` |
+| Actuarial channel (full ATP) | PLANNED | — |
+| Underwriter channel / cycle adjustment | PLANNED | — |
+| Broker relationship scores | PLANNED | — |
+| Syndicate entry / exit | PLANNED | — |
+| Annual coordinator statistics | PLANNED | — |
+| Quarterly renewal seasonality | PLANNED | — |
+| Programme structures / towers | PLANNED | — |
+| Experience rating (per-insured surcharge) | PLANNED | — |
+| Central Fund / managed runoff | TBD | — |
 
-### Inputs
+---
 
+## 1. World Model `[ACTIVE]`
+
+Insurance is risk transfer: an Insured holds assets with economic value; a peril occurrence converts some of that value into a loss; a policy transfers a defined tranche of that loss to the market.
+
+### §1.1 Assets `[ACTIVE]`
+
+An **Asset** is a unit of economic value owned by an Insured. It is characterised by:
+
+- `sum_insured` — total replacement value, in currency units. This is the ceiling on any physical loss from a single occurrence.
+- `territory` — geographic/peril zone. Determines which occurrences the asset is exposed to.
+- `perils_covered` — the set of Peril classes that can generate loss against this asset.
+
+An Insured may own multiple Assets (different territories, different perils). Multiple Perils may affect the same Asset simultaneously if they share territory.
+
+**Current simplification:** each Insured owns exactly one risk with a single `sum_insured`, one territory (`AtlanticCoast`), and the full canonical peril set.
+
+### §1.2 Perils `[ACTIVE]`
+
+A **Peril** is a hazard category. Two classes exist:
+
+**Attritional** — many small, statistically independent occurrences: slips, minor fires, everyday property damage. Uncorrelated across assets. Predictable in aggregate; the total annual loss for N homogeneous policies is a compound distribution (sum of N independent draws), not N times a single draw.
+
+**Catastrophe** — rare, large occurrences (hurricane, earthquake, flood). A single physical event simultaneously affects all assets in its territory. Correlated by construction. The dominant source of year-to-year capital volatility.
+
+Currently implemented perils: `WindstormAtlantic` (cat, Pareto damage model) and `Attritional` (LogNormal damage model). Both live in `src/perils.rs`.
+
+### §1.3 Occurrences and ground-up loss `[ACTIVE]`
+
+An **Occurrence** is a single physical event of a Peril. It has an intensity represented by a **damage fraction** ∈ [0, 1].
+
+```
+GUL = damage_fraction × sum_insured
+```
+
+`GUL ≤ sum_insured` is a hard invariant: an occurrence cannot destroy more value than exists. The GUL is a real-world fact, independent of any insurance contract.
+
+**Catastrophe occurrence mechanics** (`src/market.rs::on_loss_event`): when a `LossEvent` fires, the coordinator draws **one** damage fraction from the peril's `DamageFractionModel` (Pareto, clipped to [0, 1]). This single draw is shared across every affected policy — it represents the event's physical intensity field, which is identical for all assets in the same territory. The coordinator fans out to all active policies in the matching (territory, peril) index; every affected policy receives `GUL = shared_fraction × sum_insured`.
+
+**Why a shared fraction:** physical damage at a given location is determined by the event's intensity field. Two neighbouring assets exposed to the same windstorm experience the same wind speed. Modelling this as a single shared draw captures the dominant correlation correctly. Residual asset-level variation (construction quality, micro-siting) is second-order and not included in the base model.
+
+**Attritional occurrence mechanics** (`src/simulation.rs::schedule_attritional_claims_for_policy`): at `PolicyBound`, a per-policy Poisson scheduler samples the expected number of attritional occurrences for the year and schedules each as a future `InsuredLoss` event (no `LossEvent` ancestor). Each occurrence draws an **independent** damage fraction; independence across policies is preserved.
+
+---
+
+## 2. Insurance Contracts `[PARTIAL]`
+
+### §2.1 Policy terms and layer mechanics `[PARTIAL]`
+
+A policy covers a defined tranche of ground-up loss — the layer [attachment, attachment + limit]:
+
+```
+gross = min(GUL, limit)
+net   = gross − attachment   →  insured loss (0 if GUL ≤ attachment)
+```
+
+Three loss layers per occurrence:
+
+| Layer | What it represents | Quantity |
+|---|---|---|
+| Asset value | Total economic value exposed | `sum_insured` |
+| Ground-up loss (GUL) | Physical damage, independent of insurance | `damage_fraction × sum_insured` |
+| Insured loss | Market's share after policy terms | `min(GUL, limit) − attachment` |
+
+The insured retains losses below attachment (the deductible) and losses above attachment + limit (uncovered excess). The market's obligation is exactly the net amount.
+
+**Current simplification:** all policies use full-value coverage — `attachment = 0`, `limit = sum_insured`. Layer mechanics are fully implemented in `src/market.rs::on_insured_loss`; the attachment/limit parameters exist but are set to this degenerate case in canonical config.
+
+**Panel splitting:** the net insured loss is pro-rated by each syndicate's share (in basis points). Each panel entry receives a separate `ClaimSettled` event. The sum of all `ClaimSettled` amounts equals the net insured loss, up to integer rounding no larger than the panel size. **[PARTIAL — current model has a single insurer per policy; panel splitting infrastructure exists but panel size = 1.]**
+
+### §2.2 Annual policy terms and expiry `[ACTIVE]`
+
+All policies are **annual contracts** written for a 12-month period, reflecting the Lloyd's standard placement cycle. Loss events can only trigger claims against policies that are currently active (inception ≤ event day < expiry). Syndicates re-underwrite their book at each renewal; premiums earned in one year do not carry forward.
+
+**Expiry implementation:** `Market::expire_policies(year)` is called at the close of each `YearEnd` event, after `compute_year_stats` has captured the year's data. It removes all `bound_year == year` policies from the policies map and the peril-territory index.
+
+**Aggregate annual GUL cap:** per (policy, year), cumulative GUL is capped at `sum_insured`. Tracked in `remaining_asset_value` in `src/market.rs`.
+
+**Current simplification:** policies are treated as expiring at calendar year-end (`bound_year == year`). This avoids cross-year policy accounting while producing realistic annual statistics. The full quarterly-renewal model is described in §9.
+
+---
+
+## 3. Market Participants
+
+### §3.1 Insureds `[ACTIVE]`
+
+Each Insured owns one or more Assets and seeks insurance coverage each year. Insureds are active agents: they accept or reject quotes and accumulate GUL history. State: `id`, `risk` (asset description), `accepted_quotes` (pending binding), `total_ground_up_loss_by_year`. Source: `src/insured.rs`.
+
+Canonical config: 90 small (sum_insured = 50M USD) + 10 large (sum_insured = 1B USD) = 100 insureds.
+
+### §3.2 Insurers (Syndicates) `[ACTIVE]`
+
+Each Insurer provides capacity and prices risks. State: `id`, `capital`, `rate`, `active_policies`. Capital is reset at each `YearStart`. Source: `src/insurer.rs`.
+
+Canonical config: 5 insurers, 100B USD capital each, rate = 0.1 (10% of sum_insured).
+
+### §3.3 Broker `[ACTIVE]`
+
+A single Broker intermediates between Insureds and Insurers. Routes `CoverageRequested` to insurers via round-robin, assembles panel (currently single-insurer), and manages submission state. Source: `src/broker.rs`.
+
+---
+
+## 4. Pricing
+
+### §4.1 Actuarial channel `[PLANNED]`
+
+The actuarial channel produces a long-run expected loss cost estimate for a submitted risk. It is one of two inputs to the syndicate's final quote.
+
+**Inputs:**
 - Risk characteristics: line of business, sum insured, territory, coverage trigger, attachment/limit structure.
-- Syndicate's accumulated loss experience for that line, encoded as an EWMA of historical loss ratios (event-sourced where practical, mutable accumulator otherwise).
-- An industry-benchmark loss ratio, published by the coordinator after each annual period (§8).
+- Syndicate's accumulated loss experience for that line, encoded as an EWMA of historical loss ratios.
+- Industry-benchmark loss ratio, published by the coordinator after each annual period (§8).
 
-### Process
-
-1. Apply line-of-business base loss cost from the syndicate's actuarial tables (parameterised per syndicate).
-2. Blend own experience (EWMA loss ratio) with the industry benchmark using a credibility weight that increases with the syndicate's volume in that line. Low-volume syndicates weight the benchmark heavily; specialists weight their own experience heavily.
-3. Apply risk-specific loadings: territory catastrophe factor, coverage trigger severity factor, attachment/limit adjustment (pro-rata by layer position).
+**Process:**
+1. Apply line-of-business base loss cost from the syndicate's actuarial tables.
+2. Blend own experience (EWMA loss ratio) with the industry benchmark using a credibility weight that increases with volume. Low-volume syndicates weight the benchmark heavily; specialists weight their own experience.
+3. Apply risk-specific loadings: territory catastrophe factor, coverage trigger severity factor, attachment/limit adjustment.
 4. Output: actuarial technical price (ATP) — the minimum premium at which the syndicate breaks even in expectation.
 
-### Notes
+The ATP is not the quoted premium; it is a floor and an input.
 
-- The ATP is not the quoted premium; it is a floor and an input.
-- EWMA decay parameter controls how fast the syndicate forgets old experience. *[TBD: per-line or per-syndicate?]*
+*[TBD: EWMA decay parameter — per-line or per-syndicate?]*
 
-**Implementation note (current simplification):** The full actuarial channel above has not yet been implemented. The formula used in the removed actuarial implementation was:
+**Current simplification (`[PARTIAL]`):** the full actuarial channel above has not been implemented. The formula used in the removed actuarial implementation was:
 
 ```
 ATP = E[annual_loss] / target_loss_ratio
@@ -36,234 +164,147 @@ where `E[annual_loss]` summed two peril contributions:
 - Attritional: `annual_rate × exp(mu + σ²/2) × sum_insured`
 - Cat (WindstormAtlantic): `annual_frequency × (scale × shape / (shape − 1)) × sum_insured`
 
-The `target_loss_ratio` parameter (0.65 canonical) scaled ATP to the final premium. This was replaced by a fixed rate on line: `premium = rate × sum_insured`, where `rate` is a single config parameter per insurer (0.02 = 2% canonical).
+This was replaced by a fixed rate on line: `premium = rate × sum_insured`, where `rate` is a single config parameter per insurer. Source: `src/insurer.rs`.
 
----
-
-## 2. Syndicate Underwriter Channel
+### §4.2 Underwriter channel `[PLANNED]`
 
 The underwriter channel reflects non-actuarial market intelligence: the current cycle position, relationship with the placing broker, and the observed lead quote (if any). It produces a market rate adjustment applied on top of the ATP.
 
-### Inputs
-
+**Inputs:**
 - Current market cycle indicator (coordinator-published annually; derived from aggregate premium movement — see §8).
 - Broker relationship score for the submitting broker.
 - Lead quote (available only in follow-market mode; absent for the lead syndicate).
 - Syndicate's risk appetite and cycle-sensitivity parameters.
 
-### Process
+**Process:**
+1. **Cycle adjustment:** syndicates with high cycle sensitivity shade quotes toward the hard/soft market signal.
+2. **Relationship adjustment:** a strong broker relationship reduces the loading for placement friction.
+3. **Lead-follow adjustment (follow mode only):** follower syndicates observe the lead quote and allow it to pull their own price. A higher follow-weight parameter produces stronger herding.
+4. Output: final quoted premium = `ATP × (1 + underwriter_adjustment)`.
 
-1. **Cycle adjustment:** Syndicates with high cycle sensitivity shade their quotes toward the hard/soft market signal. In a hard market they price above ATP; in a soft market, competitive pressure pushes them toward ATP or below (floored by solvency constraints).
-2. **Relationship adjustment:** A strong broker relationship reduces the loading the syndicate applies for placement friction. *[Not a discount — represents the syndicate's confidence in risk quality and broker due diligence.]*
-3. **Lead-follow adjustment (follow mode only):** Follower syndicates observe the lead quote and allow it to pull their own price. A higher follow-weight parameter produces stronger herding toward the lead; a lower follow-weight produces more independent pricing.
-4. Output: final quoted premium = ATP * (1 + underwriter adjustment).
+**Capital constraint override:** before emitting the quote, the syndicate checks whether accepting the risk would breach exposure limits, concentration limits, or solvency floor. If so, it either declines or quotes a premium high enough to make acceptance capital-neutral. The coordinator does not intervene.
 
-### Capital constraint override
-
-Before emitting the quote, the syndicate checks whether accepting the risk at that premium would breach its exposure limits, concentration limits, or solvency floor. If so, the syndicate either declines or quotes a premium high enough to make acceptance capital-neutral. The coordinator does not intervene in this decision.
-
-**Per-risk maximum line:** Before the capacity check, the syndicate checks whether the risk's limit exceeds its maximum single-risk loss tolerance (a fraction of initial capital, representing the underwriting authority limit set by the managing agent). If so, the syndicate declines regardless of available annual capacity.
+**Per-risk maximum line:** the syndicate checks whether the risk's limit exceeds its maximum single-risk loss tolerance (a fraction of initial capital). If so, it declines regardless of available capacity.
 
 ---
 
-## 3. Lead-Follow Quoting Process
+## 5. Placement `[PARTIAL]`
 
 Lloyd's operates a subscription market: a lead syndicate sets terms, and followers subscribe on those terms (or decline). The quoting round is orchestrated by the coordinator.
 
-### Sequence
+### Full lead-follow sequence `[PLANNED]`
 
-1. **Broker submission:** Broker selects a target panel and submits risk to the coordinator. Panel selection is driven by relationship scores and line specialism (see §4).
-2. **Lead selection:** The coordinator identifies the lead syndicate — the panel member with the highest relationship score for that line. *[Alternative: broker nominates the lead explicitly. TBD.]*
-3. **Lead quote:** Lead syndicate receives the risk in lead mode (no prior quote visible). It runs both channels (§1, §2) and emits a `QuoteIssued` event with its premium and capacity.
-4. **Follow round:** Remaining panel members receive the risk and the lead quote. Each runs both channels in follow mode. They emit `QuoteIssued` (accept at stated premium or modified premium) or `QuoteDeclined`.
-5. **Panel assembly:** Broker collects quotes. If sufficient capacity is assembled to cover the risk, it is placed. Broker emits `RiskPlaced` event listing participating syndicates, shares, and premiums.
-6. **Shortfall handling:** If the panel is undersubscribed, the broker may approach additional syndicates (relationship-score ranked), or the risk is returned unplaced. *[TBD: retry limit, slip-down mechanics.]*
+1. **Broker submission:** Broker selects a target panel and submits risk to the coordinator. Panel selection is driven by relationship scores and line specialism (see §8).
+2. **Lead selection:** the coordinator identifies the lead syndicate — the panel member with the highest relationship score for that line. *[Alternative: broker nominates lead explicitly. TBD.]*
+3. **Lead quote:** Lead syndicate receives the risk in lead mode (no prior quote visible). It runs both channels (§4.1, §4.2) and emits a `LeadQuoteIssued` event.
+4. **Follow round:** remaining panel members receive the risk and the lead quote. Each runs both channels in follow mode.
+5. **Panel assembly:** Broker collects quotes. If sufficient capacity is assembled, the risk is placed (`PolicyBound`).
+6. **Shortfall handling:** if the panel is undersubscribed, the broker may approach additional syndicates (relationship-score ranked), or the risk is returned unplaced. *[TBD: retry limit, slip-down mechanics.]*
 
-### Timing
+### Current implementation `[PARTIAL]`
 
-All events in a quoting round share the same simulation timestamp. The ordering within the round (lead before followers) is enforced by event dependency, not wall-clock time.
-
----
-
-## 4. Policy Terms and Expiry
-
-All policies in this simulation are **annual contracts** written for a 12-month period. This reflects the Lloyd's standard placement cycle. Policies renew at their inception anniversary, which concentrates at quarterly dates (see §10).
-
-**Consequences for the simulation:**
-
-- Loss events can only trigger claims against policies that are currently active (inception ≤ event day < expiry).
-- Syndicates re-underwrite their book at each renewal cycle. Premiums earned in one policy year do not carry forward.
-- Total industry exposure at any moment is bounded by the active policies — which span across annual cohorts for non-January renewals. A loss late in a calendar year can affect policies from two inception cohorts simultaneously (e.g., a January renewal policy and an October renewal policy both active in November).
-
-**Current implementation simplification:** The current implementation treats all policies as expiring at calendar year-end (`bound_year == year`). This is a deliberate simplification that avoids cross-year policy accounting while still producing realistic annual exposure and premium statistics. The full quarterly-renewal model is described in §10 and is an intended future target.
-
-**Implementation:** `Market::expire_policies(year)` is called at the close of each `YearEnd` event, after `compute_year_stats` has captured the year's loss and premium data. It removes all `bound_year == year` policies from both the policies map and the peril-territory index.
-
----
-
-## 5. Broker Relationship Score Evolution
-
-Each broker maintains a relationship score per (syndicate, line-of-business) pair. Scores are initialised low for new relationships and evolve through placement activity.
-
-### Update rules
-
-**On successful placement (`RiskPlaced`):**
-- All participating syndicates receive a positive score increment proportional to their share of the placement.
-- The lead syndicate receives an additional increment for taking the lead position.
-
-**On quote declined (`QuoteDeclined`):**
-- Small negative adjustment. Repeated declines on submitted risks degrade the relationship.
-
-**On syndicate non-performance (late payment, dispute):**
-- Larger negative adjustment. *[Modelled as a coordinator-emitted event after loss settlement.]*
-
-**Passive decay:**
-- Scores decay toward a baseline at a slow exponential rate. Relationships that are not actively maintained fade over time.
-
-### Score → routing behaviour
-
-When assembling a panel, the broker ranks syndicates by their score for the relevant line and selects the top-N (where N is configurable per broker). A score threshold filters out syndicates below a minimum relationship quality. This produces the placement stickiness phenomenon (see `phenomena.md §5`).
-
-### Initialisation
-
-New syndicates enter with a score draw from a low-mean distribution for all brokers. They must win business (often at competitive prices) to build scores. *[TBD: whether an entering syndicate gets a one-time visibility boost from the coordinator to represent the real-world "capital introduction" process.]*
-
----
-
-## 6. Syndicate Entry / Exit Triggers
-
-This section describes the procedural rules governing when and how syndicates enter and leave the market. It is the mechanism behind phenomenon 6 (counter-cyclical capacity supply).
-
-**Entry:** After each annual review, the coordinator checks whether the industry combined ratio and current market premium rate index cross an entry-attractiveness threshold. If so, it creates one or more new Syndicate agents with parameters drawn from a calibrated distribution (risk appetite, specialism, initial capital). New syndicates receive low initial relationship scores with all brokers. The entry process models the real Lloyd's capital introduction pathway.
-
-**Exit (insolvency):** When a syndicate's capital falls below its solvency floor, the coordinator emits a `SyndicateInsolvent` event, removes the syndicate from active quoting, and transitions it to managed runoff (§6). The syndicate's bound policies continue to their expiry; new submissions are declined.
-
-**Exit (voluntary runoff):** *[TBD — whether to model voluntary capital withdrawal during soft markets.]*
-
----
-
-## 7. Managed Runoff and Central Fund
-
-This section describes the institutional backstop that handles insolvent syndicates. It is a Lloyd's structural rule, not an emergent behaviour.
-
-**Managed runoff:** On insolvency, the coordinator transitions the syndicate to a runoff state. The syndicate accepts no new submissions but continues settling claims on bound policies. It remains in the event stream until all outstanding policies have expired and all claims are settled, at which point it is retired.
-
-**Central Fund:** Lloyd's operates a mutual Central Fund funded by annual levies on all active syndicates. When an insolvent syndicate in runoff cannot meet a claim from its own assets, the claim is paid from the Central Fund. The levy is a small annual deduction from each active syndicate's premium income; it is a friction cost in normal years and a larger drain in the aftermath of a catastrophe-driven insolvency wave.
-
-**Design note:** The Central Fund is a welfare mechanism, not a cycle mechanism. It should not materially alter cycle period or amplitude. It does create a small pro-diversification incentive: syndicates with lower insolvency risk impose a lower expected levy burden on their peers, which over time could influence capital allocation norms.
-
----
-
-## 8. Loss Event Mechanics
-
-Insurance is risk transfer: an Insured holds assets with economic value; a peril event converts some of that value into a loss; a policy transfers a defined tranche of that loss to the market. Three conceptual layers govern every claim:
-
-| Layer | What it represents | Quantity |
-|---|---|---|
-| Asset value | Total economic value exposed to a peril | `sum_insured` |
-| Ground-up loss (GUL) | Physical damage, independent of insurance | `damage_fraction × sum_insured` |
-| Insured loss | Market's share after policy terms | `min(GUL, limit) − attachment` |
-
-The GUL is a real-world fact. The insured loss is the contractual consequence. Tracking them separately enables experience rating, validates that policy terms are applied correctly, and makes visible how much damage an insured absorbs versus how much the market absorbs.
-
-### §8.1 Asset-value model
-
-Each Insured holds one or more risks, each with a `sum_insured` representing the total exposed asset value for a given peril and territory. When a peril event fires, a damage fraction ∈ [0, 1] is sampled for each affected policy:
+Round-robin single-insurer routing (`src/broker.rs`). The quoting chain is:
 
 ```
-GUL = damage_fraction × sum_insured
+CoverageRequested (+1d) → LeadQuoteRequested (same day) → LeadQuoteIssued (+1d) → QuotePresented (same day) → QuoteAccepted (+1d) → PolicyBound
 ```
 
-GUL ≤ sum_insured is a hard invariant: a peril event cannot destroy more value than exists. The GUL is emitted as an `InsuredLoss` event and accumulated by the Insured agent, giving a ground-up view of physical damage before policy terms are applied.
+Total `CoverageRequested` → `PolicyBound` cycle: **3 days**. The structural chain is complete; multi-syndicate panel assembly and lead/follow pricing modes are planned.
 
-### §8.2 Policy terms — layer mechanics
+---
 
-The policy covers the layer [attachment, attachment + limit]:
+## 6. Loss Settlement `[ACTIVE]`
+
+The full loss cascade from occurrence to capital deduction:
 
 ```
-gross = min(GUL, limit)
-net   = gross − attachment   →  insured loss (0 if GUL ≤ attachment)
+LossEvent (cat) or attritional schedule
+  → InsuredLoss { policy_id, insured_id, peril, ground_up_loss }
+    → Insured::on_insured_loss   (GUL accumulation)
+    → Market::on_insured_loss    (apply policy terms)
+      → ClaimSettled { policy_id, insurer_id, amount, peril }
+        → Insurer::on_claim_settled   (capital -= amount)
 ```
 
-The insured retains losses below the attachment (the deductible) and losses above attachment + limit (the uncovered excess). The market's obligation is exactly the net amount.
+### §6.1 Actuarial feedback `[PLANNED]`
 
-**Panel splitting:** the net insured loss is pro-rated by each syndicate's share of the risk (expressed in basis points). Each panel entry receives a separate `ClaimSettled` event. The sum of all `ClaimSettled` amounts equals the net insured loss, up to integer rounding no larger than the panel size.
+Each loss updates the syndicate's accumulated loss experience and revises its actuarial estimate — the primary input to §4.1.
 
-Capital depletion below the solvency floor triggers insolvency processing (§6). Syndicate non-performance following a loss feeds back into broker relationship scores (§5).
+Syndicates learn from the full loss on a policy, not their proportional share. All syndicates on the same risk therefore converge toward the same long-run estimate regardless of line size. This is a structural rule.
 
-### §8.3 Attritional loss class
-
-Attritional losses model the background rate of independent small losses: slips, minor fires, everyday property damage. They are statistically independent across policies — no shared triggering event.
-
-**Mechanics:**
-- At `PolicyBound`, a per-policy Poisson scheduler samples the expected number of attritional claims for the year and schedules each individual occurrence as a future `InsuredLoss` event, spread across the policy year.
-- Each occurrence draws an **independent** damage fraction from the attritional distribution; small fractions (order of a few percent) are expected in every policy year.
-- Attritional `InsuredLoss` events have no `LossEvent` ancestor. They enter the loss cascade at the `InsuredLoss` stage and follow the same policy-terms path (§8.2) from that point.
-
-**Correlation properties:** attritional losses are uncorrelated across policies and across syndicates. A bad attritional year for one syndicate carries no information about other syndicates' experience.
-
-**Aggregate modelling note:** because each policy draws independently, the total attritional claim for N homogeneous policies is the sum of N iid draws — a compound distribution, not N times a single draw. Aggregating N policies into a single group policy with exposure N × S and drawing once changes the loss distribution and is an approximation, not an exact reduction.
-
-### §8.4 Catastrophe loss class
-
-A catastrophe event is a single physical occurrence — hurricane, earthquake, flood — that simultaneously affects all assets exposed in its region. The physical forcing (wind speed field, ground motion, flood depth) is a property of the event itself, not of individual assets.
-
-**Mechanics:**
-- Cat events are Poisson-scheduled globally at `SimulationStart`, with frequency calibrated to return-period targets.
-- When a `LossEvent` fires, the coordinator draws **one** damage fraction from the peril's `DamageFractionModel` (LogNormal or Pareto, clipped to [0, 1]). This single draw represents the intensity of the event; it is shared across every affected policy.
-- The coordinator fans the event out to all active policies in the matching (territory, peril) index. Every affected policy receives `GUL = shared_fraction × sum_insured`.
-- Each affected policy produces one `InsuredLoss` event, which then follows the standard policy-terms path (§8.2).
-
-**Why a shared fraction:** physical damage at a given location is determined by the event's intensity field, not by independent per-asset draws. Two neighbouring buildings exposed to the same windstorm experience essentially the same wind speed; their damage fractions are strongly correlated. Modelling this as a single shared draw per event captures the dominant correlation correctly. Residual asset-level variation (construction quality, micro-siting) is a second-order effect not included in the base model.
-
-**Aggregate modelling note:** because all N policies in a territory receive the same fraction, the total cat claim for N homogeneous policies is exactly N × fraction × S. For a group of N identical insureds in the same territory, the group aggregate loss is exact — not an approximation — and can be represented by a single `InsuredLoss` event with `ground_up_loss = N × fraction × S`.
-
-**Correlation mechanism:** every syndicate writing risks in the struck region is hit in the same event year by the same intensity draw. Diversification across perils and territories reduces cat exposure; diversification within a single territory does not — all policies there share the same fraction. This is the mechanism behind catastrophe-amplified capital crises (phenomena.md §2).
-
-**Cross-syndicate correlation** is not hardcoded: it is an emergent property of broker routing. Because brokers channel similar risks to similar panels (§§3–5), syndicates accumulate overlapping regional books, and a single cat event strikes many of them simultaneously.
-
-### §8.5 Actuarial feedback (closing the §1 loop)
-
-Each loss updates the syndicate's accumulated loss experience and revises its actuarial estimate — the primary input to §1.
-
-Syndicates learn from the full loss on a policy, not their proportional share. All syndicates on the same risk therefore converge toward the same long-run estimate regardless of line size. This is a structural rule, not a calibration choice.
-
-### §8.6 Invariants
+### §6.2 Loss settlement invariants `[ACTIVE]`
 
 The following invariants hold in every simulation run:
 
 1. **GUL ≤ sum_insured** — damage fraction is clipped to [0, 1] before multiplication.
 2. **Insured loss = 0 if GUL ≤ attachment** — below-deductible losses produce no `ClaimSettled`.
-3. **Insured loss ≤ limit** — the policy cap is enforced in `on_insured_loss`.
+3. **Insured loss ≤ limit** — the policy cap is enforced in `Market::on_insured_loss`.
 4. **Sum of `ClaimSettled` amounts = insured loss** — up to integer rounding ≤ panel size.
 5. **Expired policies cannot generate claims** — removed from the peril-territory index at year-end before the next year's events are processed.
 
 ---
 
-## 9. Annual Coordinator Statistics
+## 7. Capital and Solvency `[PLANNED]`
 
-At the close of each annual period, the coordinator aggregates market-wide statistics and publishes them to all active syndicates. These are the market signal syndicates consume in their next pricing cycle and the primary outputs for benchmarking the simulation against Lloyd's empirical targets.
+### §7.1 Syndicate entry `[PLANNED]`
 
-### Statistics published
+After each annual review, the coordinator checks whether the industry combined ratio and current market premium rate index cross an entry-attractiveness threshold. If so, it creates one or more new Syndicate agents with parameters drawn from a calibrated distribution (risk appetite, specialism, initial capital). New syndicates receive low initial relationship scores with all brokers.
 
-- **Industry loss ratio:** total claims incurred divided by total premiums written. The primary signal of market profitability; feeds the cycle indicator consumed by the underwriter channel (§2).
-- **Industry average premium rate:** market-wide average premium per unit of exposure, by line. Syndicates use this to position their own pricing relative to the market.
-- **Aggregate claim frequency and severity:** the industry-benchmark component used in the §1 actuarial blend.
-- **Active syndicate count and aggregate capacity:** signals how tight or loose market capacity is; an input to entry evaluation (§5).
+### §7.2 Exit via insolvency `[PLANNED]`
 
-### Design note
+When a syndicate's capital falls below its solvency floor, the coordinator emits a `SyndicateInsolvent` event, removes it from active quoting, and transitions it to managed runoff (§7.3). Bound policies continue to their expiry; new submissions are declined. Capital depletion below the solvency floor also triggers this path from `on_claim_settled`.
 
-Statistics are a one-period-lagged signal — syndicates price for the coming year using the previous year's aggregate results. This lag is structural: combined with the multi-year EWMA in §1, it is one of the mechanisms that prevents immediate market equilibration and contributes to cycle persistence.
+### §7.3 Managed runoff and Central Fund `[TBD]`
 
-### Central Fund levy
+**Managed runoff:** on insolvency, the coordinator transitions the syndicate to a runoff state. It accepts no new submissions but continues settling claims on bound policies until all have expired.
 
-*[TBD: whether to model explicitly.]* If Central Fund (§6) expenditure is tracked, an annual levy proportional to premium income is deducted from each active syndicate at this step.
+**Central Fund:** Lloyd's operates a mutual Central Fund funded by annual levies on all active syndicates. When an insolvent syndicate in runoff cannot meet a claim, the claim is paid from the Central Fund. The levy is a small annual deduction from each active syndicate's premium income.
+
+**Design note:** the Central Fund is a welfare mechanism, not a cycle mechanism. It should not materially alter cycle period or amplitude.
+
+### §7.4 Voluntary exit `[TBD]`
+
+Whether to model voluntary capital withdrawal during soft markets is not yet decided.
 
 ---
 
-## 10. Policy Renewal Seasonality
+## 8. Market Dynamics
 
-Commercial insurance policies are not spread evenly across the year. They cluster at four standard renewal dates — **1 January, 1 April, 1 July, 1 October** — inherited from the historic quarter-day calendar and reinforced by broker and insurer administrative practice. Within Lloyd's the concentration at January 1 is dominant, driven by property catastrophe reinsurance and European corporate accounts. April 1 captures Japanese and other Asia-Pacific risks. July and October account for the remainder.
+### §8.1 Broker relationship score evolution `[PLANNED]`
+
+Each broker maintains a relationship score per (syndicate, line-of-business) pair. Scores are initialised low for new relationships and evolve through placement activity.
+
+**Update rules:**
+- On successful placement (`RiskPlaced`): all participating syndicates receive a positive increment proportional to their share; the lead receives an additional increment.
+- On quote declined (`QuoteDeclined`): small negative adjustment.
+- On syndicate non-performance: larger negative adjustment.
+- Passive decay: scores decay toward a baseline at a slow exponential rate.
+
+**Score → routing behaviour:** when assembling a panel, the broker ranks syndicates by their score for the relevant line and selects the top-N. A score threshold filters out syndicates below minimum relationship quality. This produces placement stickiness (see `phenomena.md §5`).
+
+**Initialisation:** new syndicates enter with a score draw from a low-mean distribution. They must win business (often at competitive prices) to build scores. *[TBD: whether an entering syndicate gets a one-time visibility boost from the coordinator to represent the real-world capital introduction process.]*
+
+### §8.2 Annual coordinator statistics `[PLANNED]`
+
+At the close of each annual period, the coordinator aggregates market-wide statistics and publishes them to all active syndicates. These are the primary outputs for benchmarking the simulation against Lloyd's empirical targets.
+
+**Statistics published:**
+- **Industry loss ratio:** total claims incurred divided by total premiums written. Feeds the cycle indicator consumed by the underwriter channel (§4.2).
+- **Industry average premium rate:** market-wide average premium per unit of exposure, by line.
+- **Aggregate claim frequency and severity:** the industry-benchmark component used in the §4.1 actuarial blend.
+- **Active syndicate count and aggregate capacity:** signals how tight or loose market capacity is; an input to entry evaluation (§7.1).
+
+**Design note:** statistics are a one-period-lagged signal — syndicates price for the coming year using the previous year's aggregate results. This lag is structural and contributes to cycle persistence.
+
+**Central Fund levy:** *[TBD: whether to model explicitly.]* If Central Fund expenditure is tracked, an annual levy proportional to premium income is deducted from each active syndicate at this step.
+
+---
+
+## 9. Future Mechanics
+
+### §9.1 Policy renewal seasonality `[PLANNED]`
+
+Commercial insurance policies cluster at four standard renewal dates — **1 January, 1 April, 1 July, 1 October** — inherited from the historic quarter-day calendar.
 
 ### Approximate renewal weight by inception date (Lloyd's commercial property)
 
@@ -274,57 +315,25 @@ Commercial insurance policies are not spread evenly across the year. They cluste
 | 1 July | ~25% | US cat-exposed (Florida/SE wind), Australia, NZ, mid-year adjustments |
 | 1 October | ~15% | Fiscal-year-driven accounts, US inland property, residual |
 
-These weights are estimated from reinsurance renewal patterns (January is 50–55% of global cat XL by volume) and general commercial practice. Lloyd's direct-line exact data is not publicly disaggregated by inception date; the above should be treated as calibration estimates.
+**Structural consequences:**
+- A catastrophe striking in Q4 simultaneously hits active January-inception policies (last quarter) and active October-inception policies (first quarter). The aggregate exposure profile is not flat across the year.
+- Concentration at January 1 gives that renewal round outsized market signalling power. Rate movements agreed in January propagate to April and July through the follow-pricing mechanism (§4.2).
 
-### Structural consequences
+*[TBD: implement per-policy inception and expiry dates. When implemented, the peril-territory index must be keyed by active-period rather than bound-year, and `expire_policies` must run continuously rather than only at year-end.]*
 
-**Exposure concentration:** a catastrophe striking in Q4 (October–December) simultaneously hits active January-inception policies (in their last quarter) and active October-inception policies (in their first quarter). The market's aggregate exposure profile is not flat across the year.
+### §9.2 Programme structures and insurance towers `[PLANNED]`
 
-**Premium earning pattern:** underwriters write the majority of GWP in Q1, with progressively less in subsequent quarters. This creates a natural lumpiness in capital deployment and affects the timing of premium income relative to loss events.
+When the required limit exceeds what a single panel placement can absorb, the risk is structured as a **programme** (tower): a vertical stack of consecutive layers, each covering a tranche of ground-up loss. Each layer is an independent contract with its own attachment, limit, premium, and panel.
 
-**Renewal negotiation dynamics:** the concentration at January 1 gives that renewal round outsized market signalling power. Rate movements agreed at January 1 by major cedants and reinsurers set pricing expectations that flow into subsequent quarterly renewals. A hard-market signal in January propagates to April and July through the follow-pricing mechanism (§2).
-
-*[TBD: implement per-policy inception and expiry dates to replace the current year-end simplification. When implemented, the peril-territory index must be keyed by active-period rather than bound-year, and `expire_policies` must run continuously rather than only at year-end.]*
-
----
-
-## 11. Programme Structures and Insurance Towers
-
-When the total value of an insured's exposed assets is large — or more precisely, when the required limit of coverage exceeds what a single market placement can practically absorb — the risk is structured as a **programme** (also called a **tower**): a vertical stack of consecutive layers, each covering a defined tranche of ground-up loss.
-
-### Why towers arise
-
-A single Lloyd's panel can support a layer of perhaps £25–75M by aggregating syndicate lines. Above that, the required limit exceeds what one panel placement will bear, and a second layer — attaching above the first — is placed separately, typically with a different (though often overlapping) syndicate panel. Each layer is an independent contract with its own attachment, limit, premium, and panel.
-
-The deeper motivation is actuarial: different vertical positions in the loss distribution have different risk characteristics, and different classes of capital provider have different risk appetites for those characteristics. Separating the layers allows each tranche to be priced and capitalised appropriately.
-
-### Threshold heuristics
-
-These are initial calibration estimates; they should be tuned as the insured population is developed.
-
-| Insured's sum insured (proxy for asset scale) | Typical programme structure |
-|---|---|
-| < £30M | Single-layer policy; subscription panel at Lloyd's |
-| £30M – £100M | 2-layer programme: primary + 1 excess layer |
-| £100M – £400M | 3–5 layer programme |
-| £400M – £1B | 5–8 layers; may include ILS or cat bond capacity at upper layers |
-| > £1B | 8+ layers; mega-risk territory; Lloyd's typically leads on lower layers |
-
-The trigger is the **required limit**, not the sum insured directly. A risk with £200M sum insured might only require £75M limit (if maximum probable loss is ~37% of assets), and a two-layer structure would suffice. The broker advises the insured on the appropriate programme structure based on MPL estimates and the market's appetite for each layer.
-
-### Layer economics: rate on line (ROL)
-
-The **rate on line** is the premium for a layer expressed as a fraction of its limit: `ROL = premium / limit`. ROL decreases with attachment height. The mechanism is straightforward: a lower attachment means more ground-up losses penetrate the layer (higher expected loss frequency), so the premium per unit of limit must be higher to cover expected losses.
-
-Formally, for a ground-up loss distribution F(x), the expected loss in the layer [A, A+L] is:
+**Layer economics — rate on line (ROL):** `ROL = premium / limit`. ROL decreases with attachment height. For a ground-up loss distribution F(x), the expected loss in the layer [A, A+L] is:
 
 ```
 E[layer loss] = ∫_A^{A+L} (1 − F(x)) dx
 ```
 
-As attachment A rises, the integrand (1 − F(x)) shrinks because fewer events reach the layer. Expected loss per unit limit therefore falls, and so must the ROL in a competitive market. The *variance* of layer loss, scaled by expected loss (i.e., the coefficient of variation), rises with attachment — upper layers are hit rarely, but when hit they are hit for their full limit — but this does not overcome the lower expected loss in determining the ROL.
+As attachment A rises, the integrand shrinks — fewer events penetrate the layer. Expected loss per unit limit falls, and so must the ROL in a competitive market.
 
-Typical ROL ranges by layer position (Lloyd's hard-market conditions, 2022–2024):
+Typical ROL ranges (Lloyd's hard-market conditions, 2022–2024):
 
 | Layer position | Description | ROL range |
 |---|---|---|
@@ -332,8 +341,18 @@ Typical ROL ranges by layer position (Lloyd's hard-market conditions, 2022–202
 | First excess | Attaches above working layer; rarely hit by attritionals | 5–15% |
 | Upper / remote | High attachment; cat events only | 1–8% |
 
-In soft markets all ranges compress; in hard markets (post-catastrophe) lower-layer ROLs increase more than upper-layer ROLs because attritional loss experience is directly reflected in lower-layer claims.
+### Threshold heuristics (calibration estimates)
 
-### Per-layer panel assembly
+| Insured's sum insured | Typical programme structure |
+|---|---|
+| < £30M | Single-layer policy |
+| £30M – £100M | 2-layer programme: primary + 1 excess layer |
+| £100M – £400M | 3–5 layer programme |
+| £400M – £1B | 5–8 layers; may include ILS or cat bond capacity at upper layers |
+| > £1B | 8+ layers; Lloyd's typically leads on lower layers |
 
-Each layer is placed independently. Syndicates that prefer high-frequency, lower-severity exposure concentrate in primary layers. Syndicates seeking low-frequency, high-severity tail risk concentrate in upper layers. This creates a natural **layer-position specialism** dimension orthogonal to the existing line-of-business specialism. The phenomena arising from this structure are described in `phenomena.md §10`.
+**Layer-position specialism:** syndicates that prefer high-frequency, lower-severity exposure concentrate in primary layers; those seeking low-frequency, high-severity tail risk concentrate in upper layers. This creates a layer-position specialism dimension orthogonal to line-of-business specialism.
+
+### §9.3 Experience rating `[PLANNED]`
+
+Per-insured surcharge mechanism: an insured with above-market loss history attracts a higher renewal premium from the actuarial channel. Closes the loss-experience feedback loop at the individual insured level rather than only at the portfolio level.

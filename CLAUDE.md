@@ -68,7 +68,7 @@ Prefer agents with complex internal logic over decomposing that logic into sub-a
 
 **Market (Coordinator)** orchestrates cross-agent interactions that cannot belong to a single agent: quoting rounds, loss distribution, insolvency processing, syndicate entry/exit, and industry-aggregate statistics. It makes no pricing decisions.
 
-Market mechanics — the structural rules and institutional invariants governing how the market operates — are documented in `docs/market-mechanics.md`. The document describes *what* the market does, not how the simulation implements it; implementation choices and calibration values belong in code and calibration notes, not here.
+Market mechanics — the structural rules and institutional invariants governing how the market operates — are documented in `docs/market-mechanics.md`. The document describes *what* the market does, not how the simulation implements it; implementation choices and calibration values belong in code and calibration notes, not here. It is ordered dependency-first (World Model → Contracts → Participants → Pricing → Placement → Settlement) and uses status badges (`[ACTIVE]`, `[PARTIAL]`, `[PLANNED]`, `[TBD]`) on every section so an agent can immediately determine what is running vs. what is aspirational.
 
 **`docs/event-flow.md` must be kept in sync.** Update it whenever you add, remove, or rename an event variant in `src/events.rs`, change which agent produces or consumes an event, or alter the day-offset logic in `src/simulation.rs`, `src/market.rs`, or any agent handler.
 
