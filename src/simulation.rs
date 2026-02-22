@@ -6,7 +6,7 @@ use rand_chacha::ChaCha20Rng;
 
 use crate::broker::Broker;
 use crate::config::SimulationConfig;
-use crate::events::{Event, Peril, SimEvent};
+use crate::events::{Event, Peril, Risk, SimEvent};
 use crate::insured::{AssetType, Insured};
 use crate::insurer::Insurer;
 use crate::market::Market;
@@ -30,11 +30,13 @@ pub struct Simulation {
 impl Simulation {
     /// Construct from a canonical config.
     pub fn from_config(config: SimulationConfig) -> Self {
-        let insurers = config
+        let insurers: Vec<Insurer> = config
             .insurers
             .iter()
             .map(|c| Insurer::new(c.id, c.initial_capital, c.target_loss_ratio))
             .collect();
+
+        let insurer_ids: Vec<InsurerId> = insurers.iter().map(|i| i.id).collect();
 
         let mut insureds = Vec::new();
         for i in 0..config.n_small_insureds {
@@ -51,7 +53,7 @@ impl Simulation {
                 total_ground_up_loss_by_year: HashMap::new(),
             });
         }
-        let broker = Broker::new(insureds);
+        let broker = Broker::new(insureds, insurer_ids);
 
         let damage_models = HashMap::from([
             (
@@ -147,54 +149,89 @@ impl Simulation {
                 self.handle_year_end(year);
             }
 
-            Event::SubmissionArrived { submission_id, insured_id, risk } => {
-                let insurer_ids: Vec<InsurerId> =
-                    self.insurers.iter().map(|i| i.id).collect();
-                let events = self.market.on_submission_arrived(
-                    day,
-                    submission_id,
-                    insured_id,
-                    risk,
-                    &insurer_ids,
-                );
+            Event::CoverageRequested { insured_id, risk } => {
+                let events = self.broker.on_coverage_requested(day, insured_id, risk);
                 for (d, e) in events {
                     self.schedule(d, e);
                 }
             }
 
-            Event::QuoteRequested { submission_id, insurer_id } => {
-                let Some((_, risk)) = self.market.get_quote_params(submission_id) else {
-                    return;
-                };
+            Event::LeadQuoteRequested { submission_id, insured_id, insurer_id, risk } => {
                 let att = &self.config.attritional;
                 let cat = &self.config.catastrophe;
-                if let Some(insurer) =
-                    self.insurers.iter().find(|i| i.id == insurer_id)
-                {
-                    let (d, e) = insurer.on_quote_requested(day, submission_id, &risk, att, cat);
+                if let Some(insurer) = self.insurers.iter().find(|i| i.id == insurer_id) {
+                    let (d, e) = insurer.on_lead_quote_requested(
+                        day,
+                        submission_id,
+                        insured_id,
+                        &risk,
+                        att,
+                        cat,
+                    );
                     self.schedule(d, e);
                 }
             }
 
-            Event::QuoteIssued { submission_id, insurer_id, premium } => {
-                let year = Year((day.0 / Day::DAYS_PER_YEAR) as u32 + 1);
-                let events = self.market.on_quote_issued(
-                    day,
-                    submission_id,
-                    insurer_id,
-                    premium,
-                    year,
-                );
+            Event::LeadQuoteIssued { submission_id, insured_id, insurer_id, premium } => {
+                let events =
+                    self.broker.on_lead_quote_issued(day, submission_id, insured_id, insurer_id, premium);
                 for (d, e) in events {
                     self.schedule(d, e);
                 }
             }
 
-            Event::QuoteDeclined { .. } => {
-                // Insurer always quotes in this model; kept for completeness.
+            Event::QuotePresented { submission_id, insured_id, insurer_id, premium } => {
+                // Insured decides whether to accept. Currently always accepts.
+                for insured in &self.broker.insureds {
+                    if insured.id == insured_id {
+                        let events =
+                            insured.on_quote_presented(day, submission_id, insurer_id, premium);
+                        for (d, e) in events {
+                            self.schedule(d, e);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            Event::QuoteAccepted { submission_id, insured_id, insurer_id, premium } => {
+                let year = Year((day.0 / Day::DAYS_PER_YEAR) as u32 + 1);
+                // Retrieve the risk from the LeadQuoteRequested that seeded this chain.
+                // We need the risk to store in BoundPolicy. Look it up from the insured.
+                let risk = self
+                    .broker
+                    .insureds
+                    .iter()
+                    .find(|i| i.id == insured_id)
+                    .map(|i| Risk {
+                        sum_insured: i.sum_insured(),
+                        territory: "US-SE".to_string(),
+                        perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
+                    });
+                if let Some(risk) = risk {
+                    let events = self.market.on_quote_accepted(
+                        day,
+                        submission_id,
+                        insured_id,
+                        insurer_id,
+                        premium,
+                        risk,
+                        year,
+                    );
+                    for (d, e) in events {
+                        self.schedule(d, e);
+                    }
+                }
+            }
+
+            Event::QuoteRejected { .. } => {
+                // No-op in this model.
             }
 
             Event::PolicyBound { policy_id, .. } => {
+                // Activate the policy for loss routing.
+                self.market.on_policy_bound(policy_id);
+
                 // Schedule attritional InsuredLoss events for this policy,
                 // starting from the current day so no event is scheduled in the past.
                 if let Some(policy) = self.market.policies.get(&policy_id) {
@@ -246,9 +283,7 @@ impl Simulation {
             }
 
             Event::ClaimSettled { insurer_id, amount, .. } => {
-                if let Some(insurer) =
-                    self.insurers.iter_mut().find(|i| i.id == insurer_id)
-                {
+                if let Some(insurer) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
                     insurer.on_claim_settled(amount);
                 }
             }
@@ -261,10 +296,26 @@ impl Simulation {
             insurer.on_year_start();
         }
 
-        // Generate submissions for all insureds.
-        let sub_events = self.broker.generate_submissions(day, &mut self.rng);
-        for (d, e) in sub_events {
-            self.schedule(d, e);
+        // Schedule CoverageRequested for each insured, spread over first 180 days.
+        let n = self.broker.insureds.len();
+        let coverage_events: Vec<(Day, InsuredId, Risk)> = self
+            .broker
+            .insureds
+            .iter()
+            .enumerate()
+            .map(|(i, insured)| {
+                let offset = if n > 1 { i as u64 * 180 / n as u64 } else { 0 };
+                let risk = Risk {
+                    sum_insured: insured.sum_insured(),
+                    territory: "US-SE".to_string(),
+                    perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
+                };
+                (day.offset(offset), insured.id, risk)
+            })
+            .collect();
+
+        for (d, insured_id, risk) in coverage_events {
+            self.schedule(d, Event::CoverageRequested { insured_id, risk });
         }
 
         // Schedule catastrophe loss events (Poisson draw for the year).
@@ -287,10 +338,7 @@ impl Simulation {
         let lr = self.market.loss_ratio();
         let premiums = self.market.total_premiums();
         let claims = self.market.total_claims();
-        eprintln!(
-            "Year {}: premiums={premiums} claims={claims} LR={lr:.3}",
-            year.0
-        );
+        eprintln!("Year {}: premiums={premiums} claims={claims} LR={lr:.3}", year.0);
 
         // Reset YTD accumulators.
         self.market.reset_ytd();
@@ -315,11 +363,19 @@ mod tests {
         SimulationConfig {
             seed: 42,
             years,
-            insurers: vec![InsurerConfig { id: InsurerId(1), initial_capital: 100_000_000_000, target_loss_ratio: 0.65 }],
+            insurers: vec![InsurerConfig {
+                id: InsurerId(1),
+                initial_capital: 100_000_000_000,
+                target_loss_ratio: 0.65,
+            }],
             n_small_insureds: n_small,
             n_large_insureds: n_large,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
-            catastrophe: CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5 },
+            catastrophe: CatConfig {
+                annual_frequency: 0.5,
+                pareto_scale: 0.05,
+                pareto_shape: 1.5,
+            },
         }
     }
 
@@ -372,6 +428,90 @@ mod tests {
         assert_eq!(year_ends, vec![1, 2, 3], "must fire YearEnd for each year");
     }
 
+    // ── Quote chain ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn quote_chain_produces_all_event_types() {
+        let sim = run_sim(minimal_config(1, 1, 0));
+        let has_coverage_req =
+            sim.log.iter().any(|e| matches!(e.event, Event::CoverageRequested { .. }));
+        let has_lead_quote_req =
+            sim.log.iter().any(|e| matches!(e.event, Event::LeadQuoteRequested { .. }));
+        let has_lead_quote_issued =
+            sim.log.iter().any(|e| matches!(e.event, Event::LeadQuoteIssued { .. }));
+        let has_quote_presented =
+            sim.log.iter().any(|e| matches!(e.event, Event::QuotePresented { .. }));
+        let has_quote_accepted =
+            sim.log.iter().any(|e| matches!(e.event, Event::QuoteAccepted { .. }));
+        let has_bound = sim.log.iter().any(|e| matches!(e.event, Event::PolicyBound { .. }));
+
+        assert!(has_coverage_req, "CoverageRequested missing");
+        assert!(has_lead_quote_req, "LeadQuoteRequested missing");
+        assert!(has_lead_quote_issued, "LeadQuoteIssued missing");
+        assert!(has_quote_presented, "QuotePresented missing");
+        assert!(has_quote_accepted, "QuoteAccepted missing");
+        assert!(has_bound, "PolicyBound missing");
+    }
+
+    #[test]
+    fn quote_chain_day_ordering() {
+        // For a single insured, verify the day progression through the chain.
+        let sim = run_sim(minimal_config(1, 1, 0));
+
+        let coverage_day = sim
+            .log
+            .iter()
+            .find(|e| matches!(e.event, Event::CoverageRequested { .. }))
+            .map(|e| e.day)
+            .expect("CoverageRequested missing");
+
+        let lead_req_day = sim
+            .log
+            .iter()
+            .find(|e| matches!(e.event, Event::LeadQuoteRequested { .. }))
+            .map(|e| e.day)
+            .expect("LeadQuoteRequested missing");
+
+        let lead_issued_day = sim
+            .log
+            .iter()
+            .find(|e| matches!(e.event, Event::LeadQuoteIssued { .. }))
+            .map(|e| e.day)
+            .expect("LeadQuoteIssued missing");
+
+        let presented_day = sim
+            .log
+            .iter()
+            .find(|e| matches!(e.event, Event::QuotePresented { .. }))
+            .map(|e| e.day)
+            .expect("QuotePresented missing");
+
+        let accepted_day = sim
+            .log
+            .iter()
+            .find(|e| matches!(e.event, Event::QuoteAccepted { .. }))
+            .map(|e| e.day)
+            .expect("QuoteAccepted missing");
+
+        let bound_day = sim
+            .log
+            .iter()
+            .find(|e| matches!(e.event, Event::PolicyBound { .. }))
+            .map(|e| e.day)
+            .expect("PolicyBound missing");
+
+        assert_eq!(lead_req_day.0, coverage_day.0 + 1, "LeadQuoteRequested must be day+1");
+        assert_eq!(lead_issued_day.0, lead_req_day.0, "LeadQuoteIssued same day as LeadQuoteRequested");
+        assert_eq!(presented_day.0, lead_issued_day.0 + 1, "QuotePresented must be day+1");
+        assert_eq!(accepted_day.0, presented_day.0, "QuoteAccepted same day as QuotePresented");
+        assert_eq!(bound_day.0, accepted_day.0 + 1, "PolicyBound must be day+1");
+        assert_eq!(
+            bound_day.0,
+            coverage_day.0 + 3,
+            "total cycle CoverageRequested→PolicyBound must be 3 days"
+        );
+    }
+
     // ── Policy binding ─────────────────────────────────────────────────────────
 
     #[test]
@@ -390,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn each_policy_bound_has_matching_policy_expired() {
+    fn each_policy_bound_has_no_duplicate() {
         let sim = run_sim(minimal_config(1, 3, 0));
         let bound_ids: Vec<_> = sim
             .log
@@ -401,8 +541,6 @@ mod tests {
             })
             .collect();
         for pid in &bound_ids {
-            // PolicyExpired is scheduled beyond year-end horizon, so may not appear in log.
-            // Just verify no duplicate PolicyBound.
             assert_eq!(
                 bound_ids.iter().filter(|&&p| p == *pid).count(),
                 1,
@@ -411,28 +549,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn submission_to_policy_bound_pipeline() {
-        let sim = run_sim(minimal_config(1, 1, 0));
-        let has_submission =
-            sim.log.iter().any(|e| matches!(e.event, Event::SubmissionArrived { .. }));
-        let has_quote_req =
-            sim.log.iter().any(|e| matches!(e.event, Event::QuoteRequested { .. }));
-        let has_quote_issued =
-            sim.log.iter().any(|e| matches!(e.event, Event::QuoteIssued { .. }));
-        let has_bound = sim.log.iter().any(|e| matches!(e.event, Event::PolicyBound { .. }));
-
-        assert!(has_submission, "SubmissionArrived missing");
-        assert!(has_quote_req, "QuoteRequested missing");
-        assert!(has_quote_issued, "QuoteIssued missing");
-        assert!(has_bound, "PolicyBound missing");
-    }
-
     // ── Loss routing ─────────────────────────────────────────────────────────
 
     #[test]
     fn insured_loss_appears_between_loss_event_and_claim_settled() {
-        // Run with high cat frequency to guarantee a loss event.
         let mut config = minimal_config(1, 2, 0);
         config.catastrophe.annual_frequency = 10.0;
         let sim = run_sim(config);
@@ -452,7 +572,6 @@ mod tests {
         let sim = run_sim(minimal_config(2, 5, 1));
         for e in &sim.log {
             if let Event::ClaimSettled { amount, .. } = &e.event {
-                // amount is u64 so always ≥ 0, but verify it's not accidentally zero from bad logic.
                 assert!(*amount > 0, "ClaimSettled amount must be positive, got {amount}");
             }
         }
@@ -460,7 +579,6 @@ mod tests {
 
     #[test]
     fn attritional_insured_loss_appears_in_log() {
-        // With high attritional rate, at least one attritional InsuredLoss must appear.
         let mut config = minimal_config(1, 5, 0);
         config.attritional.annual_rate = 10.0;
         let sim = run_sim(config);
@@ -475,16 +593,10 @@ mod tests {
     #[test]
     fn insurer_capital_reset_each_year() {
         let mut config = minimal_config(2, 5, 0);
-        // Guarantee claims by setting high cat frequency.
         config.catastrophe.annual_frequency = 10.0;
         let sim = run_sim(config);
-
-        // After year 1, capital should have been depleted then reset.
-        // We can't check intermediate state from the log alone, but we can
-        // verify insurers are still alive (capital not permanently at zero).
         for ins in &sim.insurers {
-            // Capital is reset each YearStart, so final capital = initial - year-N losses.
-            let _ = ins.capital; // just verify no panic
+            let _ = ins.capital; // verify no panic
         }
     }
 
@@ -493,7 +605,6 @@ mod tests {
     #[test]
     fn submissions_routed_across_multiple_insurers() {
         let mut config = minimal_config(1, 6, 0);
-        // Add 3 insurers
         config.insurers = (1..=3)
             .map(|i| InsurerConfig {
                 id: InsurerId(i),

@@ -18,11 +18,13 @@ def loss_type(peril): return 'Attritional' if peril == 'Attritional' else 'Cat'
 type_counts = collections.Counter(etype(e) for e in events)
 
 # --- per-year buckets ---
-submissions   = collections.Counter()
-policies      = collections.Counter()
-declines      = collections.Counter()
-quote_req     = collections.Counter()
-quote_iss     = collections.Counter()
+submissions   = collections.Counter()  # CoverageRequested
+policies      = collections.Counter()  # PolicyBound
+declines      = collections.Counter()  # QuoteRejected (future)
+quote_req     = collections.Counter()  # LeadQuoteRequested
+quote_iss     = collections.Counter()  # LeadQuoteIssued
+quote_pres    = collections.Counter()  # QuotePresented
+quote_acc     = collections.Counter()  # QuoteAccepted
 loss_events   = collections.Counter()  # year -> count
 insured_losses= collections.defaultdict(lambda: collections.defaultdict(int))  # year -> peril -> GUL
 insured_gul   = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insured_id -> GUL
@@ -32,8 +34,8 @@ gul_split     = collections.defaultdict(lambda: collections.defaultdict(int))  #
 claims        = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insurer_id -> sum
 claims_split  = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> type -> amount
 
-# Per-insurer premiums (from QuoteIssued, linked via submission_id → PolicyBound insurer)
-# submission_id → premium (from QuoteIssued)
+# Per-insurer premiums (from QuoteAccepted, linked via submission_id → PolicyBound insurer)
+# submission_id → premium (from QuoteAccepted)
 sub_premium   = {}
 # submission_id → insurer_id (from PolicyBound)
 sub_insurer   = {}
@@ -52,14 +54,18 @@ for e in events:
     k = next(iter(ev))
     v = ev[k]
 
-    if k == 'SubmissionArrived':
+    if k == 'CoverageRequested':
         submissions[y] += 1
-    elif k == 'QuoteRequested':
+    elif k == 'LeadQuoteRequested':
         quote_req[y] += 1
-    elif k == 'QuoteIssued':
+    elif k == 'LeadQuoteIssued':
         quote_iss[y] += 1
+    elif k == 'QuotePresented':
+        quote_pres[y] += 1
+    elif k == 'QuoteAccepted':
+        quote_acc[y] += 1
         sub_premium[v['submission_id']] = v['premium']
-    elif k == 'QuoteDeclined':
+    elif k == 'QuoteRejected':
         declines[y] += 1
     elif k == 'PolicyBound':
         policies[y] += 1
@@ -93,12 +99,12 @@ print("=== Event type counts ===")
 for t, n in type_counts.most_common(): print(f"  {t}: {n}")
 
 print("\n=== Year-over-year summary ===")
-print(f"{'Year':>4}  {'Subs':>5}  {'Bound':>5}  {'Bind%':>6}  {'QReq':>5}  {'QIss':>5}  {'Dec':>5}  {'LossEv':>6}")
+print(f"{'Year':>4}  {'CovReq':>6}  {'Bound':>5}  {'Bind%':>6}  {'LQReq':>5}  {'LQIss':>5}  {'QPres':>5}  {'QAcc':>5}  {'QRej':>5}  {'LossEv':>6}")
 for y in years:
     s, p = submissions[y], policies[y]
-    qr, qi, qd = quote_req[y], quote_iss[y], declines[y]
+    qr, qi, qp, qa, qd = quote_req[y], quote_iss[y], quote_pres[y], quote_acc[y], declines[y]
     bind_pct = f"{100*p/s:.1f}" if s else "-"
-    print(f"  {y:>2}    {s:>5}  {p:>5}  {bind_pct:>6}  {qr:>5}  {qi:>5}  {qd:>5}  {loss_events[y]:>6}")
+    print(f"  {y:>2}    {s:>6}  {p:>5}  {bind_pct:>6}  {qr:>5}  {qi:>5}  {qp:>5}  {qa:>5}  {qd:>5}  {loss_events[y]:>6}")
 
 print("\n=== Premiums by insurer per year (cents) ===")
 hdr = f"{'Year':>4}" + "".join(f"  Ins{i:>2}" for i in all_insurers)

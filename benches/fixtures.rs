@@ -29,12 +29,24 @@ fn default_risk() -> Risk {
 
 /// Bind `policy_count` policies directly into `market` using the public API.
 pub fn prepopulate_policies(market: &mut Market, policy_count: usize) {
-    let insurers = vec![InsurerId(1)];
     for i in 0..policy_count {
         let sid = SubmissionId(i as u64);
         let iid = InsuredId(i as u64 + 1);
-        market.on_submission_arrived(Day(0), sid, iid, default_risk(), &insurers);
-        market.on_quote_issued(Day(0), sid, InsurerId(1), 100_000, Year(1));
+        let events = market.on_quote_accepted(
+            Day(0),
+            sid,
+            iid,
+            InsurerId(1),
+            100_000,
+            default_risk(),
+            Year(1),
+        );
+        // Activate the policy (simulate PolicyBound firing).
+        for (_, e) in &events {
+            if let Event::PolicyBound { policy_id, .. } = e {
+                market.on_policy_bound(*policy_id);
+            }
+        }
     }
 }
 

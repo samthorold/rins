@@ -20,7 +20,6 @@ pub struct Risk {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[allow(clippy::enum_variant_names)] // LossEvent is a domain term, not a naming error
 pub enum Event {
     /// Fires once at Day(0) to bootstrap the simulation. Schedules YearStart(year_start).
     SimulationStart { year_start: Year },
@@ -28,32 +27,50 @@ pub enum Event {
     YearStart { year: Year },
     /// Fires at the end of each simulated year.
     YearEnd { year: Year },
-    SubmissionArrived {
+    /// An insured requests coverage for the year. Broker routes to a lead insurer.
+    CoverageRequested { insured_id: InsuredId, risk: Risk },
+    /// Broker asks the selected lead insurer to price a risk.
+    LeadQuoteRequested {
         submission_id: SubmissionId,
         insured_id: InsuredId,
+        insurer_id: InsurerId,
         risk: Risk,
     },
-    QuoteRequested {
+    /// Lead insurer has priced the risk and issued a quote.
+    LeadQuoteIssued {
         submission_id: SubmissionId,
-        insurer_id: InsurerId,
-    },
-    QuoteIssued {
-        submission_id: SubmissionId,
+        insured_id: InsuredId,
         insurer_id: InsurerId,
         premium: u64,
     },
-    QuoteDeclined {
+    /// Broker presents the quote to the insured.
+    QuotePresented {
         submission_id: SubmissionId,
+        insured_id: InsuredId,
         insurer_id: InsurerId,
+        premium: u64,
     },
+    /// Insured accepts the quote. Market creates the policy record.
+    QuoteAccepted {
+        submission_id: SubmissionId,
+        insured_id: InsuredId,
+        insurer_id: InsurerId,
+        premium: u64,
+    },
+    /// Insured rejects the quote (no-op in this model; kept for completeness).
+    QuoteRejected { submission_id: SubmissionId, insured_id: InsuredId },
+    /// Policy is formally bound. Activates the policy for loss routing.
     PolicyBound {
         policy_id: PolicyId,
         submission_id: SubmissionId,
+        insured_id: InsuredId,
         insurer_id: InsurerId,
+        premium: u64,
     },
     PolicyExpired {
         policy_id: PolicyId,
     },
+    #[allow(clippy::enum_variant_names)] // LossEvent is a domain term, not a naming error
     LossEvent {
         event_id: u64,
         peril: Peril,
@@ -137,12 +154,16 @@ mod tests {
             event: Event::PolicyBound {
                 policy_id: PolicyId(0),
                 submission_id: SubmissionId(1),
+                insured_id: InsuredId(5),
                 insurer_id: InsurerId(2),
+                premium: 50_000,
             },
         };
         let value = serde_json::to_value(&ev).unwrap();
         assert_eq!(value["event"]["PolicyBound"]["policy_id"], 0);
         assert_eq!(value["event"]["PolicyBound"]["insurer_id"], 2);
+        assert_eq!(value["event"]["PolicyBound"]["insured_id"], 5);
+        assert_eq!(value["event"]["PolicyBound"]["premium"], 50_000);
     }
 
     #[test]
@@ -179,5 +200,24 @@ mod tests {
             assert!(v.get("day").is_some(), "missing 'day' key in: {line}");
             assert!(v.get("event").is_some(), "missing 'event' key in: {line}");
         }
+    }
+
+    #[test]
+    fn quote_chain_events_serialize() {
+        let ev = SimEvent {
+            day: Day(1),
+            event: Event::LeadQuoteRequested {
+                submission_id: SubmissionId(0),
+                insured_id: InsuredId(1),
+                insurer_id: InsurerId(1),
+                risk: Risk {
+                    sum_insured: 1_000_000,
+                    territory: "US-SE".to_string(),
+                    perils_covered: vec![Peril::WindstormAtlantic],
+                },
+            },
+        };
+        let value = serde_json::to_value(&ev).unwrap();
+        assert!(value["event"]["LeadQuoteRequested"].is_object());
     }
 }

@@ -1,6 +1,6 @@
 use crate::config::{AttritionalConfig, CatConfig};
 use crate::events::{Event, Peril, Risk};
-use crate::types::{Day, InsurerId, SubmissionId};
+use crate::types::{Day, InsuredId, InsurerId, SubmissionId};
 
 /// A single insurer in the minimal property market.
 /// Writes 100% of each risk it quotes (lead-only, no follow market).
@@ -23,19 +23,22 @@ impl Insurer {
         self.capital = self.initial_capital;
     }
 
-    /// Price and issue a quote for a risk. Always quotes (no capacity checks).
+    /// Price and issue a lead quote for a risk. Always quotes (no capacity checks).
     /// Premium = E[annual loss] / target_loss_ratio.
-    pub fn on_quote_requested(
+    /// `insured_id` is passed through to `LeadQuoteIssued` so the broker can route
+    /// the response without a separate pending-lookup.
+    pub fn on_lead_quote_requested(
         &self,
         day: Day,
         submission_id: SubmissionId,
+        insured_id: InsuredId,
         risk: &Risk,
         att: &AttritionalConfig,
         cat: &CatConfig,
     ) -> (Day, Event) {
         let expected_loss = self.expected_annual_loss(risk, att, cat);
         let premium = (expected_loss as f64 / self.target_loss_ratio).round() as u64;
-        (day, Event::QuoteIssued { submission_id, insurer_id: self.id, premium })
+        (day, Event::LeadQuoteIssued { submission_id, insured_id, insurer_id: self.id, premium })
     }
 
     /// Compute E[annual ground-up loss] from peril parameters.
@@ -120,14 +123,20 @@ mod tests {
     }
 
     #[test]
-    fn on_quote_requested_always_quotes() {
+    fn on_lead_quote_requested_always_quotes() {
         let ins = Insurer::new(InsurerId(1), 1_000_000_000, 0.65);
         let risk = small_risk();
-        let (_, event) =
-            ins.on_quote_requested(Day(0), SubmissionId(1), &risk, &att(), &cat());
+        let (_, event) = ins.on_lead_quote_requested(
+            Day(0),
+            SubmissionId(1),
+            InsuredId(1),
+            &risk,
+            &att(),
+            &cat(),
+        );
         assert!(
-            matches!(event, Event::QuoteIssued { .. }),
-            "insurer must always issue a quote, got {event:?}"
+            matches!(event, Event::LeadQuoteIssued { .. }),
+            "insurer must always issue a lead quote, got {event:?}"
         );
     }
 
@@ -137,10 +146,37 @@ mod tests {
         let risk = small_risk();
         let expected_loss = ins.expected_annual_loss(&risk, &att(), &cat());
         let expected_premium = (expected_loss as f64 / 0.65).round() as u64;
-        let (_, event) =
-            ins.on_quote_requested(Day(0), SubmissionId(1), &risk, &att(), &cat());
-        if let Event::QuoteIssued { premium, .. } = event {
+        let (_, event) = ins.on_lead_quote_requested(
+            Day(0),
+            SubmissionId(1),
+            InsuredId(1),
+            &risk,
+            &att(),
+            &cat(),
+        );
+        if let Event::LeadQuoteIssued { premium, .. } = event {
             assert_eq!(premium, expected_premium, "premium != E[loss] / target_lr");
+        }
+    }
+
+    #[test]
+    fn lead_quote_issued_carries_insured_id() {
+        let ins = Insurer::new(InsurerId(1), 1_000_000_000, 0.65);
+        let risk = small_risk();
+        let (_, event) = ins.on_lead_quote_requested(
+            Day(0),
+            SubmissionId(5),
+            InsuredId(42),
+            &risk,
+            &att(),
+            &cat(),
+        );
+        if let Event::LeadQuoteIssued { insured_id, submission_id, insurer_id, .. } = event {
+            assert_eq!(insured_id, InsuredId(42));
+            assert_eq!(submission_id, SubmissionId(5));
+            assert_eq!(insurer_id, InsurerId(1));
+        } else {
+            panic!("expected LeadQuoteIssued");
         }
     }
 
@@ -169,9 +205,15 @@ mod tests {
     fn quote_premium_is_positive_for_nonzero_risk() {
         let ins = Insurer::new(InsurerId(1), 1_000_000_000, 0.65);
         let risk = small_risk();
-        let (_, event) =
-            ins.on_quote_requested(Day(0), SubmissionId(1), &risk, &att(), &cat());
-        if let Event::QuoteIssued { premium, .. } = event {
+        let (_, event) = ins.on_lead_quote_requested(
+            Day(0),
+            SubmissionId(1),
+            InsuredId(1),
+            &risk,
+            &att(),
+            &cat(),
+        );
+        if let Event::LeadQuoteIssued { premium, .. } = event {
             assert!(premium > 0, "premium must be positive for a non-trivial risk");
         }
     }

@@ -17,15 +17,11 @@ pub struct BoundPolicy {
     pub bound_year: Year,
 }
 
-/// Transient state while a submission awaits a quote.
-struct PendingSubmission {
-    insured_id: InsuredId,
-    risk: Risk,
-}
-
 pub struct Market {
     next_policy_id: u64,
-    pending: HashMap<SubmissionId, PendingSubmission>,
+    /// Policies created by QuoteAccepted but not yet activated (PolicyBound not yet fired).
+    pending_policies: HashMap<PolicyId, BoundPolicy>,
+    /// Active policies (after PolicyBound fires) — eligible for loss routing.
     pub policies: HashMap<PolicyId, BoundPolicy>,
     /// insured_id → active PolicyId for this year.
     pub insured_active_policies: HashMap<InsuredId, PolicyId>,
@@ -35,8 +31,6 @@ pub struct Market {
     /// Per-(policy, year) remaining insurable asset value.
     /// Initialized to sum_insured on first hit; decremented to prevent aggregate GUL > sum_insured.
     remaining_asset_value: HashMap<(PolicyId, Year), u64>,
-    /// Round-robin cursor for insurer selection.
-    pub next_insurer_idx: usize,
 }
 
 impl Default for Market {
@@ -49,90 +43,72 @@ impl Market {
     pub fn new() -> Self {
         Market {
             next_policy_id: 0,
-            pending: HashMap::new(),
+            pending_policies: HashMap::new(),
             policies: HashMap::new(),
             insured_active_policies: HashMap::new(),
             ytd_premiums: 0,
             ytd_claims: 0,
             remaining_asset_value: HashMap::new(),
-            next_insurer_idx: 0,
         }
     }
 
-    /// Store the submission and schedule a QuoteRequested to the next insurer (round-robin).
-    pub fn on_submission_arrived(
+    /// Insured has accepted a quote. Create the policy record (not yet loss-eligible) and
+    /// schedule `PolicyBound` at `day+1` and `PolicyExpired` at `day+361`.
+    pub fn on_quote_accepted(
         &mut self,
         day: Day,
         submission_id: SubmissionId,
         insured_id: InsuredId,
-        risk: Risk,
-        insurers: &[InsurerId],
-    ) -> Vec<(Day, Event)> {
-        if insurers.is_empty() {
-            return vec![];
-        }
-        let insurer_id = insurers[self.next_insurer_idx % insurers.len()];
-        self.next_insurer_idx += 1;
-        self.pending.insert(submission_id, PendingSubmission { insured_id, risk });
-        vec![(day.offset(1), Event::QuoteRequested { submission_id, insurer_id })]
-    }
-
-    /// Retrieve the risk for a pending submission (used by dispatch to pass to insurer).
-    pub fn get_quote_params(&self, submission_id: SubmissionId) -> Option<(InsuredId, Risk)> {
-        self.pending
-            .get(&submission_id)
-            .map(|p| (p.insured_id, p.risk.clone()))
-    }
-
-    /// Insurer has quoted. Bind immediately (insured always accepts).
-    /// Returns PolicyBound + PolicyExpired events.
-    pub fn on_quote_issued(
-        &mut self,
-        day: Day,
-        submission_id: SubmissionId,
         insurer_id: InsurerId,
         premium: u64,
+        risk: Risk,
         year: Year,
     ) -> Vec<(Day, Event)> {
-        let pending = match self.pending.remove(&submission_id) {
-            Some(p) => p,
-            None => return vec![],
-        };
-
         let policy_id = PolicyId(self.next_policy_id);
         self.next_policy_id += 1;
 
         self.ytd_premiums += premium;
-        self.insured_active_policies.insert(pending.insured_id, policy_id);
 
-        self.policies.insert(
+        self.pending_policies.insert(
             policy_id,
             BoundPolicy {
                 policy_id,
                 submission_id,
-                insured_id: pending.insured_id,
+                insured_id,
                 insurer_id,
-                risk: pending.risk,
+                risk,
                 premium,
                 bound_year: year,
             },
         );
 
         let bind_day = day.offset(1);
-        let expire_day = bind_day.offset(360);
+        let expire_day = day.offset(361);
 
         vec![
-            (bind_day, Event::PolicyBound { policy_id, submission_id, insurer_id }),
+            (
+                bind_day,
+                Event::PolicyBound { policy_id, submission_id, insured_id, insurer_id, premium },
+            ),
             (expire_day, Event::PolicyExpired { policy_id }),
         ]
     }
 
+    /// PolicyBound has fired: activate the policy so it is eligible for loss routing.
+    pub fn on_policy_bound(&mut self, policy_id: PolicyId) {
+        if let Some(policy) = self.pending_policies.remove(&policy_id) {
+            self.insured_active_policies.insert(policy.insured_id, policy_id);
+            self.policies.insert(policy_id, policy);
+        }
+    }
+
+    /// Insured rejected the quote — no-op in this model.
+    pub fn on_quote_rejected(&mut self, _submission_id: SubmissionId) {}
+
     /// Remove a policy when its PolicyExpired event fires.
     pub fn on_policy_expired(&mut self, policy_id: PolicyId) {
         if let Some(policy) = self.policies.remove(&policy_id) {
-            // Remove from active-policy map if it's still the current one.
-            self.insured_active_policies
-                .retain(|_, &mut pid| pid != policy_id);
+            self.insured_active_policies.retain(|_, &mut pid| pid != policy_id);
             drop(policy); // silence dead-code warning on fields
         }
     }
@@ -259,95 +235,102 @@ mod tests {
             .collect()
     }
 
+    /// Helper: create an accepted + activated policy. Returns the PolicyId.
     fn bind_policy(market: &mut Market, submission_id: u64, insured_id: u64) -> PolicyId {
         let sid = SubmissionId(submission_id);
         let iid = InsuredId(insured_id);
         let insurer_id = InsurerId(1);
-        market.pending.insert(sid, PendingSubmission { insured_id: iid, risk: small_risk() });
-        let events =
-            market.on_quote_issued(Day(0), sid, insurer_id, 100_000, Year(1));
-        events
+        let events = market.on_quote_accepted(
+            Day(0),
+            sid,
+            iid,
+            insurer_id,
+            100_000,
+            small_risk(),
+            Year(1),
+        );
+        let policy_id = events
             .iter()
             .find_map(|(_, e)| match e {
                 Event::PolicyBound { policy_id, .. } => Some(*policy_id),
                 _ => None,
             })
-            .expect("expected PolicyBound")
+            .expect("expected PolicyBound");
+        market.on_policy_bound(policy_id);
+        policy_id
     }
 
-    // ── on_submission_arrived ─────────────────────────────────────────────────
+    // ── on_quote_accepted ─────────────────────────────────────────────────────
 
     #[test]
-    fn on_submission_arrived_returns_quote_requested() {
+    fn on_quote_accepted_creates_policy_record() {
         let mut market = Market::new();
-        let insurers = vec![InsurerId(1), InsurerId(2)];
-        let events = market.on_submission_arrived(
+        let events = market.on_quote_accepted(
             Day(0),
             SubmissionId(1),
             InsuredId(1),
+            InsurerId(1),
+            50_000,
             small_risk(),
-            &insurers,
+            Year(1),
         );
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0].1, Event::QuoteRequested { insurer_id: InsurerId(1), .. }));
+        let policy_id = events.iter().find_map(|(_, e)| match e {
+            Event::PolicyBound { policy_id, .. } => Some(*policy_id),
+            _ => None,
+        });
+        assert!(policy_id.is_some(), "PolicyBound must be scheduled");
+        // Policy should be in pending (not yet active).
+        let pid = policy_id.unwrap();
+        assert!(market.pending_policies.contains_key(&pid));
+        assert!(!market.policies.contains_key(&pid));
     }
 
     #[test]
-    fn round_robin_distributes_across_insurers() {
+    fn on_quote_accepted_accumulates_ytd_premiums() {
         let mut market = Market::new();
-        let insurers = vec![InsurerId(1), InsurerId(2), InsurerId(3)];
-        let mut assigned = vec![];
-        for i in 0..6 {
-            let events = market.on_submission_arrived(
-                Day(0),
-                SubmissionId(i),
-                InsuredId(i),
-                small_risk(),
-                &insurers,
-            );
-            if let Event::QuoteRequested { insurer_id, .. } = &events[0].1 {
-                assigned.push(insurer_id.0);
-            }
-        }
-        // Should cycle 1,2,3,1,2,3
-        assert_eq!(assigned, vec![1, 2, 3, 1, 2, 3]);
-    }
-
-    #[test]
-    fn on_submission_arrived_empty_insurers_returns_empty() {
-        let mut market = Market::new();
-        let events = market.on_submission_arrived(
+        market.on_quote_accepted(
             Day(0),
             SubmissionId(1),
             InsuredId(1),
+            InsurerId(1),
+            80_000,
             small_risk(),
-            &[],
+            Year(1),
         );
-        assert!(events.is_empty());
-    }
-
-    // ── on_quote_issued ────────────────────────────────────────────────────────
-
-    #[test]
-    fn on_quote_issued_binds_policy_and_schedules_expiry() {
-        let mut market = Market::new();
-        let sid = SubmissionId(1);
-        market.pending.insert(sid, PendingSubmission { insured_id: InsuredId(1), risk: small_risk() });
-        let events = market.on_quote_issued(Day(10), sid, InsurerId(1), 50_000, Year(1));
-
-        let has_bound = events.iter().any(|(_, e)| matches!(e, Event::PolicyBound { .. }));
-        let has_expired = events.iter().any(|(_, e)| matches!(e, Event::PolicyExpired { .. }));
-        assert!(has_bound, "expected PolicyBound");
-        assert!(has_expired, "expected PolicyExpired");
+        assert_eq!(market.ytd_premiums, 80_000);
     }
 
     #[test]
-    fn policy_expires_360_days_after_bind() {
+    fn on_quote_accepted_schedules_policy_bound_plus_one() {
         let mut market = Market::new();
-        let sid = SubmissionId(1);
-        market.pending.insert(sid, PendingSubmission { insured_id: InsuredId(1), risk: small_risk() });
-        let events = market.on_quote_issued(Day(10), sid, InsurerId(1), 50_000, Year(1));
+        let events = market.on_quote_accepted(
+            Day(10),
+            SubmissionId(1),
+            InsuredId(1),
+            InsurerId(1),
+            50_000,
+            small_risk(),
+            Year(1),
+        );
+        let bind_day = events
+            .iter()
+            .find_map(|(d, e)| if matches!(e, Event::PolicyBound { .. }) { Some(*d) } else { None })
+            .unwrap();
+        assert_eq!(bind_day, Day(11), "PolicyBound must fire at QuoteAccepted.day + 1");
+    }
 
+    #[test]
+    fn policy_expires_360_days_after_policy_bound() {
+        let mut market = Market::new();
+        let events = market.on_quote_accepted(
+            Day(10),
+            SubmissionId(1),
+            InsuredId(1),
+            InsurerId(1),
+            50_000,
+            small_risk(),
+            Year(1),
+        );
         let bind_day = events
             .iter()
             .find_map(|(d, e)| if matches!(e, Event::PolicyBound { .. }) { Some(*d) } else { None })
@@ -356,18 +339,43 @@ mod tests {
             .iter()
             .find_map(|(d, e)| if matches!(e, Event::PolicyExpired { .. }) { Some(*d) } else { None })
             .unwrap();
-        assert_eq!(expire_day.0, bind_day.0 + 360, "expiry must be 360 days after bind");
+        assert_eq!(
+            expire_day.0,
+            bind_day.0 + 360,
+            "expiry must be 360 days after PolicyBound"
+        );
     }
 
+    // ── on_policy_bound ───────────────────────────────────────────────────────
+
     #[test]
-    fn on_quote_issued_accumulates_ytd_premiums() {
+    fn on_policy_bound_registers_active_policy() {
         let mut market = Market::new();
-        market.pending.insert(
+        let events = market.on_quote_accepted(
+            Day(0),
             SubmissionId(1),
-            PendingSubmission { insured_id: InsuredId(1), risk: small_risk() },
+            InsuredId(1),
+            InsurerId(1),
+            50_000,
+            small_risk(),
+            Year(1),
         );
-        market.on_quote_issued(Day(0), SubmissionId(1), InsurerId(1), 80_000, Year(1));
-        assert_eq!(market.ytd_premiums, 80_000);
+        let policy_id = events.iter().find_map(|(_, e)| match e {
+            Event::PolicyBound { policy_id, .. } => Some(*policy_id),
+            _ => None,
+        }).unwrap();
+
+        // Before on_policy_bound: not in active policies.
+        assert!(!market.policies.contains_key(&policy_id));
+        assert!(!market.insured_active_policies.contains_key(&InsuredId(1)));
+
+        market.on_policy_bound(policy_id);
+
+        // After on_policy_bound: active.
+        assert!(market.policies.contains_key(&policy_id));
+        assert_eq!(market.insured_active_policies[&InsuredId(1)], policy_id);
+        // No longer pending.
+        assert!(!market.pending_policies.contains_key(&policy_id));
     }
 
     // ── on_policy_expired ─────────────────────────────────────────────────────
@@ -401,18 +409,41 @@ mod tests {
         bind_policy(&mut market, 1, 1);
         bind_policy(&mut market, 2, 2);
 
-        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, &full_damage_models(), &mut rng());
-        assert_eq!(events.len(), 2, "one InsuredLoss per matching policy");
+        let events =
+            market.on_loss_event(Day(100), Peril::WindstormAtlantic, &full_damage_models(), &mut rng());
+        assert_eq!(events.len(), 2, "one InsuredLoss per matching active policy");
         for (_, e) in &events {
             assert!(matches!(e, Event::InsuredLoss { peril: Peril::WindstormAtlantic, .. }));
         }
     }
 
     #[test]
+    fn on_loss_event_only_hits_active_policies() {
+        let mut market = Market::new();
+        // Create a policy via on_quote_accepted but do NOT call on_policy_bound.
+        market.on_quote_accepted(
+            Day(0),
+            SubmissionId(1),
+            InsuredId(1),
+            InsurerId(1),
+            50_000,
+            small_risk(),
+            Year(1),
+        );
+        // Policy is pending, not active — should not appear in loss events.
+        let events = market.on_loss_event(
+            Day(100),
+            Peril::WindstormAtlantic,
+            &full_damage_models(),
+            &mut rng(),
+        );
+        assert!(events.is_empty(), "pending (unbound) policy must not be loss-eligible");
+    }
+
+    #[test]
     fn on_loss_event_skips_non_matching_peril() {
         let mut market = Market::new();
         bind_policy(&mut market, 1, 1);
-        // Attritional is in perils_covered but no damage model for it here.
         let models: HashMap<Peril, DamageFractionModel> = HashMap::new();
         let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, &models, &mut rng());
         assert!(events.is_empty(), "no events when damage model is missing");
@@ -451,7 +482,6 @@ mod tests {
         let pid = bind_policy(&mut market, 1, 1);
         market.on_insured_loss(Day(10), pid, 50_000, Peril::Attritional);
         market.on_insured_loss(Day(20), pid, 30_000, Peril::Attritional);
-        // Total is capped by remaining_asset_value after first hit, but both ≤ sum_insured.
         assert!(market.ytd_claims > 0);
     }
 
@@ -463,21 +493,21 @@ mod tests {
         let e1 = market.on_insured_loss(Day(10), pid, half, Peril::WindstormAtlantic);
         let e2 = market.on_insured_loss(Day(20), pid, half, Peril::WindstormAtlantic);
 
-        let total: u64 = e1.iter().chain(e2.iter()).filter_map(|(_, e)| {
-            if let Event::ClaimSettled { amount, .. } = e { Some(*amount) } else { None }
-        }).sum();
+        let total: u64 = e1
+            .iter()
+            .chain(e2.iter())
+            .filter_map(|(_, e)| {
+                if let Event::ClaimSettled { amount, .. } = e { Some(*amount) } else { None }
+            })
+            .sum();
 
-        assert_eq!(
-            total, SMALL_ASSET_VALUE,
-            "aggregate annual GUL must not exceed sum_insured"
-        );
+        assert_eq!(total, SMALL_ASSET_VALUE, "aggregate annual GUL must not exceed sum_insured");
     }
 
     #[test]
     fn on_insured_loss_unknown_policy_produces_no_event() {
         let mut market = Market::new();
-        let events =
-            market.on_insured_loss(Day(0), PolicyId(999), 100_000, Peril::Attritional);
+        let events = market.on_insured_loss(Day(0), PolicyId(999), 100_000, Peril::Attritional);
         assert!(events.is_empty(), "unknown policy_id must produce no events");
     }
 
@@ -489,10 +519,7 @@ mod tests {
         let pid = bind_policy(&mut market, 1, 1); // adds 100_000 to ytd_premiums
         market.on_insured_loss(Day(10), pid, 50_000, Peril::Attritional);
         let lr = market.loss_ratio();
-        assert!(
-            (lr - 0.5).abs() < 1e-6,
-            "loss_ratio={lr:.4}, expected 0.5"
-        );
+        assert!((lr - 0.5).abs() < 1e-6, "loss_ratio={lr:.4}, expected 0.5");
     }
 
     #[test]
@@ -504,5 +531,15 @@ mod tests {
         assert_eq!(market.ytd_premiums, 0);
         assert_eq!(market.ytd_claims, 0);
         assert_eq!(market.loss_ratio(), 0.0);
+    }
+
+    // ── on_quote_rejected ─────────────────────────────────────────────────────
+
+    #[test]
+    fn on_quote_rejected_is_noop() {
+        let mut market = Market::new();
+        market.on_quote_rejected(SubmissionId(99)); // must not panic
+        assert_eq!(market.ytd_premiums, 0);
+        assert!(market.policies.is_empty());
     }
 }

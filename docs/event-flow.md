@@ -8,88 +8,58 @@ flowchart TD
     %% ── Year lifecycle ──────────────────────────────────────────────────────
 
     SS["**SimulationStart**\n{year_start}"]
+    YS["**YearStart**\n{year}"]
     YE["**YearEnd**\n{year}"]
-    LE["**LossEvent**\n{event_id, region, peril}"]
-    SS_NEXT["**SimulationStart**\n{year_start: N+1}"]
+    LE["**LossEvent**\n{event_id, peril}"]
 
-    SS -->|"Broker.generate_submissions()\n→ spread over first 180 days"| SA
-    SS -->|"perils::schedule_loss_events\nPoisson(λ) per PerilConfig\n(cat perils only)"| LE
-    SS -->|"schedule day 365"| YE
+    SS -->|"schedule YearStart(year_start)"| YS
+    YS -->|"per insured, spread 0–179 days"| CR
+    YS -->|"perils::schedule_loss_events\nPoisson(λ) — cat only"| LE
+    YS -->|"schedule day year*360−1"| YE
+    YE -->|"schedule YearStart(year+1)\nif year < config.years"| YS
 
-    %% ── Quoting round ───────────────────────────────────────────────────────
-
-    subgraph Broker
-        SA["**SubmissionArrived**\n{submission_id, broker_id, insured_id, risk}"]
-    end
-
-    subgraph Market["Market (Coordinator)\nregister_insured → insured_exposure_index\ninsured_active_policies: insured → active PolicyId"]
-        QR_L["**QuoteRequested**\n{is_lead: true}\n+2 days"]
-        QR_F["**QuoteRequested**\n{is_lead: false}\n+3 days"]
-        PB["**PolicyBound**\n{submission_id, panel}\n+5 days"]
-        ABANDON_EVENT["**SubmissionAbandoned**\n{submission_id}\n(log only)"]
-        LE_D["on_loss_event\nfirst pass: bound policies → InsuredLoss(Some)\nsecond pass: insured_exposure_index → InsuredLoss(None)\nsamples damage_fraction × sum_insured"]
-        IL_D["on_insured_loss\npolicy_id=Some → direct lookup\npolicy_id=None → insured_active_policies\napplies policy terms\ngross = min(ground_up, limit)\nnet = gross − attachment"]
-        STATS["compute_year_stats\n→ industry_loss_ratio\n→ YTD reset\n→ expire year policies"]
-    end
-
-    subgraph Syndicate["Syndicate  (ATP pricing)"]
-        QI_L["**QuoteIssued**\n{is_lead: true, premium=ATP, desired_line_bps}\ndesired_line_bps = desired_lead_line_bps (tier-default)"]
-        QD_L["**QuoteDeclined**\n{submission_id, syndicate_id}"]
-        QI_F["**QuoteIssued**\n{is_lead: false, premium=own_ATP, desired_line_bps}\nDeclines if lead_premium < own_ATP × min_rate_ratio\ndesired_line_bps = desired_follow_line_bps (tier-default)"]
-        QD_F["**QuoteDeclined**\n{submission_id, syndicate_id}"]
-        CS_S["on_claim_settled\ncapital −= amount\n→ true if capital < solvency floor"]
-        YE_S["on_year_end\nEWMA ← realised loss ratio\n(per line of business)"]
-    end
+    %% ── Coverage request chain ──────────────────────────────────────────────
 
     subgraph Insured["Insured"]
+        CR["**CoverageRequested**\n{insured_id, risk}"]
+        QP["**QuotePresented**\n{submission_id, insured_id, insurer_id, premium}"]
+        QA["**QuoteAccepted**\n{submission_id, insured_id, insurer_id, premium}\n(same day as QuotePresented)"]
         INS_H["on_insured_loss\naccumulate total_ground_up_loss_by_year"]
     end
 
-    SA --> QR_L
-    QR_L --> QI_L
-    QR_L --> QD_L
-    QI_L -->|"record lead premium\ninvite all other syndicates"| QR_F
-    QD_L -->|"lead declined → emit SubmissionAbandoned\n(no followers invited)"| ABANDON_EVENT
-    QR_F --> QI_F
-    QR_F --> QD_F
-    QI_F -->|"all followers responded"| PB
-    QD_F -->|"all followers responded"| PB
+    subgraph Broker["Broker\n(round-robin insurer selection)"]
+        LQR["**LeadQuoteRequested**\n{submission_id, insured_id, insurer_id, risk}\n+1 day from CoverageRequested"]
+        LQP["**QuotePresented** scheduled\n+1 day from LeadQuoteIssued"]
+    end
 
-    PB_NOTE["**assemble_panel logic**\ntotal_desired = Σ desired_line_bps\ntotal < 7_500 bps (75%) → SubmissionAbandoned\nsigned_bps[i] = desired[i] × 10_000 / total_desired\n(last entry absorbs rounding remainder)\npremium = lead_premium × signed_bps / 10_000\n(all entries at lead slip price, not own ATP)"]
-    PB_NOTE -.-> PB
+    subgraph Insurer["Insurer\n(ATP pricing)"]
+        LQI["**LeadQuoteIssued**\n{submission_id, insured_id, insurer_id, premium}\n(same day as LeadQuoteRequested)"]
+        CS_I["on_claim_settled\ncapital −= amount"]
+    end
 
-    %% ── Loss cascade ────────────────────────────────────────────────────────
+    subgraph Market["Market (Coordinator)"]
+        PB["**PolicyBound**\n{policy_id, submission_id, insured_id,\n insurer_id, premium}\n+1 day from QuoteAccepted"]
+        PE["**PolicyExpired**\n{policy_id}\n+361 days from QuoteAccepted"]
+        IL["**InsuredLoss**\n{policy_id, insured_id, peril, ground_up_loss}"]
+        CS["**ClaimSettled**\n{policy_id, insurer_id, amount, peril}"]
+    end
 
-    IL["**InsuredLoss**\n{policy_id: Option, insured_id, peril, ground_up_loss}"]
-    CS["**ClaimSettled**\n{policy_id, syndicate_id, amount}"]
-    ATTR["perils::schedule_attritional_claims_for_insured\nPoisson(λ/territory) per-insured asset\nsamples damage_fraction × sum_insured\nspread across year\npolicy_id: None"]
+    CR -->|"+1 day"| LQR
+    LQR -->|"same day"| LQI
+    LQI -->|"+1 day via Broker"| QP
+    QP -->|"same day"| QA
+    QA -->|"+1 day"| PB
+    QA -->|"+361 days"| PE
 
-    LE --> LE_D
-    LE_D -->|"one InsuredLoss(Some) per matching policy\n(first pass: insured policies)"| IL
-    LE_D -->|"one InsuredLoss(None) per exposed-but-uninsured insured\n(second pass: insured_exposure_index)"| IL
+    PB -->|"on_policy_bound\nactivates policy for loss routing\nschedules attritional InsuredLoss"| IL
+    PE -->|"on_policy_expired\nremoves policy"| PE
+
+    %% ── Loss cascade ─────────────────────────────────────────────────────────
+
+    LE -->|"on_loss_event\nsamples damage_fraction × sum_insured\nper active policy"| IL
     IL --> INS_H
-    IL --> IL_D
-    IL_D -->|"policy_id=Some → direct policy lookup\npolicy_id=None → insured_active_policies lookup"| IL_D
-    IL_D -->|"one ClaimSettled\nper panel entry\n(net > 0 and policy found only)"| CS
-    SS -->|"schedule_attritional_claims_for_insured\nper insured asset (all years, no market guard)"| ATTR
-    ATTR -->|"one InsuredLoss(None)\nper occurrence"| IL
-    CS --> CS_S
-    CS -->|"accumulate ytd_claims_by_line"| STATS
-
-    PB -->|"accumulate ytd_premiums_by_line"| STATS
-
-    %% ── Year end ────────────────────────────────────────────────────────────
-
-    YE --> STATS
-    STATS -->|"publish current_industry_benchmark\nfor next year's ATP"| YE_S
-    YE -->|"schedule SimulationStart(N+1)"| SS_NEXT
-
-    %% ── Entry / insolvency ──────────────────────────────────────────────────
-
-    SE(["**SyndicateEntered**\n{syndicate_id}\n(handler: no-op)"])
-    SI["**SyndicateInsolvency**\n{syndicate_id}\nsets syndicate.is_active = false"]
-
-    CS -->|"capital < solvency floor\n(20% of initial_capital)"| SI
+    IL -->|"on_insured_loss\napplies full coverage\ncapped at remaining_asset_value"| CS
+    CS --> CS_I
 ```
 
 ## Legend
@@ -102,53 +72,58 @@ flowchart TD
 
 ## Event index
 
-| # | Event | Producer | Consumer |
-|---|-------|----------|----------|
-| 1 | `SimulationStart` | `handle_year_end` / external seed | `Simulation::handle_simulation_start` |
-| 2 | `YearEnd` | `handle_simulation_start` | `Simulation::dispatch` → `Market::compute_year_stats`, `Syndicate::on_year_end`, `Broker::on_year_end`, `Market::expire_policies` |
-| 3 | `SubmissionArrived` {submission_id, broker_id, insured_id, risk} | `Broker::generate_submissions` | `Market::on_submission_arrived` |
-| 4 | `QuoteRequested` | `Market::on_submission_arrived` (+2 days), `Market::on_lead_quote_issued` (+3 days) | `Syndicate::on_quote_requested` |
-| 5 | `QuoteIssued` {submission_id, syndicate_id, **premium** (own ATP, informational for followers), **desired_line_bps**, is_lead} | `Syndicate::on_quote_requested` | Lead: `Market::on_lead_quote_issued` (sets `lead_premium`, records `desired_line_bps`); Follower: `Market::on_follower_quote_issued` (records `desired_line_bps`; `premium` discarded — settlement uses `lead_premium`) |
-| 6 | `QuoteDeclined` | `Syndicate::on_quote_requested` | `Market::on_quote_declined` |
-| 7 | `SubmissionAbandoned` | `Market::on_quote_declined` (when lead declines); `Market::assemble_panel` (when total desired < 7_500 bps) | none (log only) |
-| 8 | `PolicyBound` | `Market::assemble_panel` (+5 days from last follower response) | `Market::on_policy_bound` (registers policy, YTD premium, populates `insured_active_policies`) |
-| 9 | `LossEvent` | `handle_simulation_start` via `perils::schedule_loss_events` (Poisson frequency, **cat perils only**; no severity field) | `Market::on_loss_event` → first pass: `InsuredLoss(Some)` per bound policy; second pass: `InsuredLoss(None)` per exposed-but-uninsured insured via `insured_exposure_index` |
-| 10 | `InsuredLoss` {policy_id: **Option**, insured_id, peril, ground_up_loss} | `Market::on_loss_event` (cat, both paths) or `perils::schedule_attritional_claims_for_insured` (Attritional, per-insured at SimulationStart, always `policy_id: None`) | `Insured::on_insured_loss` (accumulate stats) + `Market::on_insured_loss` → if policy_id=None resolves via `insured_active_policies`; applies policy terms → emits `ClaimSettled` (or nothing if uninsured) |
-| 11 | `ClaimSettled` | `Market::on_insured_loss` | `Syndicate::on_claim_settled` + `Market::on_claim_settled` (YTD) |
-| 12 | `SyndicateEntered` | — | no-op |
-| 13 | `SyndicateInsolvency` | `Syndicate::on_claim_settled` (when capital < solvency floor) | `Simulation::dispatch` → sets `syndicate.is_active = false` |
+| # | Event | Producer | Consumer | Day offset |
+|---|-------|----------|----------|------------|
+| 1 | `SimulationStart { year_start }` | bootstrap (`main`) | `Simulation::dispatch` → schedule `YearStart` | Day 0 |
+| 2 | `YearStart { year }` | `SimulationStart` handler / `YearEnd` handler | `Simulation::handle_year_start`: endow capital, schedule `CoverageRequested` per insured, schedule cat, schedule `YearEnd` | `(year-1) × 360` |
+| 3 | `YearEnd { year }` | `YearStart` handler | `Simulation::handle_year_end`: log stats, reset YTD, schedule next `YearStart` | `year × 360 − 1` |
+| 4 | `CoverageRequested { insured_id, risk }` | `YearStart` handler | `Broker::on_coverage_requested` → emit `LeadQuoteRequested` | spread days 0–179 of year |
+| 5 | `LeadQuoteRequested { submission_id, insured_id, insurer_id, risk }` | `Broker` | `Insurer::on_lead_quote_requested` → emit `LeadQuoteIssued` | +1 from `CoverageRequested` |
+| 6 | `LeadQuoteIssued { submission_id, insured_id, insurer_id, premium }` | `Insurer` | `Broker::on_lead_quote_issued` → emit `QuotePresented` | same day as `LeadQuoteRequested` |
+| 7 | `QuotePresented { submission_id, insured_id, insurer_id, premium }` | `Broker` | `Insured::on_quote_presented` → emit `QuoteAccepted` | +1 from `LeadQuoteIssued` |
+| 8 | `QuoteAccepted { submission_id, insured_id, insurer_id, premium }` | `Insured` | `Market::on_quote_accepted` → create `BoundPolicy` (pending), emit `PolicyBound` + `PolicyExpired` | same day as `QuotePresented` |
+| 9 | `QuoteRejected { submission_id, insured_id }` | `Insured` (not fired in this model) | `Market::on_quote_rejected` (no-op) | same day as `QuotePresented` |
+| 10 | `PolicyBound { policy_id, submission_id, insured_id, insurer_id, premium }` | `Market` | `Market::on_policy_bound` (activate policy) + `perils::schedule_attritional_claims_for_policy` | +1 from `QuoteAccepted` |
+| 11 | `PolicyExpired { policy_id }` | `Market::on_quote_accepted` | `Market::on_policy_expired` (remove policy) | +361 from `QuoteAccepted` (= +360 from `PolicyBound`) |
+| 12 | `LossEvent { event_id, peril }` | `perils::schedule_loss_events` at `YearStart` | `Market::on_loss_event` → emit `InsuredLoss` per active policy | Poisson-scheduled within year |
+| 13 | `InsuredLoss { policy_id, insured_id, peril, ground_up_loss }` | `Market` (cat) / `perils` (attritional) | `Insured::on_insured_loss` (GUL tracking) + `Market::on_insured_loss` → emit `ClaimSettled` | same day as trigger |
+| 14 | `ClaimSettled { policy_id, insurer_id, amount, peril }` | `Market` | `Insurer::on_claim_settled` (capital deduction) | same day as `InsuredLoss` |
 
 ## Day offsets
 
-- `SubmissionArrived` → `QuoteRequested` (lead): **+2 days**
-- Lead `QuoteIssued` → `QuoteRequested` (followers): **+3 days**
-- Last follower response → `PolicyBound`: **+5 days**
-- Total submission-to-bind cycle: **~10 days**
-- `SubmissionArrived` spread: **first 180 days** of each year (~4–5 submissions/day)
-- `LossEvent` → `InsuredLoss` → `ClaimSettled`: **same day** (no offset)
-- Attritional `InsuredLoss`: spread across year days (Poisson per-policy)
-- `SimulationStart` → `YearEnd`: **day 365 of that year**
-- `YearEnd` → next `SimulationStart`: **day 1 of next year**
+- `CoverageRequested` → `LeadQuoteRequested`: **+1 day**
+- `LeadQuoteRequested` → `LeadQuoteIssued`: **same day**
+- `LeadQuoteIssued` → `QuotePresented`: **+1 day**
+- `QuotePresented` → `QuoteAccepted`: **same day**
+- `QuoteAccepted` → `PolicyBound`: **+1 day**
+- Total `CoverageRequested` → `PolicyBound`: **3 days**
+- `QuoteAccepted` → `PolicyExpired`: **+361 days** (= 360 days of coverage from `PolicyBound`)
+- `LossEvent` → `InsuredLoss` → `ClaimSettled`: **same day**
+- Attritional `InsuredLoss`: Poisson-scheduled strictly after `PolicyBound` day, within policy year
 
 ## Damage fraction model
 
-`LossEvent` no longer carries a `severity` field. Instead, when a `LossEvent` fires,
-`Market::on_loss_event` samples a **damage fraction** from `DamageFractionModel` for
-each matching policy:
+`LossEvent` carries no severity field. When a `LossEvent` fires, `Market::on_loss_event`
+samples a **damage fraction** from `DamageFractionModel` for each active (bound) policy:
 
 ```
 ground_up_loss = damage_fraction × sum_insured   (naturally ≤ sum_insured)
 ```
 
 The damage fraction is drawn from per-peril `DamageFractionModel` distributions
-(LogNormal or Pareto, clipped to [0.0, 1.0]). Policy terms are applied in
-`Market::on_insured_loss`:
+(LogNormal for attritional, Pareto for cat), clipped to [0.0, 1.0]. Full coverage is applied
+in `Market::on_insured_loss`:
 
 ```
-gross = min(ground_up_loss, limit)
-net   = gross − attachment
-→ ClaimSettled per panel entry  (if net > 0)
+effective_gul = min(ground_up_loss, remaining_asset_value[policy, year])
+→ ClaimSettled(amount = effective_gul)
 ```
 
-Attritional claims follow the same path: `schedule_attritional_claims_for_policy`
-emits `InsuredLoss` events (not `ClaimSettled` directly).
+Aggregate annual GUL per (policy, year) is capped at `sum_insured`.
+
+## Policy activation invariant
+
+A policy is **only loss-eligible after `PolicyBound` fires**:
+
+1. `QuoteAccepted` → `Market::on_quote_accepted`: creates `BoundPolicy` in `pending_policies`; updates `ytd_premiums`; schedules `PolicyBound` and `PolicyExpired`.
+2. `PolicyBound` → `Market::on_policy_bound`: moves policy from `pending_policies` to `policies`; registers in `insured_active_policies`. Only after this call does `on_loss_event` see the policy.
