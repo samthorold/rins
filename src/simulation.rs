@@ -9,7 +9,7 @@ const QUOTING_CHAIN_DAYS: u64 = 3;
 
 use crate::broker::Broker;
 use crate::config::SimulationConfig;
-use crate::events::{Event, Peril, Risk, SimEvent};
+use crate::events::{Event, EventLog, Peril, Risk, SimEvent};
 use crate::insured::{AssetType, Insured};
 use crate::insurer::Insurer;
 use crate::market::Market;
@@ -20,7 +20,7 @@ pub struct Simulation {
     queue: BinaryHeap<Reverse<SimEvent>>,
     /// Completed events in dispatch order. `log[i]` has implicit sequence number `i`.
     /// See `docs/event-sourcing.md §5` for the incremental-replay pattern.
-    pub log: Vec<SimEvent>,
+    pub log: EventLog,
     rng: ChaCha20Rng,
     max_day: Option<Day>,
     max_events: Option<usize>,
@@ -83,7 +83,7 @@ impl Simulation {
 
         Simulation {
             queue: BinaryHeap::new(),
-            log: Vec::new(),
+            log: EventLog::new(),
             rng: ChaCha20Rng::seed_from_u64(config.seed),
             max_day: Some(max_day),
             max_events: None,

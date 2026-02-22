@@ -110,6 +110,57 @@ impl PartialOrd for SimEvent {
     }
 }
 
+/// Append-only log of dispatched events.  `log[i]` has implicit sequence
+/// number `i` (see `docs/event-sourcing.md §1`).
+///
+/// Mutation is restricted to `push`.  Use `from_history` to seed the log
+/// from a pre-built slice (testing and checkpointing only).
+#[derive(Debug, PartialEq)]
+pub struct EventLog(Vec<SimEvent>);
+
+impl EventLog {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Seed from an existing event list.  Intended for tests and
+    /// future checkpoint replay — not for production simulation paths.
+    pub fn from_history(events: Vec<SimEvent>) -> Self {
+        Self(events)
+    }
+
+    pub fn push(&mut self, ev: SimEvent) {
+        self.0.push(ev);
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &SimEvent> {
+        self.0.iter()
+    }
+}
+
+impl std::ops::Deref for EventLog {
+    type Target = [SimEvent];
+    fn deref(&self) -> &[SimEvent] {
+        &self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a EventLog {
+    type Item = &'a SimEvent;
+    type IntoIter = std::slice::Iter<'a, SimEvent>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{BufWriter, Write};

@@ -6,7 +6,7 @@ This document is the authoritative reference for how event sourcing is applied i
 
 ## §1 The Log as Ground Truth
 
-`Simulation.log: Vec<SimEvent>` is append-only and immutable during dispatch. Once an event is pushed to the log it is never modified or removed. The log is the single source of truth for what happened; all agent state is derived from it.
+`Simulation.log: EventLog` is append-only and immutable during dispatch. `EventLog` enforces this at the type level — it exposes only `push`, `iter`, `len`, and `Deref` to `[SimEvent]`; removal and mutation methods are not available. Once an event is pushed to the log it is never modified or removed. The log is the single source of truth for what happened; all agent state is derived from it.
 
 **What belongs in the log:** domain facts that change market state — things another agent or analyst would need to reconstruct the market's history.
 
