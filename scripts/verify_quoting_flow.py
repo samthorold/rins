@@ -3,8 +3,8 @@
 verify_quoting_flow.py — event-stream verifier for quoting flow coherence.
 
 Invariant: every LeadQuoteRequested for (submission_id, insurer_id) must have
-exactly one response (LeadQuoteIssued or QuoteRejected). No responses without a
-prior request.
+exactly one response (LeadQuoteIssued, LeadQuoteDeclined, or QuoteRejected).
+No responses without a prior request.
 
 Run from the project root after `cargo run`:
     python3 scripts/verify_quoting_flow.py
@@ -25,7 +25,7 @@ for e in events:
     if k == "LeadQuoteRequested":
         key = (v["submission_id"], v["insurer_id"])
         requested[key] = day
-    elif k in ("LeadQuoteIssued", "QuoteRejected"):
+    elif k in ("LeadQuoteIssued", "LeadQuoteDeclined", "QuoteRejected"):
         key = (v["submission_id"], v["insurer_id"])
         responses[key].append(k)
 
@@ -69,4 +69,4 @@ if failures:
         print(f"  ... and {len(failures) - 50} more")
     sys.exit(1)
 else:
-    print("\nPASS — every LeadQuoteRequested has exactly one response; no orphan responses.")
+    print("\nPASS — every LeadQuoteRequested has exactly one response (Issued/Declined/Rejected); no orphan responses.")
