@@ -43,7 +43,12 @@ pub struct CatConfig {
 
 pub struct SimulationConfig {
     pub seed: u64,
+    /// Number of analysis years. The simulation runs `warmup_years + years` in total;
+    /// only the analysis years are reported by `analyse_sim.py`.
     pub years: u32,
+    /// Warm-up years prepended before the analysis period. Used to let the EWMA
+    /// stabilise past the staggered year-1 partial-exposure artefact. Not reported.
+    pub warmup_years: u32,
     pub insurers: Vec<InsurerConfig>,
     /// Number of insureds. Asset value: 50M USD each.
     pub n_insureds: usize,
@@ -59,6 +64,7 @@ impl SimulationConfig {
         SimulationConfig {
             seed: 42,
             years: 20,
+            warmup_years: 2,
             // 5 insurers, each endowed with 1B USD capital each year.
             insurers: (1..=5)
                 .map(|i| InsurerConfig {

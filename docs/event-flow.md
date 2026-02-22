@@ -7,7 +7,7 @@ Time advances by pulling the lowest-timestamp event from a min-heap priority que
 flowchart TD
     %% ── Year lifecycle ──────────────────────────────────────────────────────
 
-    SS["**SimulationStart**\n{year_start}"]
+    SS["**SimulationStart**\n{year_start, warmup_years, analysis_years}"]
     YS["**YearStart**\n{year}"]
     YE["**YearEnd**\n{year}"]
     LE["**LossEvent**\n{event_id, peril}"]
@@ -80,7 +80,7 @@ flowchart TD
 
 | # | Event | Producer | Consumer | Day offset | market-mechanics.md |
 |---|-------|----------|----------|------------|---------------------|
-| 1 | `SimulationStart { year_start }` | bootstrap (`main`) | `Simulation::dispatch` → schedule `YearStart` | Day 0 | — |
+| 1 | `SimulationStart { year_start, warmup_years, analysis_years }` | `Simulation::start()` | `Simulation::dispatch` → schedule `YearStart`; metadata read by analysis scripts to skip warm-up years | Day 0 | — |
 | 2 | `YearStart { year }` | `SimulationStart` handler / `YearEnd` handler | `Simulation::handle_year_start`: endow capital, schedule `CoverageRequested` per insured, schedule cat, schedule `YearEnd` | `(year-1) × 360` | §7 Capital & Solvency |
 | 3 | `YearEnd { year }` | `YearStart` handler | `Simulation::handle_year_end`: call `Insurer::on_year_end` (EWMA update + YTD reset), schedule next `YearStart` | `year × 360 − 1` | §4.1 Actuarial channel, §8.2 Coordinator Statistics |
 | 4 | `CoverageRequested { insured_id, risk }` | `YearStart` handler | `Broker::on_coverage_requested` → emit `LeadQuoteRequested` | spread days 0–179 of year | §5 Placement |

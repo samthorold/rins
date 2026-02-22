@@ -22,7 +22,9 @@ pub struct Risk {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Event {
     /// Fires once at Day(0) to bootstrap the simulation. Schedules YearStart(year_start).
-    SimulationStart { year_start: Year },
+    /// `warmup_years` warm-up years are prepended before the `analysis_years` analysis period;
+    /// analysis scripts skip years ≤ warmup_years when generating output tables.
+    SimulationStart { year_start: Year, warmup_years: u32, analysis_years: u32 },
     /// Fires at the start of each simulated year.
     YearStart { year: Year },
     /// Fires at the end of each simulated year.
@@ -196,10 +198,10 @@ mod tests {
     fn simulation_start_json_shape() {
         let ev = SimEvent {
             day: Day(0),
-            event: Event::SimulationStart { year_start: Year(1) },
+            event: Event::SimulationStart { year_start: Year(1), warmup_years: 0, analysis_years: 1 },
         };
         let json = serde_json::to_string(&ev).unwrap();
-        assert_eq!(json, r#"{"day":0,"event":{"SimulationStart":{"year_start":1}}}"#);
+        assert_eq!(json, r#"{"day":0,"event":{"SimulationStart":{"year_start":1,"warmup_years":0,"analysis_years":1}}}"#);
     }
 
     #[test]
@@ -228,7 +230,7 @@ mod tests {
         let events = vec![
             SimEvent {
                 day: Day(0),
-                event: Event::SimulationStart { year_start: Year(1) },
+                event: Event::SimulationStart { year_start: Year(1), warmup_years: 0, analysis_years: 1 },
             },
             SimEvent {
                 day: Day(359),

@@ -51,6 +51,7 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
     let config = SimulationConfig {
         seed,
         years,
+        warmup_years: 0,
         insurers: (1..=scenario.insurer_count as u64)
             .map(|i| InsurerConfig {
                 id: InsurerId(i),
@@ -68,6 +69,6 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
         catastrophe: CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5 },
     };
     let mut sim = Simulation::from_config(config);
-    sim.schedule(Day(0), Event::SimulationStart { year_start: Year(1) });
+    sim.start();
     sim
 }

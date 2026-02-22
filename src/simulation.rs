@@ -81,7 +81,8 @@ impl Simulation {
             ),
         ]);
 
-        let max_day = Day::year_end(Year(config.years));
+        let total_years = config.warmup_years + config.years;
+        let max_day = Day::year_end(Year(total_years));
 
         Simulation {
             queue: BinaryHeap::new(),
@@ -116,6 +117,20 @@ impl Simulation {
         self.queue.push(Reverse(SimEvent { day, event }));
     }
 
+    /// Bootstrap the simulation: schedule the initial SimulationStart event at Day(0).
+    /// Prefer this over scheduling SimulationStart manually — it embeds warmup/analysis
+    /// metadata from config so analysis scripts can read it from the event stream.
+    pub fn start(&mut self) {
+        self.schedule(
+            Day(0),
+            Event::SimulationStart {
+                year_start: Year(1),
+                warmup_years: self.config.warmup_years,
+                analysis_years: self.config.years,
+            },
+        );
+    }
+
     /// Run the simulation until a stopping condition is met.
     pub fn run(&mut self) {
         let mut count = 0;
@@ -146,7 +161,7 @@ impl Simulation {
 
     fn dispatch(&mut self, day: Day, event: Event) {
         match event {
-            Event::SimulationStart { year_start } => {
+            Event::SimulationStart { year_start, .. } => {
                 self.schedule(Day::year_start(year_start), Event::YearStart { year: year_start });
             }
 
@@ -350,7 +365,8 @@ impl Simulation {
         }
 
         // Schedule next year if within simulation horizon.
-        if year.0 < self.config.years {
+        let total_years = self.config.warmup_years + self.config.years;
+        if year.0 < total_years {
             let next = Year(year.0 + 1);
             self.schedule(Day::year_start(next), Event::YearStart { year: next });
         }
@@ -369,6 +385,7 @@ mod tests {
         SimulationConfig {
             seed: 42,
             years,
+            warmup_years: 0,
             insurers: vec![InsurerConfig {
                 id: InsurerId(1),
                 initial_capital: 100_000_000_000,
@@ -391,7 +408,7 @@ mod tests {
 
     fn run_sim(config: SimulationConfig) -> Simulation {
         let mut sim = Simulation::from_config(config);
-        sim.schedule(Day(0), Event::SimulationStart { year_start: Year(1) });
+        sim.start();
         sim.run();
         sim
     }

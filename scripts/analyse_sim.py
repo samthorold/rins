@@ -14,6 +14,18 @@ def year(day): return day // 360 + 1
 def etype(e): return next(iter(e['event'])) if isinstance(e['event'], dict) else e['event']
 def loss_type(peril): return 'Attritional' if peril == 'Attritional' else 'Cat'
 
+# Read warm-up and analysis period from the SimulationStart event.
+# Warm-up years are excluded from all output tables; they exist only to let the
+# EWMA stabilise past the staggered year-1 partial-exposure artefact.
+warmup_years = 0
+analysis_years = None
+for e in events:
+    if isinstance(e['event'], dict) and 'SimulationStart' in e['event']:
+        ss = e['event']['SimulationStart']
+        warmup_years = ss.get('warmup_years', 0)
+        analysis_years = ss.get('analysis_years')
+        break
+
 # --- event type counts ---
 type_counts = collections.Counter(etype(e) for e in events)
 
@@ -114,9 +126,13 @@ for e in events:
         ct = loss_type(v['peril'])
         claims_split[y][ct] += v['amount']
 
-years = sorted(set(submissions) | set(policies))
+years = sorted(y for y in (set(submissions) | set(policies)) if y > warmup_years)
 all_insurers = sorted({i for yy in premiums.values() for i in yy} |
                       {i for yy in claims.values() for i in yy})
+
+if warmup_years:
+    print(f"=== Warm-up: {warmup_years} year(s) excluded from all output tables ===")
+    print(f"    (analysis period: years {warmup_years+1}–{warmup_years + (analysis_years or '?')})")
 
 print("=== Event type counts ===")
 for t, n in type_counts.most_common(): print(f"  {t}: {n}")

@@ -12,9 +12,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use config::SimulationConfig;
-use events::Event;
 use simulation::Simulation;
-use types::{Day, Year};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -47,7 +45,7 @@ fn main() {
 
     let mut sim = Simulation::from_config(config);
 
-    sim.schedule(Day(0), Event::SimulationStart { year_start: Year(1) });
+    sim.start();
     sim.run();
 
     let file = File::create(&output_path).expect("failed to create output file");
