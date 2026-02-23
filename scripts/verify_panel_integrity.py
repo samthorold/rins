@@ -14,40 +14,32 @@ Invariants:
 Run from the project root after `cargo run`:
     python3 scripts/verify_panel_integrity.py
 """
-import json, sys
+import sys
 from collections import Counter
-from pathlib import Path
+import os; sys.path.insert(0, os.path.dirname(__file__))
+from event_index import build_index
 
-events = [json.loads(l) for l in Path("events.ndjson").read_text().splitlines() if l.strip()]
-
+idx = build_index()
 failures = []
+max_day = idx.max_day
 
-max_day = max(e["day"] for e in events)
+# Build quote_accepted (non-final-day QuoteAccepted submissions)
+quote_accepted = {
+    sid: day
+    for sid, day in idx.sub_accepted_day.items()
+    if day < max_day
+}
 
-# Pass 1: collect LeadQuoteIssued insurer per submission
-quote_insurer = {}   # submission_id -> insurer_id
-for e in events:
-    ev = e["event"]
-    if not isinstance(ev, dict): continue
-    k = next(iter(ev)); v = ev[k]
-    if k == "LeadQuoteIssued":
-        quote_insurer[v["submission_id"]] = v["insurer_id"]
+# Build bound_per_submission, bound_insurer, bound_policy_ids from PolicyBound events
+bound_per_submission = Counter()
+bound_insurer = {}       # submission_id -> insurer_id at bind time
+bound_policy_ids = set()
 
-# Pass 2: collect QuoteAccepted, PolicyBound, PolicyExpired
-quote_accepted = {}              # submission_id -> day (only non-final-day ones)
-bound_per_submission = Counter() # submission_id -> count
-bound_insurer = {}               # submission_id -> insurer_id at bind time
-bound_policy_ids = set()         # all policy_ids seen in PolicyBound
-
-for e in events:
+for e in idx.events:
     ev = e["event"]
     if not isinstance(ev, dict): continue
     k = next(iter(ev)); v = ev[k]; day = e["day"]
-    if k == "QuoteAccepted":
-        # PolicyBound fires day+1; if this is the last day, it won't appear
-        if day < max_day:
-            quote_accepted[v["submission_id"]] = day
-    elif k == "PolicyBound":
+    if k == "PolicyBound":
         sid = v["submission_id"]
         pid = v["policy_id"]
         iid = v["insurer_id"]
@@ -72,7 +64,7 @@ for sid, acc_day in quote_accepted.items():
 
 # Check 2: PolicyBound insurer_id matches LeadQuoteIssued insurer_id
 for sid, bound_iid in bound_insurer.items():
-    quoted_iid = quote_insurer.get(sid)
+    quoted_iid = idx.sub_insurer.get(sid)
     if quoted_iid is None:
         failures.append(f"  FAIL submission_id={sid}: PolicyBound but no LeadQuoteIssued found")
     elif quoted_iid != bound_iid:

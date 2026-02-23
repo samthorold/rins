@@ -14,39 +14,29 @@ Invariants:
 Run from the project root after `cargo run`:
     python3 scripts/verify_insolvency.py
 """
-import json, sys
-from pathlib import Path
+import sys
+import os; sys.path.insert(0, os.path.dirname(__file__))
+from event_index import build_index
 
-events = [json.loads(l) for l in Path("events.ndjson").read_text().splitlines() if l.strip()]
-
-# Build policy_id -> insurer_id from PolicyBound
-policy_insurer = {}
-for e in events:
-    ev = e["event"]
-    if not isinstance(ev, dict): continue
-    k = next(iter(ev)); v = ev[k]
-    if k == "PolicyBound":
-        policy_insurer[v["policy_id"]] = v["insurer_id"]
+idx = build_index()
+policy_insurer = idx.policy_insurer
 
 failures = []
 claim_count = 0
 
-for e in events:
-    ev = e["event"]
-    if not isinstance(ev, dict): continue
-    k = next(iter(ev)); v = ev[k]; day = e["day"]
-    if k != "ClaimSettled": continue
+for d in idx.claim_settled:
     claim_count += 1
-    pid = v["policy_id"]
-    iid = v["insurer_id"]
-    amt = v["amount"]
+    day = d["day"]
+    pid = d["policy_id"]
+    iid = d["insurer_id"]
+    amt = d["amount"]
 
     # Check 1: positive amount
     if amt <= 0:
         failures.append(f"  FAIL day={day} policy={pid}: ClaimSettled amount={amt} is not positive")
 
     # Check 2 & 3: policy known and insurer consistent
-    expected_iid = policy_insurer.get(pid)
+    expected_iid = idx.policy_insurer.get(pid)
     if expected_iid is None:
         failures.append(f"  FAIL day={day}: ClaimSettled references unknown policy_id={pid}")
     elif expected_iid != iid:

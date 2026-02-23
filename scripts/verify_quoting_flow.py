@@ -9,25 +9,13 @@ No responses without a prior request.
 Run from the project root after `cargo run`:
     python3 scripts/verify_quoting_flow.py
 """
-import json, sys
-from collections import defaultdict
-from pathlib import Path
+import sys
+import os; sys.path.insert(0, os.path.dirname(__file__))
+from event_index import build_index
 
-events = [json.loads(l) for l in Path("events.ndjson").read_text().splitlines() if l.strip()]
-
-requested = {}    # (submission_id, insurer_id) -> day
-responses = defaultdict(list)  # (submission_id, insurer_id) -> [event_type, ...]
-
-for e in events:
-    ev = e["event"]
-    if not isinstance(ev, dict): continue
-    k = next(iter(ev)); v = ev[k]; day = e["day"]
-    if k == "LeadQuoteRequested":
-        key = (v["submission_id"], v["insurer_id"])
-        requested[key] = day
-    elif k in ("LeadQuoteIssued", "LeadQuoteDeclined", "QuoteRejected"):
-        key = (v["submission_id"], v["insurer_id"])
-        responses[key].append(k)
+idx = build_index()
+requested = idx.quote_requested
+responses = idx.sub_responses
 
 failures = []
 
@@ -58,8 +46,8 @@ for key, resp_list in sorted(responses.items()):
             f"response ({resp_list[0]}) has no prior LeadQuoteRequested"
         )
 
-print(f"LeadQuoteRequested pairs checked: {len(requested)}")
-print(f"Responses received: {sum(len(r) for r in responses.values())}")
+print(f"LeadQuoteRequested pairs checked: {len(idx.quote_requested)}")
+print(f"Responses received: {sum(len(r) for r in idx.sub_responses.values())}")
 
 if failures:
     print(f"\nFAIL — {len(failures)} violation(s):")

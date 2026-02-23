@@ -17,85 +17,49 @@ Six invariant checks:
 Run from the project root after `cargo run --release`:
     python3 scripts/verify_mechanics.py
 """
-import json, sys
+import sys
 from collections import defaultdict
-from pathlib import Path
+import os; sys.path.insert(0, os.path.dirname(__file__))
+from event_index import build_index
 
-events = [json.loads(l) for l in Path("events.ndjson").read_text().splitlines() if l.strip()]
+idx = build_index()
 
-# ── Single-pass: build all lookup maps ────────────────────────────────────────
+# ── Unpack index fields ────────────────────────────────────────────────────────
 
-submission_sum_insured = {}   # submission_id -> sum_insured
-sub_req_day       = {}        # submission_id -> day of LeadQuoteRequested
-sub_issued_day    = {}        # submission_id -> day of LeadQuoteIssued
-sub_presented_day = {}        # submission_id -> day of QuotePresented
-sub_accepted_day  = {}        # submission_id -> day of QuoteAccepted
-sub_policy_bound  = {}        # submission_id -> (policy_id, day)
+sub_req_day       = idx.sub_request_day
+sub_issued_day    = idx.sub_issued_day
+sub_presented_day = idx.sub_presented_day
+sub_accepted_day  = idx.sub_accepted_day
+policy_bound_day  = idx.policy_bound_day
+policy_expire_day = idx.policy_expiry_day
+policy_sum_insured = idx.policy_sum_insured
+max_day           = idx.max_day
 
-policy_bound_day  = {}        # policy_id -> day
-policy_expire_day = {}        # policy_id -> day
-policy_sub_id     = {}        # policy_id -> submission_id
+# sub_policy_bound: submission_id -> (policy_id, day)
+sub_policy_bound = {
+    sid: (pid, idx.policy_bound_day[pid])
+    for sid, pid in idx.sub_policy.items()
+    if pid in idx.policy_bound_day
+}
 
-insured_loss_list = []                          # [(day, policy_id, peril, gul)]
-insured_losses_by_peril_day = defaultdict(list) # (peril, day) -> [(policy_id, gul)]
-claim_settled_list = []                         # [(day, policy_id)]
-loss_events_per_peril_day = defaultdict(int)    # (peril, day) -> count
+# insured_loss_list: [(day, policy_id, peril, gul)]
+insured_loss_list = [
+    (d["day"], d["policy_id"], d["peril"], d["ground_up_loss"])
+    for d in idx.insured_losses
+]
 
-for e in events:
-    ev = e["event"]
-    if not isinstance(ev, dict):
-        continue
-    k = next(iter(ev))
-    v = ev[k]
-    day = e["day"]
+# insured_losses_by_peril_day: (peril, day) -> [(policy_id, gul)]
+insured_losses_by_peril_day = defaultdict(list)
+for d in idx.insured_losses:
+    insured_losses_by_peril_day[(d["peril"], d["day"])].append((d["policy_id"], d["ground_up_loss"]))
 
-    if k == "LeadQuoteRequested":
-        sid = v["submission_id"]
-        submission_sum_insured[sid] = v["risk"]["sum_insured"]
-        sub_req_day[sid] = day
+# claim_settled_list: [(day, policy_id)]
+claim_settled_list = [(d["day"], d["policy_id"]) for d in idx.claim_settled]
 
-    elif k == "LeadQuoteIssued":
-        sub_issued_day[v["submission_id"]] = day
-
-    elif k == "QuotePresented":
-        sub_presented_day[v["submission_id"]] = day
-
-    elif k == "QuoteAccepted":
-        sub_accepted_day[v["submission_id"]] = day
-
-    elif k == "PolicyBound":
-        pid = v["policy_id"]
-        sid = v["submission_id"]
-        policy_bound_day[pid] = day
-        policy_sub_id[pid] = sid
-        sub_policy_bound[sid] = (pid, day)
-
-    elif k == "PolicyExpired":
-        policy_expire_day[v["policy_id"]] = day
-
-    elif k == "InsuredLoss":
-        pid = v["policy_id"]
-        peril = v["peril"]
-        gul = v["ground_up_loss"]
-        insured_loss_list.append((day, pid, peril, gul))
-        insured_losses_by_peril_day[(peril, day)].append((pid, gul))
-
-    elif k == "ClaimSettled":
-        claim_settled_list.append((day, v["policy_id"]))
-
-    elif k == "LossEvent":
-        peril = v["peril"]
-        loss_events_per_peril_day[(peril, day)] += 1
-
-max_day = max(e["day"] for e in events)
-
-# ── Build policy_sum_insured for cat fraction check ───────────────────────────
-
-policy_sum_insured = {}  # policy_id -> sum_insured
-for pid, sid in policy_sub_id.items():
-    si = submission_sum_insured.get(sid)
-    if si is not None:
-        policy_sum_insured[pid] = si
+# loss_events_per_peril_day: (peril, day) -> count
+loss_events_per_peril_day = defaultdict(int)
+for d in idx.loss_events:
+    loss_events_per_peril_day[(d["peril"], d["day"])] += 1
 
 # ── Collect violations ────────────────────────────────────────────────────────
 

@@ -13,43 +13,29 @@ Three checks:
 Run from the project root after `cargo run`:
     python3 scripts/verify_claims.py
 """
-import json, sys
+import sys
 from collections import defaultdict
-from pathlib import Path
+import os; sys.path.insert(0, os.path.dirname(__file__))
+from event_index import build_index, year
 
-events = [json.loads(l) for l in Path("events.ndjson").read_text().splitlines() if l.strip()]
-
-def year(day): return day // 360 + 1
+idx = build_index()
 
 # ── Build metadata ────────────────────────────────────────────────────────────
 
-# submission_id -> sum_insured (from LeadQuoteRequested which carries the risk)
-submission_sum_insured = {}
-for e in events:
-    ev = e["event"]
-    if not isinstance(ev, dict): continue
-    k = next(iter(ev)); v = ev[k]
-    if k == "LeadQuoteRequested":
-        submission_sum_insured[v["submission_id"]] = v["risk"]["sum_insured"]
-
-# policy_id -> {sum_insured, insurer_id, submission_id} (from PolicyBound)
+# policy_id -> {sum_insured, insurer_id, submission_id, bound_day}
 policies = {}
-for e in events:
-    ev = e["event"]
-    if not isinstance(ev, dict): continue
-    k = next(iter(ev)); v = ev[k]
-    if k == "PolicyBound":
-        sid = v["submission_id"]
-        si = submission_sum_insured.get(sid)
-        if si is None:
-            print(f"WARN: PolicyBound for submission {sid} has no LeadQuoteRequested")
-            continue
-        policies[v["policy_id"]] = {
-            "sum_insured": si,
-            "insurer_id":  v["insurer_id"],
-            "submission_id": sid,
-            "bound_day": e["day"],
-        }
+for pid, iid in idx.policy_insurer.items():
+    sid = idx.policy_sub.get(pid)
+    si = idx.policy_sum_insured.get(pid)
+    if si is None:
+        print(f"WARN: PolicyBound for submission {sid} has no LeadQuoteRequested")
+        continue
+    policies[pid] = {
+        "sum_insured": si,
+        "insurer_id":  iid,
+        "submission_id": sid,
+        "bound_day": idx.policy_bound_day.get(pid),
+    }
 
 print(f"Policies loaded: {len(policies)}")
 
@@ -57,29 +43,21 @@ print(f"Policies loaded: {len(policies)}")
 
 # (day, policy_id) -> list of ground_up_loss values
 insured_loss_index = defaultdict(list)
+for d in idx.insured_losses:
+    insured_loss_index[(d["day"], d["policy_id"])].append(d["ground_up_loss"])
 
 # (policy_id, year) -> total ClaimSettled amount
 claim_totals = defaultdict(int)
 # (day, policy_id) seen in ClaimSettled
 claim_day_pids = set()
 
-insured_loss_count = 0
-claim_count = 0
+for d in idx.claim_settled:
+    pid = d["policy_id"]
+    claim_totals[(pid, year(d["day"]))] += d["amount"]
+    claim_day_pids.add((d["day"], pid))
 
-for e in events:
-    ev = e["event"]
-    if not isinstance(ev, dict): continue
-    k = next(iter(ev)); v = ev[k]; day = e["day"]
-    if k == "InsuredLoss":
-        pid = v["policy_id"]
-        insured_loss_index[(day, pid)].append(v["ground_up_loss"])
-        insured_loss_count += 1
-    elif k == "ClaimSettled":
-        pid = v["policy_id"]
-        y   = year(day)
-        claim_totals[(pid, y)] += v["amount"]
-        claim_day_pids.add((day, pid))
-        claim_count += 1
+insured_loss_count = len(idx.insured_losses)
+claim_count = len(idx.claim_settled)
 
 print(f"InsuredLoss events: {insured_loss_count}")
 print(f"ClaimSettled events: {claim_count}")

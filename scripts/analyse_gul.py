@@ -8,48 +8,34 @@ Policy terms, panel splitting, and claims settlement are deliberately excluded.
 Run from the project root after `cargo run`:
     python3 scripts/analyse_gul.py
 """
-import json, collections, statistics
-from pathlib import Path
+import collections, statistics
+import sys, os; sys.path.insert(0, os.path.dirname(__file__))
+from event_index import build_index, year
 
 # ── Load ──────────────────────────────────────────────────────────────────────
 
-events = [json.loads(l) for l in Path("events.ndjson").read_text().splitlines() if l.strip()]
+idx = build_index()
 
-def year(day): return day // 360 + 1
-def etype(e):  return next(iter(e['event'])) if isinstance(e['event'], dict) else e['event']
 def pence_to_gbp(p): return p / 100
 
 CAT_PERILS = {"WindstormAtlantic"}
 
-# ── Pass 1: build insured metadata from LeadQuoteRequested ───────────────────
-# Each insured submits the same fixed risk each year. We use the first
-# LeadQuoteRequested per insured to capture territory and sum_insured.
-# (SubmissionArrived no longer exists; risk is carried on LeadQuoteRequested.)
+# ── Insured metadata (from index) ─────────────────────────────────────────────
+# Each insured submits the same fixed risk each year. The index captures
+# territory and sum_insured from the first LeadQuoteRequested per insured.
 
-insured_territory = {}   # insured_id (int) -> territory (str)
-insured_si        = {}   # insured_id (int) -> sum_insured (pence)
+insured_territory = idx.insured_territory
+insured_si        = idx.insured_si
 
-for e in events:
-    if etype(e) == "LeadQuoteRequested":
-        d = e['event']['LeadQuoteRequested']
-        iid = d['insured_id']
-        if iid not in insured_territory:
-            risk = d['risk']
-            insured_territory[iid] = risk['territory']
-            insured_si[iid]        = risk['sum_insured']
+# ── Cat-year labels (from index) ──────────────────────────────────────────────
 
-# ── Pass 2: collect cat events (to label cat-years) ───────────────────────────
+cat_events_by_year = collections.defaultdict(list)  # year -> [(peril,)]
+for d in idx.loss_events:
+    cat_events_by_year[year(d["day"])].append((d["peril"],))
 
-cat_events_by_year = collections.defaultdict(list)  # year -> [(peril, region)]
-for e in events:
-    if etype(e) == "LossEvent":
-        d = e['event']['LossEvent']
-        y = year(e['day'])
-        cat_events_by_year[y].append((d['peril'],))
+cat_years = idx.cat_years
 
-cat_years = {y for y, evs in cat_events_by_year.items() if any(p in CAT_PERILS for (p,) in evs)}
-
-# ── Pass 3: collect InsuredLoss events ────────────────────────────────────────
+# ── Collect InsuredLoss events ────────────────────────────────────────────────
 #
 # InsuredLoss.ground_up_loss is the raw physical demand per occurrence.
 # Multiple events in the same year can sum to more than sum_insured (e.g. a
@@ -75,14 +61,11 @@ damage_fractions_by_peril = collections.defaultdict(list)
 
 insured_loss_count = 0
 
-for e in events:
-    if etype(e) != "InsuredLoss":
-        continue
-    d     = e['event']['InsuredLoss']
+for d in idx.insured_losses:
     iid   = d['insured_id']
     peril = d['peril']
     raw   = d['ground_up_loss']
-    y     = year(e['day'])
+    y     = year(d['day'])
     insured_loss_count += 1
 
     si = insured_si.get(iid, 0)

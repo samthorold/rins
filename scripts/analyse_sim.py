@@ -5,31 +5,21 @@ analyse_sim.py — structured year-over-year analysis of rins events.ndjson.
 Run from the project root after `cargo run`:
     python3 scripts/analyse_sim.py
 """
-import json, collections
-from pathlib import Path
+import collections
+import sys, os; sys.path.insert(0, os.path.dirname(__file__))
+from event_index import build_index, year, etype, loss_type
 
 # Capital reconstruction constants (analysis-only; simulation drives actual behaviour).
 # Update these if canonical config changes.
 EXPENSE_RATIO   = 0.344   # canonical; net_premium = gross_premium × (1 − EXPENSE_RATIO)
 INITIAL_CAPITAL = 100_000_000_000   # 1 B USD in cents per insurer (canonical)
 
-events = [json.loads(l) for l in Path("events.ndjson").read_text().splitlines() if l.strip()]
+idx = build_index()
+events = idx.events
 
-def year(day): return day // 360 + 1
-def etype(e): return next(iter(e['event'])) if isinstance(e['event'], dict) else e['event']
-def loss_type(peril): return 'Attritional' if peril == 'Attritional' else 'Cat'
-
-# Read warm-up and analysis period from the SimulationStart event.
-# Warm-up years are excluded from all output tables; they exist only to let the
-# EWMA stabilise past the staggered year-1 partial-exposure artefact.
-warmup_years = 0
-analysis_years = None
-for e in events:
-    if isinstance(e['event'], dict) and 'SimulationStart' in e['event']:
-        ss = e['event']['SimulationStart']
-        warmup_years = ss.get('warmup_years', 0)
-        analysis_years = ss.get('analysis_years')
-        break
+# Warm-up and analysis period from the index (populated from SimulationStart).
+warmup_years  = idx.warmup_years
+analysis_years = idx.analysis_years
 
 # --- event type counts ---
 type_counts = collections.Counter(etype(e) for e in events)
@@ -52,17 +42,9 @@ gul_split     = collections.defaultdict(lambda: collections.defaultdict(int))  #
 claims        = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insurer_id -> sum
 claims_split  = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> type -> amount
 
-# Per-insurer premiums (from QuoteAccepted, linked via submission_id → PolicyBound insurer)
-# submission_id → premium (from QuoteAccepted)
-sub_premium   = {}
-# submission_id → insurer_id (from PolicyBound)
-sub_insurer   = {}
 premiums      = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insurer_id -> sum
 
-# ATP / exposure tracking (two-channel pricing)
-sub_atp              = {}   # submission_id -> atp (from LeadQuoteIssued)
-sub_cat_exposure     = {}   # submission_id -> cat_exposure_at_quote (from LeadQuoteIssued)
-sub_sum_insured      = {}   # submission_id -> sum_insured (from LeadQuoteRequested)
+# ATP / exposure tracking (two-channel pricing) — lookups use idx.sub_* maps
 atp_per_insurer      = collections.defaultdict(lambda: collections.defaultdict(int))
 # year -> insurer_id -> cumulative ATP (sum over bound policies)
 total_exposure       = collections.defaultdict(int)  # year -> total bound sum_insured
@@ -88,16 +70,12 @@ for e in events:
         submissions[y] += 1
     elif k == 'LeadQuoteRequested':
         quote_req[y] += 1
-        sub_sum_insured[v['submission_id']] = v['risk']['sum_insured']
     elif k == 'LeadQuoteIssued':
         quote_iss[y] += 1
-        sub_atp[v['submission_id']] = v['atp']
-        sub_cat_exposure[v['submission_id']] = v.get('cat_exposure_at_quote', 0)
     elif k == 'QuotePresented':
         quote_pres[y] += 1
     elif k == 'QuoteAccepted':
         quote_acc[y] += 1
-        sub_premium[v['submission_id']] = v['premium']
     elif k == 'QuoteRejected':
         declines[y] += 1
     elif k == 'PolicyBound':
@@ -105,18 +83,17 @@ for e in events:
         sid  = v['submission_id']
         iid  = v['insurer_id']
         pid  = v['policy_id']
-        sub_insurer[sid] = iid
         insurer_policy_count[y][iid] += 1
-        prem = sub_premium.get(sid, 0)
+        prem = idx.sub_premium.get(sid, 0)
         premiums[y][iid] += prem
-        atp_per_insurer[y][iid] += sub_atp.get(sid, 0)
-        total_exposure[y]        += sub_sum_insured.get(sid, 0)
+        atp_per_insurer[y][iid] += idx.sub_atp.get(sid, 0)
+        total_exposure[y]        += idx.sub_sum_insured.get(sid, 0)
         policy_meta[pid] = {'insurer_id': iid, 'submission_id': sid}
         # cat_exposure_at_quote from the matching LeadQuoteIssued
-        cat_exposure_at_quote_sum[y][iid] += sub_cat_exposure.get(sid, 0)
+        cat_exposure_at_quote_sum[y][iid] += idx.sub_cat_exposure.get(sid, 0)
         # Written cat exposure: use sum_insured from PolicyBound if present (new field),
         # otherwise fall back to sub_sum_insured from LeadQuoteRequested.
-        bound_si = v.get('sum_insured', sub_sum_insured.get(sid, 0))
+        bound_si = v.get('sum_insured', idx.sub_sum_insured.get(sid, 0))
         cat_exposure_written[y][iid] += bound_si
     elif k == 'LossEvent':
         loss_events[y] += 1

@@ -14,8 +14,9 @@ or relative metrics so absolute scale differences don't affect scoring.
 
 Exit code: 0 if no FAIL metrics, 1 if any FAIL.
 """
-import json, sys, collections, statistics
-from pathlib import Path
+import sys, collections, statistics
+import os; sys.path.insert(0, os.path.dirname(__file__))
+from event_index import build_index, year as _year
 
 EVENTS_FILE = "events.ndjson"
 
@@ -99,72 +100,44 @@ SUGGESTIONS = [
     ),
 ]
 
-# ── Load and parse ─────────────────────────────────────────────────────────────
-
-def load_events():
-    return [json.loads(l) for l in Path(EVENTS_FILE).read_text().splitlines() if l.strip()]
-
-def year(day):
-    return day // 360 + 1
-
-def etype(e):
-    ev = e["event"]
-    return next(iter(ev)) if isinstance(ev, dict) else ev
-
 # ── Metric extraction ──────────────────────────────────────────────────────────
 
-def extract_metrics(events):
+def extract_metrics(idx):
     submissions     = collections.Counter()   # year -> count CoverageRequested
     policies        = collections.Counter()   # year -> count PolicyBound
     premiums        = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insurer -> cents
     claims          = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insurer -> cents
     claims_attr     = collections.Counter()   # year -> attritional cents
     all_insurers    = set()
-    loss_event_years = set()
 
-    # submission_id -> insurer_id (from LeadQuoteIssued)
-    sub_insurer = {}
-    # submission_id -> premium (from QuoteAccepted)
-    sub_premium = {}
-
-    for e in events:
+    for e in idx.events:
         d, ev = e["day"], e["event"]
         if not isinstance(ev, dict):
             continue
-        y = year(d)
+        y = _year(d)
         k = next(iter(ev))
         v = ev[k]
 
         if k == "CoverageRequested":
             submissions[y] += 1
 
-        elif k == "LeadQuoteIssued":
-            sub_insurer[v["submission_id"]] = v["insurer_id"]
-
-        elif k == "QuoteAccepted":
-            sub_premium[v["submission_id"]] = v["premium"]
-
         elif k == "PolicyBound":
             policies[y] += 1
             sid = v["submission_id"]
             iid = v["insurer_id"]
             all_insurers.add(iid)
-            prem = sub_premium.get(sid, 0)
-            premiums[y][iid] += prem
+            premiums[y][iid] += idx.sub_premium.get(sid, 0)
 
-        elif k == "LossEvent":
-            if v.get("peril") not in ("Attritional",):
-                loss_event_years.add(y)
-
-        elif k == "ClaimSettled":
-            iid = v["insurer_id"]
-            all_insurers.add(iid)
-            claims[y][iid] += v["amount"]
-            if v.get("peril") == "Attritional":
-                claims_attr[y] += v["amount"]
+    for d in idx.claim_settled:
+        y = _year(d["day"])
+        iid = d["insurer_id"]
+        all_insurers.add(iid)
+        claims[y][iid] += d["amount"]
+        if d.get("peril") == "Attritional":
+            claims_attr[y] += d["amount"]
 
     years = sorted(set(submissions) | set(policies))
-    cat_years = loss_event_years
+    cat_years = idx.cat_years
     quiet_years = [y for y in years if y not in cat_years]
 
     # Bind rate
@@ -336,11 +309,11 @@ def print_report(metrics):
 
 if __name__ == "__main__":
     try:
-        events = load_events()
+        idx = build_index(EVENTS_FILE)
     except FileNotFoundError:
         print(f"ERROR: {EVENTS_FILE} not found. Run `cargo run` first.", file=sys.stderr)
         sys.exit(2)
 
-    metrics = extract_metrics(events)
+    metrics = extract_metrics(idx)
     rc = print_report(metrics)
     sys.exit(rc)
