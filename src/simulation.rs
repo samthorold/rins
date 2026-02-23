@@ -279,6 +279,15 @@ impl Simulation {
                     }
                     if let Some(ins) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
                         ins.on_policy_bound(policy_id, sum_insured, premium, &perils);
+                        // Back-fill total_cat_exposure now that the insurer aggregate is updated.
+                        let total_cat_exposure = ins.cat_aggregate;
+                        if let Some(last) = self.log.last_mut() {
+                            if let Event::PolicyBound { total_cat_exposure: ref mut tce, .. } =
+                                last.event
+                            {
+                                *tce = total_cat_exposure;
+                            }
+                        }
                     }
                 }
             }
@@ -318,7 +327,19 @@ impl Simulation {
             Event::ClaimSettled { insurer_id, amount, .. } => {
                 let new_events =
                     if let Some(insurer) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
-                        insurer.on_claim_settled(day, amount)
+                        let events = insurer.on_claim_settled(day, amount);
+                        // Back-fill remaining_capital now that the insurer has applied the claim.
+                        let remaining_capital = insurer.capital.max(0) as u64;
+                        if let Some(last) = self.log.last_mut() {
+                            if let Event::ClaimSettled {
+                                remaining_capital: ref mut rc,
+                                ..
+                            } = last.event
+                            {
+                                *rc = remaining_capital;
+                            }
+                        }
+                        events
                     } else {
                         vec![]
                     };
@@ -842,6 +863,56 @@ mod tests {
     }
 
     // ── Exposure limit + re-routing ───────────────────────────────────────────
+
+    // ── New enriched fields ───────────────────────────────────────────────────
+
+    #[test]
+    fn policy_bound_total_cat_exposure_increases_with_each_binding() {
+        // Single insurer, 3 insureds, 1 year. All risks cover WindstormAtlantic.
+        // Each successive PolicyBound must show total_cat_exposure growing by ASSET_VALUE.
+        use crate::config::ASSET_VALUE;
+        let sim = run_sim(minimal_config(1, 3));
+        let exposures: Vec<u64> = sim
+            .log
+            .iter()
+            .filter_map(|e| {
+                if let Event::PolicyBound { total_cat_exposure, .. } = &e.event {
+                    Some(*total_cat_exposure)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(exposures.len() >= 3, "need at least 3 PolicyBound events");
+        assert_eq!(exposures[0], ASSET_VALUE, "1st PolicyBound: total_cat_exposure must equal ASSET_VALUE");
+        assert_eq!(exposures[1], 2 * ASSET_VALUE, "2nd PolicyBound: total_cat_exposure must equal 2×ASSET_VALUE");
+        assert_eq!(exposures[2], 3 * ASSET_VALUE, "3rd PolicyBound: total_cat_exposure must equal 3×ASSET_VALUE");
+    }
+
+    #[test]
+    fn claim_settled_remaining_capital_is_nonzero_for_solvent_insurer() {
+        // With large initial capital and moderate cat frequency, all ClaimSettled events
+        // should carry a non-zero remaining_capital (insurer stays solvent throughout).
+        let mut config = minimal_config(1, 3);
+        config.catastrophe.annual_frequency = 5.0;
+        let sim = run_sim(config);
+        let claim_events: Vec<u64> = sim
+            .log
+            .iter()
+            .filter_map(|e| {
+                if let Event::ClaimSettled { remaining_capital, .. } = &e.event {
+                    Some(*remaining_capital)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(!claim_events.is_empty(), "expected ClaimSettled events with high cat frequency");
+        assert!(
+            claim_events.iter().any(|&rc| rc > 0),
+            "at least one ClaimSettled must have non-zero remaining_capital for a solvent insurer"
+        );
+    }
 
     #[test]
     fn declined_by_first_insurer_binds_with_second() {

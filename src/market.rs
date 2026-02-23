@@ -94,6 +94,7 @@ impl Market {
                     insurer_id,
                     premium,
                     sum_insured,
+                    total_cat_exposure: 0, // back-filled by simulation after insurer.on_policy_bound
                 },
             ),
             (expire_day, Event::PolicyExpired { policy_id }),
@@ -194,7 +195,13 @@ impl Market {
 
         vec![(
             day,
-            Event::ClaimSettled { policy_id, insurer_id, amount: effective_gul, peril },
+            Event::ClaimSettled {
+                policy_id,
+                insurer_id,
+                amount: effective_gul,
+                peril,
+                remaining_capital: 0, // back-filled by simulation after insurer.on_claim_settled
+            },
         )]
     }
 

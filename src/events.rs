@@ -86,6 +86,9 @@ pub enum Event {
         insurer_id: InsurerId,
         premium: u64,
         sum_insured: u64, // makes the event self-contained for exposure analysis
+        /// Insurer's total WindstormAtlantic aggregate after this policy is added.
+        /// Zero for risks that do not cover WindstormAtlantic.
+        total_cat_exposure: u64,
     },
     PolicyExpired {
         policy_id: PolicyId,
@@ -106,6 +109,8 @@ pub enum Event {
         insurer_id: InsurerId,
         amount: u64,
         peril: Peril,
+        /// Insurer's capital remaining after this claim is paid (floored at zero).
+        remaining_capital: u64,
     },
     /// Emitted the first time a claim drives an insurer's capital to zero.
     /// From this point on the insurer declines all new quote requests.
@@ -166,6 +171,13 @@ impl EventLog {
 
     pub fn iter(&self) -> impl Iterator<Item = &SimEvent> {
         self.0.iter()
+    }
+
+    /// Mutable reference to the most recently pushed entry.
+    /// Used by dispatch handlers to back-fill computed fields (e.g. remaining_capital)
+    /// into an event immediately after it is processed.
+    pub fn last_mut(&mut self) -> Option<&mut SimEvent> {
+        self.0.last_mut()
     }
 }
 
@@ -233,6 +245,7 @@ mod tests {
                 insurer_id: InsurerId(2),
                 premium: 50_000,
                 sum_insured: 5_000_000_000,
+                total_cat_exposure: 7_000_000_000,
             },
         };
         let value = serde_json::to_value(&ev).unwrap();
@@ -241,6 +254,7 @@ mod tests {
         assert_eq!(value["event"]["PolicyBound"]["insured_id"], 5);
         assert_eq!(value["event"]["PolicyBound"]["premium"], 50_000);
         assert_eq!(value["event"]["PolicyBound"]["sum_insured"], 5_000_000_000u64);
+        assert_eq!(value["event"]["PolicyBound"]["total_cat_exposure"], 7_000_000_000u64);
     }
 
     #[test]
