@@ -8,8 +8,11 @@ use crate::types::{Day, InsuredId, InsurerId, PolicyId, SubmissionId};
 /// Capital is endowed once at construction and persists year-over-year; premiums add, claims deduct.
 pub struct Insurer {
     pub id: InsurerId,
-    /// Current capital (signed to allow negative without panicking).
+    /// Current capital (unsigned floor at zero; cannot go negative).
     pub capital: i64,
+    /// Set to true the first time a claim drives capital to zero.
+    /// An insolvent insurer declines all new quote requests but continues settling claims.
+    pub insolvent: bool,
     /// Actuarial channel: live E[annual_loss] / sum_insured, updated each YearEnd via EWMA.
     expected_loss_fraction: f64,
     /// Actuarial channel: ATP = expected_loss_fraction / target_loss_ratio.
@@ -46,6 +49,7 @@ impl Insurer {
         Insurer {
             id,
             capital: initial_capital,
+            insolvent: false,
             expected_loss_fraction,
             target_loss_ratio,
             ewma_credibility,
@@ -71,6 +75,17 @@ impl Insurer {
         insured_id: InsuredId,
         risk: &Risk,
     ) -> Vec<(Day, Event)> {
+        if self.insolvent {
+            return vec![(
+                day,
+                Event::LeadQuoteDeclined {
+                    submission_id,
+                    insured_id,
+                    insurer_id: self.id,
+                    reason: DeclineReason::Insolvent,
+                },
+            )];
+        }
         if let Some(max_line) = self.max_line_size
             && risk.sum_insured > max_line
         {
@@ -155,10 +170,19 @@ impl Insurer {
         self.actuarial_price(risk)
     }
 
-    /// Deduct a settled claim from capital and accumulate YTD claims for EWMA.
-    pub fn on_claim_settled(&mut self, amount: u64) {
-        self.capital -= amount as i64;
-        self.year_claims += amount;
+    /// Deduct a settled claim from capital (floored at zero) and accumulate YTD claims for EWMA.
+    /// Returns `InsurerInsolvent` on the first crossing to zero; empty otherwise.
+    pub fn on_claim_settled(&mut self, day: Day, amount: u64) -> Vec<(Day, Event)> {
+        let payable = amount.min(self.capital.max(0) as u64);
+        self.capital -= payable as i64; // floors at 0 naturally
+        self.year_claims += payable;
+
+        if self.capital == 0 && !self.insolvent {
+            self.insolvent = true;
+            vec![(day, Event::InsurerInsolvent { insurer_id: self.id })]
+        } else {
+            vec![]
+        }
     }
 
     /// Update expected_loss_fraction via EWMA from this year's realized burning cost,
@@ -215,15 +239,45 @@ mod tests {
     #[test]
     fn on_claim_settled_reduces_capital() {
         let mut ins = make_insurer(InsurerId(1), 1_000_000);
-        ins.on_claim_settled(300_000);
+        ins.on_claim_settled(Day(0), 300_000);
         assert_eq!(ins.capital, 700_000);
     }
 
     #[test]
-    fn on_claim_settled_can_go_negative() {
+    fn on_claim_settled_floors_at_zero_and_emits_insolvent() {
         let mut ins = make_insurer(InsurerId(1), 100);
-        ins.on_claim_settled(1_000_000);
-        assert!(ins.capital < 0, "capital should go negative without panicking");
+        let events = ins.on_claim_settled(Day(5), 1_000_000);
+        assert_eq!(ins.capital, 0, "capital must floor at zero");
+        assert!(ins.insolvent, "insurer must be marked insolvent");
+        assert_eq!(events.len(), 1, "must emit exactly one InsurerInsolvent event");
+        assert!(
+            matches!(events[0].1, Event::InsurerInsolvent { insurer_id } if insurer_id == InsurerId(1)),
+            "event must be InsurerInsolvent with correct id"
+        );
+    }
+
+    #[test]
+    fn multiple_claims_exhaust_capital_and_insurer_becomes_insolvent() {
+        // Two policy premiums partially offset initial capital, but further
+        // claims exhaust it — capital must floor at zero and insurer must become insolvent.
+        let initial_capital = 1_000_000i64;
+        let gross_premium = 200_000u64;
+        // expense_ratio=0.0 → net premium = gross premium
+        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.55, 0.3, 0.0, None, None);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(2), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
+        let total_net_premiums = (gross_premium * 2) as i64;
+        let total_available = initial_capital + total_net_premiums;
+        // Two claims that together exceed total available funds
+        let claim = (total_available as u64 / 2) + 1;
+        let _ = ins.on_claim_settled(Day(0), claim);
+        let _ = ins.on_claim_settled(Day(0), claim);
+        assert_eq!(
+            ins.capital, 0,
+            "capital must floor at zero after cumulative claims exceed available funds; got {}",
+            ins.capital
+        );
+        assert!(ins.insolvent, "insurer must be marked insolvent after capital is exhausted");
     }
 
     fn first_event(events: Vec<(Day, Event)>) -> (Day, Event) {
@@ -450,10 +504,10 @@ mod tests {
     fn on_year_end_raises_atp_after_high_loss_year() {
         // Bind one policy; settle a claim equal to 100% of sum_insured.
         // Realized LF = 1.0 >> prior ELF = 0.239 → ATP must increase.
-        let mut ins = make_insurer(InsurerId(1), 0);
+        let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         let atp_before = quote_atp(&ins);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
-        ins.on_claim_settled(ASSET_VALUE);
+        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE);
         ins.on_year_end();
         let atp_after = quote_atp(&ins);
         assert!(atp_after > atp_before, "ATP must rise after a 100% LF year: {atp_after} vs {atp_before}");
@@ -475,9 +529,9 @@ mod tests {
     fn ewma_formula_matches_exact_calculation() {
         // α=0.3, realized LF = 0.5 (claim = ASSET_VALUE/2, exposure = ASSET_VALUE).
         // New ELF = 0.3 × 0.5 + 0.7 × 0.239 = 0.15 + 0.1673 = 0.3173.
-        let mut ins = make_insurer(InsurerId(1), 0);
+        let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
-        ins.on_claim_settled(ASSET_VALUE / 2);
+        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE / 2);
         ins.on_year_end();
         let expected_elf = 0.3 * 0.5 + 0.7 * 0.239;
         let expected_atp = (expected_elf * ASSET_VALUE as f64 / 0.70).round() as u64;
@@ -496,9 +550,9 @@ mod tests {
     fn on_year_end_resets_so_second_call_without_new_data_is_noop() {
         // After on_year_end resets counters, a second on_year_end with no new
         // policies or claims must leave ATP unchanged.
-        let mut ins = make_insurer(InsurerId(1), 0);
+        let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
-        ins.on_claim_settled(ASSET_VALUE);
+        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE);
         ins.on_year_end(); // ELF updated, counters reset
         let atp_year1 = quote_atp(&ins);
         ins.on_year_end(); // no new data → noop
@@ -508,14 +562,14 @@ mod tests {
     #[test]
     fn ewma_compounds_over_multiple_years() {
         // Two consecutive high-loss years should push ELF higher than one.
-        let mut ins = make_insurer(InsurerId(1), 0);
+        let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
-        ins.on_claim_settled(ASSET_VALUE);
+        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE);
         ins.on_year_end();
         let atp_after_year1 = quote_atp(&ins);
 
         ins.on_policy_bound(PolicyId(2), ASSET_VALUE, 0, &[Peril::Attritional]);
-        ins.on_claim_settled(ASSET_VALUE);
+        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE);
         ins.on_year_end();
         let atp_after_year2 = quote_atp(&ins);
 

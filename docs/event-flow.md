@@ -36,7 +36,8 @@ flowchart TD
     subgraph Insurer["Insurer\n(ATP pricing + exposure tracking)"]
         LQI["**LeadQuoteIssued**\n{submission_id, insured_id, insurer_id, atp, premium,\n cat_exposure_at_quote}\n(same day as LeadQuoteRequested)"]
         LQD["**LeadQuoteDeclined**\n{submission_id, insured_id, insurer_id, reason}\n(same day as LeadQuoteRequested)"]
-        CS_I["on_claim_settled\ncapital −= amount\nyear_claims += amount"]
+        CS_I["on_claim_settled\npayable = min(amount, capital)\ncapital −= payable (floor 0)\nyear_claims += payable\n→ InsurerInsolvent on first zero-crossing"]
+        II["**InsurerInsolvent**\n{insurer_id}\n(same day as ClaimSettled)"]
         INS_PB["on_policy_bound\nyear_exposure += sum_insured\ncat_aggregate += sum_insured (cat only)"]
         INS_PE["on_policy_expired\ncat_aggregate −= sum_insured"]
         INS_YE["on_year_end\nEWMA: elf = α×realized_lf + (1-α)×elf\nreset year_claims, year_exposure"]
@@ -51,7 +52,7 @@ flowchart TD
 
     CR -->|"+1 day"| LQR
     LQR -->|"same day (within limits)"| LQI
-    LQR -->|"same day (limit breached)"| LQD
+    LQR -->|"same day (limit breached or insolvent)"| LQD
     LQD -->|"+1 day via Broker::on_lead_quote_declined\nre-route or drop"| LQR
     LQI -->|"+1 day via Broker"| QP
     QP -->|"same day"| QA
@@ -69,6 +70,7 @@ flowchart TD
     IL --> INS_H
     IL -->|"on_insured_loss\napplies full coverage\ncapped at remaining_asset_value"| CS
     CS --> CS_I
+    CS_I -->|"first capital=0"| II
 ```
 
 ## Legend
@@ -97,7 +99,8 @@ flowchart TD
 | 11 | `PolicyExpired { policy_id }` | `Market::on_quote_accepted` | `Insurer::on_policy_expired` (release cat aggregate) + `Market::on_policy_expired` (remove policy) | +361 from `QuoteAccepted` (= +360 from `PolicyBound`) | §2.2 Annual policy terms |
 | 12 | `LossEvent { event_id, peril }` | `perils::schedule_loss_events` at `YearStart` | `Market::on_loss_event` → emit `InsuredLoss` per active policy | Poisson-scheduled within year | §1.3 Occurrences, §1.2 Catastrophe peril class |
 | 13 | `InsuredLoss { policy_id, insured_id, peril, ground_up_loss }` | `Market` (cat) / `perils` (attritional) | `Insured::on_insured_loss` (GUL tracking) + `Market::on_insured_loss` → emit `ClaimSettled` | same day as trigger | §1.3 GUL, §2.1 Policy terms, §6 Loss Settlement |
-| 14 | `ClaimSettled { policy_id, insurer_id, amount, peril }` | `Market` | `Insurer::on_claim_settled` (capital deduction) | same day as `InsuredLoss` | §6 Loss Settlement, §7.2 Insolvency |
+| 14 | `ClaimSettled { policy_id, insurer_id, amount, peril }` | `Market` | `Insurer::on_claim_settled` (capital deduction, floored at 0; emits `InsurerInsolvent` on first zero-crossing) | same day as `InsuredLoss` | §6 Loss Settlement, §7.2 Insolvency |
+| 15 | `InsurerInsolvent { insurer_id }` | `Insurer::on_claim_settled` | `Simulation::dispatch` (no-op — logged); insurer's `insolvent` flag set; future `LeadQuoteRequested` returns `LeadQuoteDeclined { reason: Insolvent }` | same day as triggering `ClaimSettled` | §7.2 Insolvency |
 
 ## Day offsets
 

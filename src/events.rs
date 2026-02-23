@@ -23,6 +23,7 @@ pub struct Risk {
 pub enum DeclineReason {
     MaxLineSizeExceeded,
     MaxCatAggregateBreached,
+    Insolvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -106,6 +107,9 @@ pub enum Event {
         amount: u64,
         peril: Peril,
     },
+    /// Emitted the first time a claim drives an insurer's capital to zero.
+    /// From this point on the insurer declines all new quote requests.
+    InsurerInsolvent { insurer_id: InsurerId },
 }
 
 /// A dispatched event with its simulation day. Position in `Simulation.log` is its implicit sequence number.

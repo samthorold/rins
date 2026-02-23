@@ -125,7 +125,7 @@ Canonical config: 100 uniform insureds (sum_insured = 50M USD each).
 
 ### §3.2 Insurers (Syndicates) `[ACTIVE]`
 
-Each Insurer provides capacity and prices risks. State: `id`, `capital`, `active_policies`. Capital is endowed once at construction and evolves with the insurer's P&L (premiums credited at bind, claims deducted at settlement). No annual re-endowment. Source: `src/insurer.rs`.
+Each Insurer provides capacity and prices risks. State: `id`, `capital`, `insolvent`, `active_policies`. Capital is endowed once at construction and evolves with the insurer's P&L (premiums credited at bind, claims deducted at settlement). No annual re-endowment. Capital floors at zero; once exhausted the insurer is marked insolvent and declines all new quotes. Source: `src/insurer.rs`.
 
 Canonical config: 5 insurers, 1B USD initial capital each.
 
@@ -268,7 +268,7 @@ The underwriter channel reflects non-actuarial market intelligence: the current 
 - `max_line_size` — declines any risk whose `sum_insured` exceeds this threshold.
 - `max_cat_aggregate` — declines a cat-covered risk if adding its `sum_insured` would push the insurer's live `WindstormAtlantic` aggregate above the limit. Canonical: 750M USD (15 × ASSET_VALUE) per insurer.
 
-Capital-neutral premium adjustment and solvency-floor declination are not yet implemented.
+Capital-neutral premium adjustment is not yet implemented.
 
 ---
 
@@ -309,7 +309,7 @@ LossEvent (cat) or attritional schedule
     → Insured::on_insured_loss   (GUL accumulation)
     → Market::on_insured_loss    (apply policy terms)
       → ClaimSettled { policy_id, insurer_id, amount, peril }
-        → Insurer::on_claim_settled   (capital -= amount)
+        → Insurer::on_claim_settled   (pays min(amount, capital), floors capital at 0; emits InsurerInsolvent on first crossing zero)
 ```
 
 ### §6.1 Actuarial feedback `[PLANNED]`
@@ -359,9 +359,15 @@ Source: `src/insurer.rs`, `src/config.rs`.
 
 After each annual review, the coordinator checks whether the industry combined ratio and current market premium rate index cross an entry-attractiveness threshold. If so, it creates one or more new Syndicate agents with parameters drawn from a calibrated distribution (risk appetite, specialism, initial capital). New syndicates receive low initial relationship scores with all brokers.
 
-### §7.2 Exit via insolvency `[PLANNED]`
+### §7.2 Exit via insolvency `[ACTIVE (PARTIAL)]`
 
-When a syndicate's capital falls below its solvency floor, the coordinator emits a `SyndicateInsolvent` event, removes it from active quoting, and transitions it to managed runoff (§7.3). Bound policies continue to their expiry; new submissions are declined. Capital depletion below the solvency floor also triggers this path from `on_claim_settled`.
+When an insurer's capital is exhausted by a claim, `on_claim_settled` floors capital at zero,
+sets `insolvent = true`, and returns an `InsurerInsolvent` event (logged same day as the
+triggering `ClaimSettled`). The coordinator's `InsurerInsolvent` dispatch is a no-op — the
+state change lives in the insurer aggregate. From that point on, `on_lead_quote_requested`
+returns `LeadQuoteDeclined { reason: Insolvent }`, causing the broker to re-route to another
+insurer. Existing in-force policies continue in run-off; future claims are paid down to capital = 0.
+Central Fund and managed runoff remain `[TBD]` (§7.3).
 
 ### §7.3 Managed runoff and Central Fund `[TBD]`
 

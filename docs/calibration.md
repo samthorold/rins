@@ -55,40 +55,83 @@ A rate of 0.5/yr sits in the middle of the 0.3–0.6/yr empirical range for Lloy
 
 | Parameter | Current value | Code location |
 |-----------|--------------|---------------|
-| Damage fraction model | `Pareto(scale=0.05, shape=1.5)` | `src/perils.rs` `DamageFractionModel::Pareto { scale, shape }` |
-| | | `src/config.rs` `CatConfig { pareto_scale: 0.05, pareto_shape: 1.5 }` |
+| Damage fraction model | `Pareto(scale=0.02, shape=3.0)` | `src/perils.rs` `DamageFractionModel::Pareto { scale, shape }` |
+| | | `src/config.rs` `CatConfig { pareto_scale: 0.02, pareto_shape: 3.0 }` |
 
 **Implied statistics:**
 
-- Expected damage fraction = **scale × shape / (shape − 1)** = 0.05 × 1.5 / 0.5 = **15%** of sum-insured per affected policy
-- Variance is **infinite** (shape ≤ 2): the distribution has a very heavy tail, appropriate for exploring crisis dynamics
-- Implied expected annual cat loss = 0.5 events/yr × 15% × 5 B TIV = **~375 M USD/yr**
+- Expected damage fraction = **scale × shape / (shape − 1)** = 0.02 × 3.0 / 2.0 = **3%** per affected policy
+- Variance is **finite** (shape = 3.0 > 2) — EWMA burning cost estimator is stable
+- Implied expected annual cat loss = 0.5 events/yr × 3% × 5 B TIV = **75 M USD/yr**
+- Cat ELF = **1.5%**
 
 > **Note on the formula:** The Pareto expected value is `E[X] = scale × shape / (shape − 1)` for shape > 1 (matching `src/perils.rs`). An earlier draft of this document incorrectly stated `scale / (shape − 1)` and should be disregarded.
 
 **Real-world anchor:**
-- **GPD shape parameter** from peaks-over-threshold analysis of US hurricane damage: empirical ξ = **0.66–0.80** (95% CI). The relationship to Pareto shape α is ξ = 1/α, giving equivalent α = **1.25–1.52**. Current shape=1.5 → ξ=0.67: right at the lower bound of the empirical range — defensible.
-- **Real event loss-to-TIV:** Katrina ~52% of exposed insured TIV; Harvey ~19–23% (flood gap depresses insured share); Ian ~35–53%
-- **Hurricane deductibles:** 1–5% of TIV for standard coastal property (proxy for scale parameter floor; 5% aligns with current scale=0.05)
-- A shape of 1.5 produces 1-in-100 year losses several times the mean — plausible for US wind but may overstate 1-in-200 PML used in Lloyd's capital models (typically 25–35% of total limit for peak US wind zones)
+- **GPD shape parameter** from peaks-over-threshold analysis of US hurricane damage: empirical ξ = **0.66–0.80** (95% CI). The relationship to Pareto shape α is ξ = 1/α, giving equivalent α = **1.25–1.52**. The previous shape=1.5 sat at the empirical boundary; shape=3.0 (ξ=0.33) is a softer tail but buys finite variance, which is necessary for EWMA stability. The tail is still substantially heavier than Gaussian.
+- **Return period profile at scale=0.02, shape=3.0:** P(df > 5%) = (0.02/0.05)³ = 0.008 → 1-in-125 yr; P(df > 10%) = (0.02/0.10)³ = 0.001 → 1-in-1000 yr. A 1-in-100 yr loss affects ~4.6% of TIV per event; the 1-in-250 yr touches ~6.3%.
+- **Per-insurer capital impact at P99:** 14 policies × 4.6% × 50 M = 32 M USD per insurer on ~1–2 B capital → **1.5–3% capital hit**. At P99.9 (10% damage): 70 M USD → **3.5–7% capital hit**. Consistent with the Lloyd's ian observation (~2–20% capital hit for large syndicates in a major event).
+- **Hurricane deductibles:** 1–5% of TIV for standard coastal property. scale=0.02 (2% minimum) aligns with the lower end of this range.
 
-**Key calibration gap:** The Pareto minimum (scale=0.05) means *every* policy in an event takes at least 5% damage. Real events affect only a fraction of exposed policies (geographic footprint). Until spatial correlation is implemented, scale doubles as a crude footprint proxy.
+**Prior calibration issue (scale=0.05, shape=1.5):** Three compounding problems. First, E[df]=15% and ELF_cat=7.5% overstated expected annual cat loss by roughly 5×. Second, shape=1.5 gives infinite variance, destabilising EWMA — extreme draws had unbounded influence on the burning cost estimator. Third, scale=0.05 applied uniformly meant every policy sustained ≥5% damage in every event, eliminating partial-loss years; combined with full-limit cover this produced near-total-loss outcomes for the insurer in all cat years.
+
+**Key calibration gap:** Scale still applies uniformly to all policies — every risk in the portfolio takes the same damage fraction. Real events affect only a geographic subset. Until spatial correlation is implemented, the uniform draw understates diversification benefit and overstates the correlation of losses across insurers.
+
+---
+
+## §4b Attritional Frequency and Severity [ACTIVE]
+
+| Parameter | Current value | Code location |
+|-----------|--------------|---------------|
+| Annual claim frequency | 0.2 claims/insured/yr | `src/config.rs` `AttritionalConfig { annual_rate: 0.2 }` |
+| Damage fraction model | `LogNormal(mu=−3.5, sigma=1.0)` | `src/config.rs` `AttritionalConfig { mu: -3.5, sigma: 1.0 }` |
+
+**Implied statistics:**
+
+- Expected damage fraction = exp(mu + σ²/2) = exp(−3.5 + 0.5) = exp(−3.0) = **5.0%** per claim
+- Expected claim size = 5% × 50 M = **2.5 M USD**
+- Expected annual attritional loss per insured = 0.2 × 5.0% = **1.0%** of sum-insured
+- Attritional ELF = **1.0%**
+
+**Real-world anchor:**
+- Commercial property attritional losses (fire, water damage, mechanical breakdown) at Lloyd's typically contribute an attritional loss ratio of **45–50% of net earned premium**. At the target rate of 4.5% ROL, this implies ELF_att ≈ 0.45 × 4.5% ≈ 2%. The current 1.0% sits below this, weighted toward a well-managed portfolio with low working-loss frequency.
+- Claim frequency of 0.2/yr (one attritional claim per 5 years per insured) is consistent with large commercial risks ($50 M class) where deductibles and risk management suppress reported frequency.
+- Mean damage of 5% ($2.5 M) on a $50 M building is consistent with a partial fire loss, significant water damage, or equipment failure — credible as the "average attritional event" at this size.
+- LogNormal(σ=1.0) is standard for property damage severity; 90th-pct damage = exp(−3.5 + 1.28) ≈ 11%, 99th-pct ≈ 25% — rare but non-negligible large losses in the tail.
+
+**Prior calibration issue (rate=2.0, mu=−3.0):** annual_rate=2.0 implied 2 claims per insured per year, and E[df]=8.2% per claim gave ELF_att=16.4% — roughly 10–50× realistic commercial property loading. This was the dominant driver of inflated rates (43.5% ROL) and made benign-year combined ratios implausibly low (~70–75%).
+
+**Combined ELF summary:**
+
+| Peril | ELF |
+|-------|-----|
+| Attritional | 1.0% |
+| Cat (WindstormAtlantic) | 1.5% |
+| **Total** | **2.5%** |
 
 ---
 
 ## §5 Pricing / Rate on Line [ACTIVE]
 
+Pricing is actuarial (ATP-based), not a fixed rate. Each insurer maintains a live expected loss fraction (ELF) and derives the Actuarially Technical Price from it each time a quote is requested.
+
 | Parameter | Current value | Code location |
 |-----------|--------------|---------------|
-| Fixed rate | 0.35 (35% of sum-insured) | `src/config.rs` `InsurerConfig { rate: 0.35 }` |
-| Premium calculation | `rate × sum_insured` | `src/insurer.rs` `on_lead_quote_requested` |
+| ATP formula | `ELF × sum_insured / target_loss_ratio` | `src/insurer.rs` `actuarial_price()` |
+| Initial ELF prior | 0.025 (= 1.0% att + 1.5% cat) | `src/config.rs` `InsurerConfig { expected_loss_fraction: 0.025 }` |
+| Target loss ratio | 0.55 | `src/config.rs` `InsurerConfig { target_loss_ratio: 0.55 }` |
+| Expense ratio | 0.344 | `src/config.rs` `InsurerConfig { expense_ratio: 0.344 }` |
+| EWMA credibility | 0.3 | `src/config.rs` `InsurerConfig { ewma_credibility: 0.3 }` |
+| ELF update | `α × realized_burning_cost + (1−α) × old_ELF` each YearEnd | `src/insurer.rs` `on_year_end()` |
 
-**Implied premium:** 35% × 50 M USD = **17.5 M USD per policy per year**.
+**Implied premium at initial prior:** ATP = 0.025 / 0.55 × 50 M = **2.27 M USD per policy** → **rate on line ≈ 4.5%**.
+
+**Rate dynamics:** the EWMA ties the ATP to observed burning cost. In benign years (no cat), realized LF ≈ ELF_att ≈ 1.0%; ELF drifts down toward 1.0%, softening the rate. A cat year spikes realized LF and hardens ELF. This produces a nascent soft/hard cycle without any explicit cycle-signalling mechanism. Current `ewma_credibility=0.3` (α): medium responsiveness — ELF decays ~70% of the way from prior to realized in ~4–5 years of steady experience.
 
 **Real-world anchor — market RoL ranges:**
-- Post-Katrina hard market (2006–2010): **25–50% RoL** for standard cat XL
-- Post-Ian renewals (2023–2024): **40–80% RoL** for cat XL; reinsurance rates up **97% cumulatively since 2017** (Swiss Re)
-- Current rate=0.35 sits in the post-Katrina hard market range — appropriate for a model that does not yet capture softening dynamics
+- US commercial property direct: **1–5% RoL** in a normal market; 3–8% in a hard market post-major cat
+- Lloyd's direct property specialist (pre-Ian): **2–4% RoL**; post-Ian renewals rose 30–60%
+- Current rate ≈ 4.5% sits in the upper-normal to moderate-hard range — appropriate for a portfolio with no attachment and full-limit coverage
 
 **Real-world anchor — Lloyd's combined ratios:**
 - Lloyd's 2024: combined ratio **86.9%** (attritional LR 47.1%, major claims 7.8%, expense ratio 34.4%)
@@ -96,26 +139,19 @@ A rate of 0.5/yr sits in the middle of the 0.3–0.6/yr empirical range for Lloy
 - Property reinsurance segment 2024: combined ratio **75%** (benefiting from prior-year Ian/Ida reserve releases)
 - Outlook (2025–2026): 90–95% as market softens
 
-**Implied economics at rate=0.35:**
+**Implied economics at initial ELF=0.025, target LR=0.55:**
 
-| Component | Calculation | Result |
-|-----------|------------|--------|
-| Attritional LR | 2.0 claims/yr × exp(−3.0 + 0.5) × 50 M / 17.5 M | **~47%** |
-| Cat LR | 375 M annual cat loss / (100 × 17.5 M premium) | **~21%** |
-| Total LR | 47% + 21% | **~68%** |
-| Implied CR (+ 34% expense) | 68% + 34% | **~102%** |
+| Year type | Expected LR | Expected CombR |
+|-----------|------------|----------------|
+| Benign (attritional only) | ELF_att / (ELF/target_LR) = 1.0% / 4.55% = **22%** | **56%** |
+| Average cat year | ELF_total / rate = 2.5% / 4.55% = **55%** | **89%** |
+| Severe cat (2× mean damage) | ~110% | **144%** |
 
-The attritional LR of **~47%** almost exactly matches Lloyd's 2024 figure (47.1%) — a strong calibration result. The implied combined ratio of ~102% is slightly above Lloyd's 84–91% range; the gap is expected: no expense model yet, and rate=0.35 reflects a hard market that should soften when cycle dynamics are added.
+Benign years are structurally very profitable (56% CombR) because the premium contains a cat loading (~1.5%/4.55% = 33 percentage points of rate) that goes unclaimed. This is correct: pooling reserves the cat loading for rare bad years, and the long-run average converges to the 89% target. Lloyd's own results show the same bimodality: 75–84% in good years, 110–120% in major cat years.
 
-**Expense loading note:** when the expense model is added, the premium must be loaded multiplicatively — `gross = pure / (1 − expense_ratio)`, not additively. At Lloyd's 2024 expense ratio of 34.4%, the implied break-even loss ratio is 65.6% (= 1 − 0.344); Lloyd's achieved ~52.5% loss ratio in 2024 (86.9% CR − 34.4% expense ratio), generating an 13% underwriting profit margin. A correct expense model will require the rate to rise by roughly 1/(1 − 0.344) ≈ 52% relative to the pure loss rate to match market economics.
+The target combined ratio of **89.4%** (= 55% LR + 34.4% expenses) aligns with Lloyd's 2023–2024 actuals and the market's stated 90–95% outlook.
 
-The current rate is **fixed** and does not yet reflect:
-- Attachment point (currently zero — first-dollar cover)
-- Layer width (currently full limit)
-- Geographic exposure (currently homogeneous)
-- Cycle dynamics (currently fixed, never responds to losses)
-
-Accept as scaffolding until layered contracts and rate-response are implemented (`docs/market-mechanics.md §9`). The rate should decrease when layered contracts introduce realistic attachment points, since attaching above zero dramatically reduces the expected loss ratio.
+The current rate is **adaptive but not fully competitive**: the underwriter channel always sets `premium = ATP` (zero margin loading), so no insurer loads above technical price. Competitive dynamics (`[PLANNED]`) will require explicit underwriter margin logic.
 
 ---
 
@@ -125,13 +161,14 @@ The following metrics should be checked after a canonical 5-year run (`cargo run
 
 | Metric | Target range | Basis | Status |
 |--------|-------------|-------|--------|
-| Annual expected cat loss / TIV | 0.5–3% | Corrected E[df]=15%; 0.5 events/yr × 15% = 7.5% on expectation before footprint discount | `[ACTIVE]` — computable from events.ndjson |
-| Cat loss year std dev / mean | >1 | Pareto tail (infinite variance); should be highly volatile year-to-year | `[ACTIVE]` — computable from events.ndjson |
-| Premium / TIV (effective RoL) | 25–80% | Post-Katrina 25–50%; post-Ian 40–80%; current model 35% | `[ACTIVE]` — currently fixed at 35% |
-| Attritional loss ratio | 45–50% | Lloyd's 2023–2024: 48.3% / 47.1% | `[ACTIVE]` — implied ~47% at rate=0.35; verify from events.ndjson |
-| Expense ratio (acquisition + management) | ~34% of NEP | Lloyd's 2024: 22.6% acquisition + 11.8% management = 34.4% | `[PLANNED]` — no expense model yet |
-| Lloyd's-equivalent combined ratio | 84–95% | Lloyd's 84.0% (2023), 86.9% (2024); softening toward 90–95% in 2025–26 | `[PLANNED]` — requires expense model |
-| Insurer capital surviving 5 yr | >0 (all) | Solvency floor not yet enforced; check manually | `[ACTIVE]` — visible in final YearEnd events |
+| Annual expected cat loss / TIV | 1–2% | ELF_cat=1.5%; 0.5 events/yr × 3% E[df] × 5B TIV = 75M/yr = 1.5% of TIV | `[ACTIVE]` — computable from events.ndjson |
+| Cat loss year std dev / mean | >1 | Pareto(shape=3.0) is still heavy-tailed; cat years should show high year-to-year variance | `[ACTIVE]` — computable from events.ndjson |
+| Premium / TIV (effective RoL) | 2–6% | US commercial property direct; EWMA-driven; initial ≈ 4.5% | `[ACTIVE]` — verify from events.ndjson |
+| Attritional loss ratio | 20–30% of premium | ELF_att/rate = 1.0%/4.5% ≈ 22% in benign years; Lloyd's attritional LR 47% reflects a richer exposure base | `[ACTIVE]` — computable from events.ndjson |
+| Long-run average combined ratio | 85–95% | Lloyd's 84.0% (2023), 86.9% (2024); target_LR=0.55 + expense=0.344 → 89.4% | `[ACTIVE]` — computable from analyse_sim.py over full run |
+| Benign-year combined ratio | 50–70% | Cat loading retained in good years; structurally correct even if below Lloyd's actuals | `[ACTIVE]` — computable from events.ndjson |
+| Cat-year combined ratio | 100–160% | Severe single-event years; should occasionally exceed 100% without always doing so | `[ACTIVE]` — computable from events.ndjson |
+| Insurer capital surviving 20 yr | >0 (all) | No insolvencies expected at calibrated ELF; capital grows in benign years | `[ACTIVE]` — visible in final capitals |
 | Renewal retention rate | ~90–95% | Specialty market broker relationships | `[PLANNED]` — no lapse model yet |
 
 **§0 Risk Pooling** in `docs/phenomena.md` is already `[EMERGING]` and provides the first quantitative check. Cat loss volatility is observable but not yet formally tracked in the analysis script.

@@ -316,10 +316,18 @@ impl Simulation {
             }
 
             Event::ClaimSettled { insurer_id, amount, .. } => {
-                if let Some(insurer) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
-                    insurer.on_claim_settled(amount);
+                let new_events =
+                    if let Some(insurer) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
+                        insurer.on_claim_settled(day, amount)
+                    } else {
+                        vec![]
+                    };
+                for (d, e) in new_events {
+                    self.schedule(d, e);
                 }
             }
+
+            Event::InsurerInsolvent { .. } => {}
         }
     }
 
@@ -654,6 +662,27 @@ mod tests {
         for ins in &sim.insurers {
             let _ = ins.capital; // verify no panic (may go negative)
         }
+    }
+
+    #[test]
+    fn insurer_becomes_insolvent_under_stress() {
+        // Under extreme cat frequency and small initial capital, at least one
+        // insurer must become insolvent — verifying the full event chain
+        // LossEvent → InsuredLoss → ClaimSettled → insurer.on_claim_settled → InsurerInsolvent.
+        let mut config = minimal_config(2, 10);
+        config.catastrophe.annual_frequency = 5.0;
+        // Shrink capital so a single bad cat year wipes it out
+        for ins_cfg in &mut config.insurers {
+            ins_cfg.initial_capital = 1_000_000; // 0.01 USD — effectively zero
+        }
+        let sim = run_sim(config);
+        let any_insolvent = sim.insurers.iter().any(|i| i.insolvent);
+        let insolvent_event_in_log =
+            sim.log.iter().any(|e| matches!(e.event, Event::InsurerInsolvent { .. }));
+        assert!(
+            any_insolvent && insolvent_event_in_log,
+            "expected at least one insolvent insurer and an InsurerInsolvent event in the log under extreme stress"
+        );
     }
 
     // ── Round-robin routing ───────────────────────────────────────────────────

@@ -74,7 +74,7 @@ impl SimulationConfig {
                 .map(|i| InsurerConfig {
                     id: InsurerId(i),
                     initial_capital: 100_000_000_000, // 1B USD in cents
-                    expected_loss_fraction: 0.239, // E_att(0.164) + E_cat(0.075)
+                    expected_loss_fraction: 0.025, // E_att(0.010) + E_cat(0.015)
                     target_loss_ratio: 0.55, // 1 − 0.344 expenses − 0.106 profit → CR ≈ 89.4%
                     ewma_credibility: 0.3,
                     expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
@@ -84,14 +84,14 @@ impl SimulationConfig {
                 .collect(),
             n_insureds: 100,
             attritional: AttritionalConfig {
-                annual_rate: 2.0,  // 2 claims per insured per year on average
-                mu: -3.0,          // E[df] = exp(-3.0 + 0.5) ≈ 8.2%
+                annual_rate: 0.2,  // 1 claim per 5 years; freq × E[df] = ELF_att ≈ 1.0%
+                mu: -3.5,          // E[df] = exp(-3.5 + 0.5) = exp(-3.0) ≈ 5.0%
                 sigma: 1.0,
             },
             catastrophe: CatConfig {
                 annual_frequency: 0.5,  // one cat event every 2 years on average
-                pareto_scale: 0.05,     // minimum 5% damage fraction
-                pareto_shape: 1.5,      // E[df] = 0.05 × 1.5 / 0.5 = 0.15 (unclipped)
+                pareto_scale: 0.02,     // minimum 2% damage fraction ($1M on $50M)
+                pareto_shape: 3.0,      // E[df] = 0.02 × 3.0 / 2.0 = 3%; finite variance (shape > 2)
             },
         }
     }

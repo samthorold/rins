@@ -119,11 +119,11 @@ Report: individual attritional CV, market attritional CV, CV ratio, LLN predicti
 
 #### §2 Catastrophe-Amplified Capital Crisis — `[PARTIAL]`
 
-*Claim: cat events drive simultaneous losses across all insurers large enough to breach 100% LR; insolvency processing is not yet active so the full cascade cannot occur, but the capital impact is landing correctly.*
+*Claim: cat events drive simultaneous losses across all insurers large enough to breach 100% LR. Capital is persistent (no annual re-endowment) and floors at zero — a severe cat year can trigger insolvency and permanently erode market capacity.*
 
 1. Identify severe years (market LR ≥ 100%) that are cat-driven (cat GUL% > 50% of total GUL).
 2. In each such year, confirm all five insurers have LR > 100% (shared occurrence, not idiosyncratic).
-3. Note that capital resets each YearStart, so final capitals will be positive — the crisis manifests as within-year LR breaches, not terminal insolvency.
+3. Check TotalCap(B) trend around severe years — a drop confirms capital erosion is landing. Check Insolvent# for any terminal failures.
 
 **Verdict thresholds:**
 - **PARTIAL CONFIRMED** — at least one cat-driven severe year with all insurers breaching 100% LR
@@ -135,13 +135,12 @@ Report: individual attritional CV, market attritional CV, CV ratio, LLN predicti
 
 Produce one row per year:
 
-| Year | Tag | Market LR% | Rate% | Dominant Peril | Worst Insurer LR% |
-|------|-----|------------|-------|----------------|-------------------|
+| Year | LossR% | CombR% | Rate% | Dominant Peril | TotalCap(B) | Insolvent# |
+|------|--------|--------|-------|----------------|-------------|------------|
 
-**Tag thresholds:**
-- **quiet** — no cat `LossEvent` AND market LR < 70%
-- **moderate** — cat present but market LR < 100%, OR no cat but LR 70–100%
-- **severe** — market LR ≥ 100%
+**LossR%:** pure loss ratio = total claims / total gross premium. Read from the "Capital and solvency per year" section of `analyse_sim.py` output.
+
+**CombR%:** combined ratio = LossR% + expense ratio (34.4%). Underwriting profit requires CombR% < 100%; above 100% the market is loss-making before investment income. Read from the same section.
 
 **Rate%:** market-wide premium per unit of exposure (`total_bound_premium / total_sum_insured`).
 In the current fixed-rate model this is constant (~35%). It will diverge across years
@@ -151,20 +150,23 @@ per year" section of `analyse_sim.py` output.
 
 **Dominant peril:** "Attritional" if Cat GUL% < 30%, "Mixed" if 30–60%, "Cat" if > 60%.
 
-After the table, note the count of quiet / moderate / severe years.
+**TotalCap(B):** total estimated capital across all insurers at year-end, in billions USD (floored at 0 per insurer). Read from the "Capital and solvency per year" section of `analyse_sim.py` output. A declining trend flags capital erosion from cumulative losses.
+
+**Insolvent#:** count of `InsurerInsolvent` events in the year. Read from the same section. Any non-zero value should be noted explicitly.
+
+After the table, note any year with Insolvent# > 0 and call out years where CombR% > 100% (market loss-making).
 
 ---
 
-### Tier 3 — Stress Deep-Dive (only if any year is tagged severe)
+### Tier 3 — Stress Deep-Dive (only if any year has LossR% ≥ 100%)
 
-For each severe year:
+For each loss-making year (LossR% ≥ 100%):
 - What triggered it: number of cat `LossEvent`s and total cat GUL
-- Which insurer had the worst LR, and which large insured(s) drove that concentration
 - Top insured GUL driver that year and their share of total GUL
 - ATP adequacy ratio for that year (from "ATP adequacy ratio per year" section): quote the value and note whether claims exceeded the actuarial floor (adequacy > 1.0)
 - Pattern: is stress worsening over time (trend), or random cat-driven spikes?
 
-Skip this tier entirely if no severe year exists.
+Skip this tier entirely if no year has LossR% ≥ 100%.
 
 ---
 

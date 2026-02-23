@@ -43,6 +43,7 @@ quote_iss     = collections.Counter()  # LeadQuoteIssued
 quote_pres    = collections.Counter()  # QuotePresented
 quote_acc     = collections.Counter()  # QuoteAccepted
 loss_events   = collections.Counter()  # year -> count
+insolvencies  = collections.Counter()  # year -> InsurerInsolvent count
 insured_losses= collections.defaultdict(lambda: collections.defaultdict(int))  # year -> peril -> GUL
 insured_gul   = collections.defaultdict(lambda: collections.defaultdict(int))  # year -> insured_id -> GUL
 insured_gul_split = collections.defaultdict(  # year -> insured_id -> type -> GUL
@@ -130,6 +131,8 @@ for e in events:
         claims[y][iid] += v['amount']
         ct = loss_type(v['peril'])
         claims_split[y][ct] += v['amount']
+    elif k == 'InsurerInsolvent':
+        insolvencies[y] += 1
 
 years = sorted(y for y in (set(submissions) | set(policies)) if y > warmup_years)
 all_insurers = sorted({i for yy in premiums.values() for i in yy} |
@@ -366,7 +369,7 @@ for y in years:
     cum_pl[y] = dict(running)
 
 capital_by_year = {
-    y: {i: INITIAL_CAPITAL + cum_pl[y][i] for i in all_insurers}
+    y: {i: max(0, INITIAL_CAPITAL + cum_pl[y][i]) for i in all_insurers}
     for y in years
 }
 
@@ -390,10 +393,24 @@ for y in years:
     print(row)
 
 print("\n=== Estimated capital per insurer per year (cents) ===")
-print(f"(starting from INITIAL_CAPITAL = {INITIAL_CAPITAL:,})")
+print(f"(starting from INITIAL_CAPITAL = {INITIAL_CAPITAL:,}; floored at 0)")
 print(hdr_cap)
 for y in years:
     row = f"  {y:>2}" + "".join(f"  {capital_by_year[y].get(i,0):>16}" for i in all_insurers)
     print(row)
-if any(capital_by_year[y].get(i, INITIAL_CAPITAL) < 0 for y in years for i in all_insurers):
-    print("  *** WARNING: estimated capital went negative for at least one insurer/year ***")
+if any(insolvencies[y] > 0 for y in years):
+    insolvent_years = [y for y in years if insolvencies[y] > 0]
+    print(f"  *** NOTE: InsurerInsolvent events in years: {insolvent_years} ***")
+
+print("\n=== Capital and solvency per year ===")
+print(f"(TotalCap = sum of estimated insurer capitals, floored at 0, in billions USD)")
+print(f"(LossR% = claims/gross_premium; CombR% = LossR% + expense_ratio ({EXPENSE_RATIO*100:.1f}%))")
+print(f"{'Year':>4}  {'TotalCap(B)':>12}  {'Insolvent#':>10}  {'LossR%':>7}  {'CombR%':>7}")
+for y in years:
+    total_cap_cents = sum(capital_by_year[y].values())
+    total_cap_b = total_cap_cents / 100_000_000_000  # cents → billions USD
+    total_prem_y = sum(premiums[y].values())
+    total_claims_y = sum(claims[y].values())
+    loss_r = 100.0 * total_claims_y / total_prem_y if total_prem_y else 0.0
+    comb_r = loss_r + EXPENSE_RATIO * 100.0
+    print(f"  {y:>2}    {total_cap_b:>12.2f}  {insolvencies[y]:>10}  {loss_r:>7.1f}  {comb_r:>7.1f}")
