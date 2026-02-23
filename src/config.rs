@@ -4,15 +4,25 @@ use crate::types::InsurerId;
 pub struct InsurerConfig {
     pub id: InsurerId,
     pub initial_capital: i64, // signed to allow negative (no insolvency in MVP)
-    /// E[annual_loss] / sum_insured, combining all perils. Initial prior; updated each year by EWMA.
-    /// Canonical: E_att(0.164) + E_cat(0.075) ≈ 0.239.
-    pub expected_loss_fraction: f64,
-    /// Target combined loss ratio. ATP = expected_loss_fraction / target_loss_ratio.
-    /// With target_loss_ratio < 1, ATP includes a profit margin above expected loss.
+    /// E[attritional_loss] / sum_insured. Updated each year via EWMA from realized attritional
+    /// burning cost. High-frequency data makes annual EWMA credible.
+    /// Canonical: annual_rate × exp(mu + σ²/2) ≈ 0.030.
+    pub attritional_elf: f64,
+    /// E[cat_loss] / sum_insured. Anchored — never updated from experience. Derived from
+    /// the cat model (Poisson frequency × expected damage fraction). A quiet cat year is not
+    /// evidence of a lower cat rate; updating via EWMA produces systematic soft-market erosion.
+    /// Canonical: annual_frequency × scale × shape / (shape − 1) ≈ 0.015.
+    pub cat_elf: f64,
+    /// Target combined loss ratio. ATP = (attritional_elf + cat_elf) / target_loss_ratio.
+    /// With target_loss_ratio < 1, ATP exceeds expected loss by a built-in profit margin.
     pub target_loss_ratio: f64,
-    /// EWMA credibility weight α ∈ (0, 1): new_elf = α × realized_lf + (1-α) × old_elf.
+    /// EWMA credibility weight α ∈ (0, 1): new_att_elf = α × realized_att_lf + (1-α) × old.
     /// Higher α = faster response to recent experience; lower α = more weight on history.
     pub ewma_credibility: f64,
+    /// Multiplicative loading above ATP applied in the underwriter channel.
+    /// premium = ATP × (1 + profit_loading). Represents minimum risk/capital charge above
+    /// actuarial expected loss. Canonical: 0.05 (5%).
+    pub profit_loading: f64,
     /// Fraction of gross premium consumed by acquisition costs + overhead.
     /// Lloyd's 2024: 22.6% acquisition + 11.8% management ≈ 34.4%.
     pub expense_ratio: f64,
@@ -74,10 +84,12 @@ impl SimulationConfig {
                 .map(|i| InsurerConfig {
                     id: InsurerId(i),
                     initial_capital: 100_000_000_000, // 1B USD in cents
-                    expected_loss_fraction: 0.045, // E_att(0.030) + E_cat(0.015)
+                    attritional_elf: 0.030, // annual_rate=2.0 × E[df]=1.5% → att_ELF=3.0%
+                    cat_elf: 0.015,         // frequency=0.5 × E[df]=3% → cat_ELF=1.5%; anchored
                     target_loss_ratio: 0.55, // 1 − 0.344 expenses − 0.106 profit → CR ≈ 89.4%
                     ewma_credibility: 0.3,
                     expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
+                    profit_loading: 0.05, // 5% markup above ATP; MS3 risk/capital charge
                     max_cat_aggregate: Some(75_000_000_000), // 750M USD = 15 × ASSET_VALUE
                     max_line_size: None,
                 })

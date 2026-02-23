@@ -13,16 +13,25 @@ pub struct Insurer {
     /// Set to true the first time a claim drives capital to zero.
     /// An insolvent insurer declines all new quote requests but continues settling claims.
     pub insolvent: bool,
-    /// Actuarial channel: live E[annual_loss] / sum_insured, updated each YearEnd via EWMA.
-    expected_loss_fraction: f64,
-    /// Actuarial channel: ATP = expected_loss_fraction / target_loss_ratio.
+    /// Actuarial channel: E[attritional_loss] / sum_insured.
+    /// Updated each YearEnd via EWMA from realized attritional burning cost.
+    attritional_elf: f64,
+    /// Actuarial channel: E[cat_loss] / sum_insured.
+    /// Anchored — never updated from experience. Derived from the cat model.
+    /// A quiet cat period is not evidence of a lower rate; EWMA would produce systematic
+    /// soft-market erosion. Mirrors Lloyd's MS3 Technical Premium requirements.
+    cat_elf: f64,
+    /// Actuarial channel: ATP = (attritional_elf + cat_elf) / target_loss_ratio.
     target_loss_ratio: f64,
-    /// EWMA credibility weight α: new_elf = α × realized_lf + (1-α) × old_elf.
+    /// EWMA credibility weight α: new_att_elf = α × realized_att_lf + (1-α) × old_att_elf.
     ewma_credibility: f64,
     /// Fraction of gross premium consumed by acquisition costs + overhead.
     expense_ratio: f64,
-    /// YTD settled claims (cents); accumulated by on_claim_settled; reset at YearEnd.
-    year_claims: u64,
+    /// Multiplicative loading above ATP: premium = ATP × (1 + profit_loading).
+    profit_loading: f64,
+    /// YTD attritional claims (cents); accumulated by on_claim_settled (Attritional only);
+    /// reset at YearEnd. Used to update attritional_elf via EWMA. Cat claims are excluded.
+    year_attritional_claims: u64,
     /// YTD written exposure (sum_insured, cents); accumulated by on_policy_bound; reset at YearEnd.
     year_exposure: u64,
     /// Exposure management: live WindstormAtlantic aggregate sum_insured.
@@ -39,10 +48,12 @@ impl Insurer {
     pub fn new(
         id: InsurerId,
         initial_capital: i64,
-        expected_loss_fraction: f64,
+        attritional_elf: f64,
+        cat_elf: f64,
         target_loss_ratio: f64,
         ewma_credibility: f64,
         expense_ratio: f64,
+        profit_loading: f64,
         max_cat_aggregate: Option<u64>,
         max_line_size: Option<u64>,
     ) -> Self {
@@ -50,11 +61,13 @@ impl Insurer {
             id,
             capital: initial_capital,
             insolvent: false,
-            expected_loss_fraction,
+            attritional_elf,
+            cat_elf,
             target_loss_ratio,
             ewma_credibility,
             expense_ratio,
-            year_claims: 0,
+            profit_loading,
+            year_attritional_claims: 0,
             year_exposure: 0,
             cat_aggregate: 0,
             max_cat_aggregate,
@@ -157,25 +170,32 @@ impl Insurer {
         }
     }
 
-    /// Actuarial channel: E[annual_loss] / target_loss_ratio.
-    /// Future: replace expected_loss_fraction with EWMA from observed burning cost.
+    /// Actuarial channel: (attritional_elf + cat_elf) × sum_insured / target_loss_ratio.
+    /// cat_elf is anchored; attritional_elf drifts via EWMA.
     fn actuarial_price(&self, risk: &Risk) -> u64 {
-        (self.expected_loss_fraction * risk.sum_insured as f64 / self.target_loss_ratio).round() as u64
+        let elf = self.attritional_elf + self.cat_elf;
+        (elf * risk.sum_insured as f64 / self.target_loss_ratio).round() as u64
     }
 
-    /// Underwriter channel: Step 0 — technical pricing baseline, premium = ATP.
-    /// Future: apply cycle indicator, relationship score, lead-quote anchoring
-    /// as a multiplicative factor on ATP (premium = ATP × underwriter_factor).
+    /// Underwriter channel: Step 0 — ATP × (1 + profit_loading).
+    /// The profit_loading is a structural minimum risk/capital charge above the actuarial floor,
+    /// representing the cost of holding capital against adverse deviation (Lloyd's MS3).
+    /// Future: apply cycle indicator, relationship score, lead-quote anchoring.
     fn underwriter_premium(&self, risk: &Risk) -> u64 {
-        self.actuarial_price(risk)
+        let atp = self.actuarial_price(risk);
+        (atp as f64 * (1.0 + self.profit_loading)).round() as u64
     }
 
-    /// Deduct a settled claim from capital (floored at zero) and accumulate YTD claims for EWMA.
+    /// Deduct a settled claim from capital (floored at zero).
+    /// Only attritional claims are accumulated for the EWMA; cat claims are excluded
+    /// because cat_elf is anchored and not updated from experience.
     /// Returns `InsurerInsolvent` on the first crossing to zero; empty otherwise.
-    pub fn on_claim_settled(&mut self, day: Day, amount: u64) -> Vec<(Day, Event)> {
+    pub fn on_claim_settled(&mut self, day: Day, amount: u64, peril: Peril) -> Vec<(Day, Event)> {
         let payable = amount.min(self.capital.max(0) as u64);
         self.capital -= payable as i64; // floors at 0 naturally
-        self.year_claims += payable;
+        if peril == Peril::Attritional {
+            self.year_attritional_claims += payable;
+        }
 
         if self.capital == 0 && !self.insolvent {
             self.insolvent = true;
@@ -185,15 +205,16 @@ impl Insurer {
         }
     }
 
-    /// Update expected_loss_fraction via EWMA from this year's realized burning cost,
-    /// then reset YTD accumulators. No-op if no exposure was written this year.
+    /// Update attritional_elf via EWMA from this year's realized attritional burning cost,
+    /// then reset YTD accumulators. cat_elf is never updated. No-op if no exposure written.
     pub fn on_year_end(&mut self) {
         if self.year_exposure > 0 {
-            let realized_lf = self.year_claims as f64 / self.year_exposure as f64;
-            self.expected_loss_fraction = self.ewma_credibility * realized_lf
-                + (1.0 - self.ewma_credibility) * self.expected_loss_fraction;
+            let realized_att_lf =
+                self.year_attritional_claims as f64 / self.year_exposure as f64;
+            self.attritional_elf = self.ewma_credibility * realized_att_lf
+                + (1.0 - self.ewma_credibility) * self.attritional_elf;
         }
-        self.year_claims = 0;
+        self.year_attritional_claims = 0;
         self.year_exposure = 0;
     }
 }
@@ -213,7 +234,8 @@ mod tests {
     }
 
     fn make_insurer(id: InsurerId, capital: i64) -> Insurer {
-        Insurer::new(id, capital, 0.239, 0.70, 0.3, 0.0, None, None)
+        // attritional_elf=0.239, cat_elf=0.0, profit_loading=0.0 → premium = ATP (tests unchanged)
+        Insurer::new(id, capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None)
     }
 
     /// Helper: quote and return the ATP for a standard small_risk().
@@ -239,14 +261,14 @@ mod tests {
     #[test]
     fn on_claim_settled_reduces_capital() {
         let mut ins = make_insurer(InsurerId(1), 1_000_000);
-        ins.on_claim_settled(Day(0), 300_000);
+        ins.on_claim_settled(Day(0), 300_000, Peril::Attritional);
         assert_eq!(ins.capital, 700_000);
     }
 
     #[test]
     fn on_claim_settled_floors_at_zero_and_emits_insolvent() {
         let mut ins = make_insurer(InsurerId(1), 100);
-        let events = ins.on_claim_settled(Day(5), 1_000_000);
+        let events = ins.on_claim_settled(Day(5), 1_000_000, Peril::Attritional);
         assert_eq!(ins.capital, 0, "capital must floor at zero");
         assert!(ins.insolvent, "insurer must be marked insolvent");
         assert_eq!(events.len(), 1, "must emit exactly one InsurerInsolvent event");
@@ -263,15 +285,15 @@ mod tests {
         let initial_capital = 1_000_000i64;
         let gross_premium = 200_000u64;
         // expense_ratio=0.0 → net premium = gross premium
-        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.55, 0.3, 0.0, None, None);
+        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.55, 0.3, 0.0, 0.0, None, None);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         ins.on_policy_bound(PolicyId(2), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         let total_net_premiums = (gross_premium * 2) as i64;
         let total_available = initial_capital + total_net_premiums;
         // Two claims that together exceed total available funds
         let claim = (total_available as u64 / 2) + 1;
-        let _ = ins.on_claim_settled(Day(0), claim);
-        let _ = ins.on_claim_settled(Day(0), claim);
+        let _ = ins.on_claim_settled(Day(0), claim, Peril::Attritional);
+        let _ = ins.on_claim_settled(Day(0), claim, Peril::Attritional);
         assert_eq!(
             ins.capital, 0,
             "capital must floor at zero after cumulative claims exceed available funds; got {}",
@@ -296,12 +318,13 @@ mod tests {
     }
 
     #[test]
-    fn premium_equals_atp() {
+    fn premium_equals_atp_when_profit_loading_zero() {
+        // make_insurer uses profit_loading=0.0, so premium = ATP × 1.0 = ATP.
         let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         if let Event::LeadQuoteIssued { atp, premium, .. } = event {
-            assert_eq!(premium, atp, "Step 0 technical pricing: premium must equal ATP");
+            assert_eq!(premium, atp, "with profit_loading=0.0, premium must equal ATP");
         }
     }
 
@@ -371,14 +394,15 @@ mod tests {
     }
 
     #[test]
-    fn premium_equals_expected_loss_fraction_over_target_ratio() {
-        // Step 0 technical pricing: premium = ATP = expected_loss_fraction × sum_insured / target_loss_ratio.
+    fn premium_equals_atp_times_loading() {
+        // make_insurer uses attritional_elf=0.239, cat_elf=0.0, profit_loading=0.0.
+        // premium = (0.239 + 0.0) × sum_insured / target_LR × (1 + 0.0) = ATP.
         let ins = make_insurer(InsurerId(1), 0);
         let risk = small_risk();
         let expected = (0.239 * ASSET_VALUE as f64 / 0.70).round() as u64;
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         if let Event::LeadQuoteIssued { premium, .. } = event {
-            assert_eq!(premium, expected, "premium must equal expected_loss_fraction × sum_insured / target_loss_ratio");
+            assert_eq!(premium, expected, "premium must equal (attritional_elf + cat_elf) × sum_insured / target_loss_ratio × (1 + profit_loading)");
         } else {
             panic!("expected LeadQuoteIssued");
         }
@@ -465,7 +489,7 @@ mod tests {
 
     #[test]
     fn max_line_size_exceeded_emits_declined() {
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.70, 0.3, 0.0, None, Some(ASSET_VALUE - 1));
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(ASSET_VALUE - 1));
         let risk = cat_risk(); // sum_insured = ASSET_VALUE > max_line_size
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         assert!(
@@ -476,7 +500,7 @@ mod tests {
 
     #[test]
     fn max_cat_aggregate_breached_emits_declined() {
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.70, 0.3, 0.0, Some(0), None);
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0), None);
         let risk = cat_risk(); // cat_aggregate(0) + sum_insured > max_cat_aggregate(0)
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         assert!(
@@ -487,7 +511,7 @@ mod tests {
 
     #[test]
     fn within_limits_after_partial_fill_emits_quote_issued() {
-        let mut ins = Insurer::new(InsurerId(1), 0, 0.239, 0.70, 0.3, 0.0, Some(2 * ASSET_VALUE), None);
+        let mut ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(2 * ASSET_VALUE), None);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
         // cat_aggregate = ASSET_VALUE, max = 2×ASSET_VALUE → still room for one more
         let risk = cat_risk();
@@ -507,7 +531,7 @@ mod tests {
         let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         let atp_before = quote_atp(&ins);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
-        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE);
+        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
         ins.on_year_end();
         let atp_after = quote_atp(&ins);
         assert!(atp_after > atp_before, "ATP must rise after a 100% LF year: {atp_after} vs {atp_before}");
@@ -531,7 +555,7 @@ mod tests {
         // New ELF = 0.3 × 0.5 + 0.7 × 0.239 = 0.15 + 0.1673 = 0.3173.
         let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
-        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE / 2);
+        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE / 2, Peril::Attritional);
         ins.on_year_end();
         let expected_elf = 0.3 * 0.5 + 0.7 * 0.239;
         let expected_atp = (expected_elf * ASSET_VALUE as f64 / 0.70).round() as u64;
@@ -552,7 +576,7 @@ mod tests {
         // policies or claims must leave ATP unchanged.
         let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
-        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE);
+        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
         ins.on_year_end(); // ELF updated, counters reset
         let atp_year1 = quote_atp(&ins);
         ins.on_year_end(); // no new data → noop
@@ -564,12 +588,12 @@ mod tests {
         // Two consecutive high-loss years should push ELF higher than one.
         let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
-        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE);
+        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
         ins.on_year_end();
         let atp_after_year1 = quote_atp(&ins);
 
         ins.on_policy_bound(PolicyId(2), ASSET_VALUE, 0, &[Peril::Attritional]);
-        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE);
+        let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
         ins.on_year_end();
         let atp_after_year2 = quote_atp(&ins);
 
@@ -579,7 +603,7 @@ mod tests {
     #[test]
     fn on_policy_bound_credits_net_premium_to_capital() {
         // expense_ratio=0.25 → net = 75% of gross premium.
-        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.55, 0.3, 0.25, None, None);
+        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.55, 0.3, 0.25, 0.0, None, None);
         let gross_premium = 400_000u64;
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         let expected_net = (gross_premium as f64 * 0.75).round() as i64;

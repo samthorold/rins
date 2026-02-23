@@ -42,10 +42,12 @@ impl Simulation {
                 Insurer::new(
                     c.id,
                     c.initial_capital,
-                    c.expected_loss_fraction,
+                    c.attritional_elf,
+                    c.cat_elf,
                     c.target_loss_ratio,
                     c.ewma_credibility,
                     c.expense_ratio,
+                    c.profit_loading,
                     c.max_cat_aggregate,
                     c.max_line_size,
                 )
@@ -324,10 +326,10 @@ impl Simulation {
                 }
             }
 
-            Event::ClaimSettled { insurer_id, amount, .. } => {
+            Event::ClaimSettled { insurer_id, amount, peril, .. } => {
                 let new_events =
                     if let Some(insurer) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
-                        let events = insurer.on_claim_settled(day, amount);
+                        let events = insurer.on_claim_settled(day, amount, peril);
                         // Back-fill remaining_capital now that the insurer has applied the claim.
                         let remaining_capital = insurer.capital.max(0) as u64;
                         if let Some(last) = self.log.last_mut() {
@@ -426,10 +428,12 @@ mod tests {
             insurers: vec![InsurerConfig {
                 id: InsurerId(1),
                 initial_capital: 100_000_000_000,
-                expected_loss_fraction: 0.239,
+                attritional_elf: 0.239,
+                cat_elf: 0.0,
                 target_loss_ratio: 0.70,
                 ewma_credibility: 0.3,
                 expense_ratio: 0.0,
+                profit_loading: 0.0,
                 max_cat_aggregate: None,
                 max_line_size: None,
             }],
@@ -715,10 +719,12 @@ mod tests {
             .map(|i| InsurerConfig {
                 id: InsurerId(i),
                 initial_capital: 100_000_000_000,
-                expected_loss_fraction: 0.239,
+                attritional_elf: 0.239,
+                cat_elf: 0.0,
                 target_loss_ratio: 0.70,
                 ewma_credibility: 0.3,
                 expense_ratio: 0.0,
+                profit_loading: 0.0,
                 max_cat_aggregate: None,
                 max_line_size: None,
             })
@@ -926,20 +932,24 @@ mod tests {
             InsurerConfig {
                 id: InsurerId(1),
                 initial_capital: 100_000_000_000,
-                expected_loss_fraction: 0.239,
+                attritional_elf: 0.239,
+                cat_elf: 0.0,
                 target_loss_ratio: 0.70,
                 ewma_credibility: 0.3,
                 expense_ratio: 0.0,
+                profit_loading: 0.0,
                 max_cat_aggregate: Some(0), // always declines cat risks
                 max_line_size: None,
             },
             InsurerConfig {
                 id: InsurerId(2),
                 initial_capital: 100_000_000_000,
-                expected_loss_fraction: 0.239,
+                attritional_elf: 0.239,
+                cat_elf: 0.0,
                 target_loss_ratio: 0.70,
                 ewma_credibility: 0.3,
                 expense_ratio: 0.0,
+                profit_loading: 0.0,
                 max_cat_aggregate: None,
                 max_line_size: None,
             },

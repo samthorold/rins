@@ -19,6 +19,8 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Policy terms (full-value, zero attachment) | ACTIVE (PARTIAL — full-value simplification of layer mechanics) | `src/market.rs::on_insured_loss` |
 | Annual policy expiry | ACTIVE | `src/market.rs::expire_policies` |
 | Actuarial channel (ATP pricing + EWMA experience update) | ACTIVE | `src/insurer.rs::actuarial_price`, `on_year_end` |
+| Separate cat / attritional ELF (cat ELF anchored, attritional EWMA-updated) | ACTIVE | `src/insurer.rs::on_year_end` |
+| Profit loading above ATP in underwriter channel | ACTIVE | `src/insurer.rs::underwriter_premium` |
 | Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
 | Exposure management (max line size, max cat aggregate) | ACTIVE | `src/insurer.rs::on_lead_quote_requested`, `src/broker.rs::on_lead_quote_declined` |
 | Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
@@ -156,23 +158,31 @@ In Step 0 (technical pricing baseline), ATP is the quoted premium. The underwrit
 
 *[TBD: EWMA decay parameter — per-line or per-syndicate?]*
 
-**Current simplified implementation:** `actuarial_price()` computes `expected_loss_fraction × sum_insured / target_loss_ratio`. At each `YearEnd`, each insurer updates its `expected_loss_fraction` via EWMA from its realized burning cost:
+**Current simplified implementation:** `actuarial_price()` computes `(attritional_elf + cat_elf) × sum_insured / target_loss_ratio`.
+
+The expected loss fraction is split into two components that are updated by different mechanisms — reflecting standard actuarial practice and Lloyd's market convention:
+
+**Attritional ELF** (`attritional_elf`): updated each `YearEnd` via EWMA from realized attritional burning cost:
 
 ```
-new_elf = α × (year_claims / year_exposure) + (1 − α) × old_elf
+new_att_elf = α × (year_attritional_claims / year_exposure) + (1 − α) × old_att_elf
 ```
 
-where `α = ewma_credibility` (canonical 0.3) and `year_claims`, `year_exposure` are accumulated during the year via `on_claim_settled` and `on_policy_bound`. If no exposure was written the prior is unchanged. The ATP is logged in `LeadQuoteIssued.atp` and is also the quoted `premium` (Step 0: `underwriter_adjustment = 0`). Credibility blending with an industry benchmark and per-line experience are not yet implemented.
+where `α = ewma_credibility` (canonical 0.3). Attritional losses are high-frequency: a single year provides useful data, and the EWMA update is credible. Only attritional `ClaimSettled` events (peril = `Attritional`) contribute to `year_attritional_claims`.
+
+**Cat ELF** (`cat_elf`): **anchored — never updated from experience.** The initial `cat_elf` is derived from a cat model (Poisson frequency × expected Pareto damage fraction) and held fixed throughout the simulation. This mirrors real-world practice: vendor cat models (RMS, AIR, Verisk) produce an Expected Annual Loss (EAL/AAL) estimate that is treated as stable. A decade without a hurricane is *not* evidence that hurricanes have become rarer — it is a benign sample from the same distribution. Updating cat ELF via EWMA from experience would cause systematic rate softening after quiet periods, which is the dominant failure mode in soft-market cycles.
+
+**Why separation matters in Lloyd's:** Lloyd's Minimum Standards MS3 (*Price and Rate Monitoring*, 2021) requires syndicates to track the ratio of **Actual Premium to Technical Premium** (AvT). The Technical Premium is the actuarially required floor; it must include modelled cat loading derived from the cat model, not from recent experience. When AvT < 1.0, the syndicate is pricing below technical and must justify the shortfall. The MS3 framework was strengthened in 2022 with hard floor requirements and retrospective testing — specifically to prevent experience-rated cat ELF erosion during benign periods.
 
 ```
-ATP = E[annual_loss] / target_loss_ratio
+ATP = (attritional_elf + cat_elf) × sum_insured / target_loss_ratio
 ```
 
-where `E[annual_loss]` summed two peril contributions:
-- Attritional: `annual_rate × exp(mu + σ²/2) × sum_insured` ≈ 0.164 × sum_insured
-- Cat (WindstormAtlantic): `annual_frequency × (scale × shape / (shape − 1)) × sum_insured` ≈ 0.075 × sum_insured
+where:
+- Attritional: `annual_rate × exp(mu + σ²/2) × sum_insured` → canonical att_elf ≈ 3.0%
+- Cat (WindstormAtlantic): `annual_frequency × (scale × shape / (shape − 1)) × sum_insured` → canonical cat_elf ≈ 1.5%
 
-Canonical values: `expected_loss_fraction = 0.239`, `target_loss_ratio = 0.70` → ATP rate ≈ 0.34. Source: `src/insurer.rs`.
+Canonical values: `attritional_elf = 0.030`, `cat_elf = 0.015`, total ELF = 0.045, `target_loss_ratio = 0.55` → ATP rate ≈ 8.2%. Source: `src/insurer.rs`.
 
 ### §4.3 Expense loading and broker fees `[PARTIAL]`
 
@@ -250,7 +260,15 @@ What is not yet modelled:
 
 The underwriter channel reflects non-actuarial market intelligence: the current cycle position, relationship with the placing broker, and the observed lead quote (if any). It produces a multiplicative adjustment applied to the ATP: `premium = ATP × underwriter_factor`.
 
-**Step 0 — Technical baseline (current):** `underwriter_factor = 1.0` for all syndicates. The quoted premium equals ATP. No cycle, relationship, or herding signal is active.
+**Step 0 — Technical baseline (current):** a structural `profit_loading` (canonical 0.05 = 5%) is applied above ATP:
+
+```
+premium = ATP × (1 + profit_loading)
+```
+
+This loading represents the minimum risk/uncertainty charge that a syndicate requires above the pure actuarial price — the cost of holding capital against adverse deviation. In standard actuarial ratemaking (CAS, Solvency II, Lloyd's MS3), premiums must cover expected loss *plus* a profit provision that justifies the capital deployed. Setting `profit_loading = 0` produces a market where rates race to the actuarial floor, which is not observed in practice.
+
+The `profit_loading` is logged as the gap between `LeadQuoteIssued.premium` and `LeadQuoteIssued.atp`. At Step 0, all syndicates apply the same loading; heterogeneous loading (reflecting risk appetite, cycle position, and relationship strength) is a future underwriter channel concern.
 
 **Inputs:**
 - Current market cycle indicator (coordinator-published annually; derived from aggregate premium movement — see §8).
