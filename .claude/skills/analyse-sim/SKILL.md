@@ -143,10 +143,7 @@ Produce one row per year:
 **CombR%:** combined ratio = LossR% + expense ratio (34.4%). Underwriting profit requires CombR% < 100%; above 100% the market is loss-making before investment income. Read from the same section.
 
 **Rate%:** market-wide premium per unit of exposure (`total_bound_premium / total_sum_insured`).
-In the current fixed-rate model this is constant (~35%). It will diverge across years
-once the underwriter channel responds to cycle signals. Flag any year where Rate% < ATP-rate
-(currently ~34.1%) as a potential soft-market signal. Read Rate% from the "Market rate on line
-per year" section of `analyse_sim.py` output.
+Read the per-year value directly from the "Market rate on line per year" section of `analyse_sim.py` output — do not assume a fixed value. Rate% varies year to year as the attritional EWMA updates ATP. A declining trend over benign years indicates EWMA softening. Flag any year where Rate% falls below the earliest-year Rate% by more than 0.5pp as a soft-market signal.
 
 **Dominant peril:** "Attritional" if Cat GUL% < 30%, "Mixed" if 30–60%, "Cat" if > 60%.
 
