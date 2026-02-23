@@ -79,14 +79,14 @@ impl SimulationConfig {
             seed: 42,
             years: 20,
             warmup_years: 2,
-            // 5 insurers, each endowed with 1B USD capital at construction; persists year-over-year.
+            // 5 insurers, each endowed with 500M USD capital at construction; persists year-over-year.
             insurers: (1..=5)
                 .map(|i| InsurerConfig {
                     id: InsurerId(i),
-                    initial_capital: 100_000_000_000, // 1B USD in cents
+                    initial_capital: 50_000_000_000, // 500M USD in cents
                     attritional_elf: 0.030, // annual_rate=2.0 × E[df]=1.5% → att_ELF=3.0%
-                    cat_elf: 0.015,         // frequency=0.5 × E[df]=3% → cat_ELF=1.5%; anchored
-                    target_loss_ratio: 0.55, // 1 − 0.344 expenses − 0.106 profit → CR ≈ 89.4%
+                    cat_elf: 0.033,         // frequency=0.5 × E[df]=6.7% → cat_ELF=3.3%; anchored
+                    target_loss_ratio: 0.80, // gross (pre-reinsurance) pricing; benign CR ≈ 70%
                     ewma_credibility: 0.3,
                     expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
                     profit_loading: 0.05, // 5% markup above ATP; MS3 risk/capital charge
@@ -102,8 +102,8 @@ impl SimulationConfig {
             },
             catastrophe: CatConfig {
                 annual_frequency: 0.5,  // one cat event every 2 years on average
-                pareto_scale: 0.02,     // minimum 2% damage fraction ($1M on $50M)
-                pareto_shape: 3.0,      // E[df] = 0.02 × 3.0 / 2.0 = 3%; finite variance (shape > 2)
+                pareto_scale: 0.04,     // minimum 4% damage fraction ($2M on $50M); gross book
+                pareto_shape: 2.5,      // E[df] = 0.04 × 2.5 / 1.5 = 6.7%; fatter tail than shape=3
             },
         }
     }
