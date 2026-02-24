@@ -95,8 +95,8 @@ for e in events:
     if not isinstance(ev, dict): continue
     y = day // 360 + 1
     if 'LossEvent'   in ev: cat_years.add(y)
-    elif 'InsuredLoss' in ev:
-        il = ev['InsuredLoss']
+    elif 'AssetDamage' in ev:
+        il = ev['AssetDamage']
         (attr_gul if il['peril'] == 'Attritional' else cat_gul)[y][il['insured_id']] += il['ground_up_loss']
     elif 'PolicyBound' in ev:
         active[y].add(ev['PolicyBound']['insured_id'])
@@ -145,11 +145,13 @@ Report: individual attritional CV, market attritional CV, CV ratio, LLN predicti
 
 ### Tier 2 — Year Character Table (always)
 
-Read all values directly from the `cargo run --release --bin analyse` output above — every column is
-guaranteed to be populated (the Rust binary computes them all in a single typed event scan).
+Reproduce the full table exactly as printed by `cargo run --release --bin analyse` — header line,
+separator line, and all data rows — inside a fenced code block. Do not reformat, subset, or
+convert to a markdown table.
 
-| Year | LossR% | CombR% | Rate% | Dominant Peril | TotalCap(B) | Insolvent# |
-|------|--------|--------|-------|----------------|-------------|------------|
+```
+(paste raw output here)
+```
 
 **LossR%:** pure loss ratio = total claims / total gross premium.
 
