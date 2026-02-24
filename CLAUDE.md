@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build          # Debug build
 cargo build --release  # Release build
-cargo run            # Build and run
+cargo run            # Build and run (writes events.ndjson)
+cargo run --release --bin analyse   # Tier 1 invariants (15 checks) + Tier 2 year table
 cargo test           # Run tests
 cargo test <name>    # Run a single test by name
 cargo clippy         # Lint
@@ -36,7 +37,13 @@ for e in events:
         # ... collect and compare year-over-year
 ```
 
-**Never draw conclusions from a single-year snapshot or from Debug print output alone.** The Debug output shows per-panel-entry premiums, not the raw ATP — these look identical across syndicates by construction. Reading `QuoteIssued.premium` from the NDJSON gives the correct per-syndicate ATP before panel splitting.
+**Run structural checks first.** `src/analysis.rs` exposes two typed verifiers:
+- `verify_mechanics()` — 6 timing/ordering invariants (day offsets, loss-before-bound, etc.)
+- `verify_integrity()` — 9 structural invariants (GUL caps, claim-loss matching, bind-flow completeness)
+
+Both are called by `cargo run --release --bin analyse` (Tier 1 output) and by `cargo run` (`print_analysis`). Run one of these before drawing conclusions from raw NDJSON — they catch routing bugs and simulation errors that are invisible in aggregate statistics.
+
+**Never draw conclusions from a single-year snapshot or from Debug print output alone.** Reading `LeadQuoteIssued.premium` from the NDJSON gives the correct per-insurer ATP.
 
 ## Project
 
