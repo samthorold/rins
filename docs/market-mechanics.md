@@ -22,7 +22,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Separate cat / attritional ELF (cat ELF anchored, attritional EWMA-updated) | ACTIVE | `src/insurer.rs::on_year_end` |
 | Profit loading above ATP in underwriter channel | ACTIVE | `src/insurer.rs::underwriter_premium` |
 | Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
-| Exposure management (max line size, max cat aggregate) | ACTIVE | `src/insurer.rs::on_lead_quote_requested`, `src/broker.rs::on_lead_quote_declined` |
+| Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE — capital-linked fractions (net_line_capacity=0.30, solvency_capital_fraction=0.30, pml_200 derived from cat model) | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
 | Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
 | Underwriter channel / cycle adjustment | ACTIVE — Step 1: own-CR cycle adjustment above ATP floor | `src/insurer.rs::underwriter_premium` |
 | Broker relationship scores | PLANNED | — |
@@ -288,11 +288,81 @@ The signal is deliberately insurer-local — each insurer reacts to its own comb
 3. **Lead-follow adjustment (follow mode only):** follower syndicates observe the lead quote and allow it to pull their own price. A higher follow-weight parameter produces stronger herding.
 4. Output: final quoted premium = `ATP × (1 + underwriter_adjustment)`.
 
-**Exposure limit enforcement `[PARTIAL]`:** before emitting the quote, the syndicate checks its exposure limits and emits `LeadQuoteDeclined` if either is breached. The broker then re-routes to the next insurer (round-robin, up to N attempts). Two limits are active:
-- `max_line_size` — declines any risk whose `sum_insured` exceeds this threshold.
-- `max_cat_aggregate` — declines a cat-covered risk if adding its `sum_insured` would push the insurer's live `WindstormAtlantic` aggregate above the limit. Canonical: 750M USD (15 × ASSET_VALUE) per insurer.
+**Exposure limit enforcement `[ACTIVE]`:** before emitting the quote, the syndicate checks its exposure limits and emits `LeadQuoteDeclined` if either is breached. The broker then re-routes to the next insurer (round-robin, up to N attempts). Both limits are capital-linked and recalculated from current capital at quote time — see §4.4.
 
-Capital-neutral premium adjustment is not yet implemented.
+---
+
+## 4.4 Exposure Management `[ACTIVE]`
+
+Syndicates manage two distinct exposure limits, both grounded in Lloyd's Franchise Guidelines (Market Bulletin Y5375, 2022):
+
+### Per-risk line size
+
+**Lloyd's rule:** the maximum net line (the syndicate's retained exposure after outward reinsurance) on any single risk must not exceed **30% of ECA plus profit**. The gross line must not exceed **min(25% of GWP, £200M)**.
+
+Since ECA ≈ Funds at Lloyd's ≈ the syndicate's available capital, this is a **capital-linked constraint**:
+
+```
+max_net_line = net_line_capacity × capital
+```
+
+where `net_line_capacity ≈ 0.30` is the fraction of capital the syndicate may commit to a single risk. As capital depletes (post-loss), the maximum line shrinks proportionally.
+
+The gross line cap ties a second independent constraint to annual premium income — a syndicate that loses significant capital cannot simply write its way to a large line in one year.
+
+### Cat aggregate per peril zone
+
+**Lloyd's mechanism:** the SCR (Solvency Capital Requirement) is set at the 99.5th percentile (1-in-200 year) of total claims on an ultimate basis. The ECA = SCR × 1.35, providing a 35% buffer above the solvency minimum. A syndicate's cat aggregate — the sum of sum-insured across all active policies in a correlated peril zone — is bounded by the requirement that the 1-in-200 scenario loss is coverable within the ECA:
+
+```
+PML_200 = cat_aggregate × pml_damage_fraction_200
+PML_200 ≤ solvency_capital_fraction × capital
+```
+
+where:
+- `pml_damage_fraction_200` — the damage fraction at the 1-in-200 return period, derived from the cat model distribution (for Pareto(scale, shape) at annual frequency λ: `scale × (200 × λ)^(1/shape)`).
+- `solvency_capital_fraction` — the fraction of capital the syndicate allocates to covering the 1-in-200 cat scenario (reflects how much of the ECA the cat book consumes vs. attritional and operational risks). Not a bright regulatory line; a calibration parameter.
+
+Rearranging to a capacity limit:
+
+```
+max_cat_aggregate = solvency_capital_fraction × capital / pml_damage_fraction_200
+```
+
+Both parameters depend on the cat model and the syndicate's portfolio composition. As capital depletes post-loss, `max_cat_aggregate` tightens proportionally — this is the mechanism that produces capacity crunches after catastrophe events. A syndicate that loses 40% of its capital after a major cat year can write only 60% of its previous cat aggregate, even before any price increase. The capacity crunch and the price increase are both consequences of the same capital depletion; they reinforce each other.
+
+**Lloyd's tail risk constraint** (Y5375): the 1-in-500 loss must not exceed 135% × 1-in-200 loss. This prevents syndicates from building books with thin tails at the 1-in-200 and cliff-edge exposure beyond it. It is a shape constraint on the aggregate cat loss distribution, not an additional aggregate cap.
+
+### Gross vs. net
+
+Lloyd's distinguishes gross (pre-reinsurance) and net (post-reinsurance) exposure. The primary regulatory constraints apply to **net** figures. Syndicates can write larger gross lines than the 30% ECA limit allows, provided they cede enough outward reinsurance to bring the net below the limit. In the current model there is no outward reinsurance, so gross = net throughout.
+
+### Current implementation `[ACTIVE]`
+
+Both limits are enforced as **capital-linked fractions** recalculated from `self.capital` at every quote:
+
+```rust
+// Per-risk line size
+effective_line_limit = net_line_capacity × capital          // e.g. 0.30 × 500M = 150M USD
+
+// Cat aggregate
+effective_cat_limit  = solvency_capital_fraction × capital / pml_damage_fraction_200
+                     // e.g. 0.30 × 500M / 0.252 ≈ 595M USD
+```
+
+`pml_damage_fraction_200` is derived once in `Simulation::from_config()` from the cat model:
+
+```
+pml_damage_fraction_200 = pareto_scale × (200 × annual_frequency)^(1 / pareto_shape)
+```
+
+For canonical Pareto(scale=0.04, shape=2.5, λ=0.5): `0.04 × 100^0.4 ≈ 0.252`.
+
+**Config fields** (`src/config.rs`, `InsurerConfig`):
+- `net_line_capacity: Option<f64>` — canonical `Some(0.30)`; `None` = unlimited (tests only).
+- `solvency_capital_fraction: Option<f64>` — canonical `Some(0.30)`; `None` = unlimited (tests only).
+
+The hard-decline at limit is realistic — Lloyd's Franchise Guidelines are regulatory hard floors requiring a dispensation to exceed. As capital is depleted post-loss, both limits tighten proportionally; as premiums accumulate, they relax. This is the feedback loop that produces post-catastrophe capacity crunches and the subsequent premium hardening.
 
 ---
 
@@ -371,11 +441,20 @@ for their underwriting. FAL minimum is 40% of stamp capacity (maximum NPI), with
 35% Economic Capital Assessment uplift (ECA = SCR × 1.35) applied by Lloyd's above the
 Solvency II minimum. The market-wide target solvency ratio is ≥ 140% (Lloyd's actual 2024: 206%).
 
-**Calibration:** With canonical parameters (100 insureds, 5 insurers, ELF = 0.239,
-target_LR = 0.55, SI = 50 M USD), each insurer writes ≈ 434 M USD GWP per year. The
-initial capital of 1 B USD represents ≈ 230% of NPI — consistent with Lloyd's MWSCR of
-140–206%. The Lloyd's FAL minimum of 40% NPI ≈ 174 M USD; current capital is ≈ 5.7×
-that minimum, providing a realistic catastrophe buffer.
+**Capital as the underwriting constraint:** a syndicate's capital directly governs its maximum
+exposure through two mechanisms (§4.4): the per-risk net line limit (30% of ECA) and the cat
+aggregate limit (PML at 1-in-200 return period ≤ a fraction of ECA). Capital depletion therefore
+compresses both limits simultaneously — a syndicate that has absorbed large losses writes smaller
+lines and less cat aggregate, reducing its capacity contribution to the market. This feedback
+is the primary engine of post-catastrophe capacity crunches.
+
+**Calibration:** With canonical parameters (100 insureds, 5 insurers, total ELF ≈ 6.3%,
+target_LR = 0.80, SI = 50 M USD, profit_loading = 5%), each insurer writes ≈ 105 policies × 50 M USD
+at ~8.3% premium rate ≈ 435 M USD GWP per year. Initial capital of 500 M USD represents ≈ 115%
+of NPI — below the Lloyd's MWSCR target of 140–206% by design, to make solvency events
+meaningful within a 20-year simulation horizon. The per-risk net line limit of `0.30 × 500M = 150M USD`
+exceeds any single policy's sum_insured (50M USD), so per-risk limits are non-binding in the
+current single-territory model; the cat aggregate limit is the operative constraint.
 
 Source: `src/insurer.rs`, `src/config.rs`.
 
