@@ -1,10 +1,10 @@
 use std::cmp::Ordering;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::types::{Day, InsuredId, InsurerId, PolicyId, SubmissionId, Year};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Peril {
     WindstormAtlantic,
     Attritional,
@@ -12,21 +12,21 @@ pub enum Peril {
 
 /// The risk being submitted for coverage.
 /// Full coverage: the insurer writes limit = sum_insured, attachment = 0.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Risk {
     pub sum_insured: u64, // monetary units (e.g. USD cents)
     pub territory: String,
     pub perils_covered: Vec<Peril>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeclineReason {
     MaxLineSizeExceeded,
     MaxCatAggregateBreached,
     Insolvent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     /// Fires once at Day(0) to bootstrap the simulation. Schedules YearStart(year_start).
     /// `warmup_years` warm-up years are prepended before the `analysis_years` analysis period;
@@ -120,7 +120,7 @@ pub enum Event {
 /// A dispatched event with its simulation day. Position in `Simulation.log` is its implicit sequence number.
 ///
 /// Serves as both the immutable log entry and the priority queue entry. Ordering is by `day` only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimEvent {
     pub day: Day,
     pub event: Event,

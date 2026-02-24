@@ -19,18 +19,18 @@ Report any build or runtime errors and stop if the run fails.
 
 ## Step 2 — Analyse and verify
 
-From /Users/sam/Projects/rins, run `verify_mechanics.py` first. If it FAILs, report mechanics violations prominently before proceeding.
+From /Users/sam/Projects/rins, run the Rust analyser first (Tier 1 mechanics + Tier 2 table),
+then the secondary Python verifiers. If Tier 1 FAILs, report violations prominently before proceeding.
 
 ```
-python3 scripts/verify_mechanics.py
-python3 scripts/analyse_sim.py
+cargo run --release --bin analyse 2>&1
 python3 scripts/verify_claims.py
 python3 scripts/verify_insolvency.py
 python3 scripts/verify_panel_integrity.py
 python3 scripts/verify_quoting_flow.py
 ```
 
-Report any FAIL lines from each verifier before the Step 3 analysis.
+Report any FAIL lines from the Rust analyser and each Python verifier before the Step 3 analysis.
 
 ## Step 3 — Report
 
@@ -40,7 +40,7 @@ Structure the report as four explicit priority tiers. Work top-to-bottom; if Tie
 
 ### Tier 1 — Mechanics & Verifier Status (always)
 
-List each of the 6 mechanics invariants as **PASS** or **FAIL** (from `verify_mechanics.py` output).
+List each of the 6 mechanics invariants as **PASS** or **FAIL** (from `cargo run --release --bin analyse` output).
 List each secondary verifier as **PASS** or **FAIL**:
 - `verify_claims.py`
 - `verify_insolvency.py`
@@ -138,18 +138,20 @@ Produce one row per year:
 | Year | LossR% | CombR% | Rate% | Dominant Peril | TotalCap(B) | Insolvent# |
 |------|--------|--------|-------|----------------|-------------|------------|
 
-**LossR%:** pure loss ratio = total claims / total gross premium. Read from the "Capital and solvency per year" section of `analyse_sim.py` output.
+Read all values directly from the `cargo run --release --bin analyse` output above — every column is
+guaranteed to be populated (the Rust binary computes them all in a single typed event scan).
 
-**CombR%:** combined ratio = LossR% + expense ratio (34.4%). Underwriting profit requires CombR% < 100%; above 100% the market is loss-making before investment income. Read from the same section.
+**LossR%:** pure loss ratio = total claims / total gross premium.
 
-**Rate%:** market-wide premium per unit of exposure (`total_bound_premium / total_sum_insured`).
-Read the per-year value directly from the "Market rate on line per year" section of `analyse_sim.py` output — do not assume a fixed value. Rate% varies year to year as the attritional EWMA updates ATP. A declining trend over benign years indicates EWMA softening. Flag any year where Rate% falls below the earliest-year Rate% by more than 0.5pp as a soft-market signal.
+**CombR%:** combined ratio = LossR% + expense ratio (34.4%). Underwriting profit requires CombR% < 100%; above 100% the market is loss-making before investment income.
+
+**Rate%:** market-wide rate on line = bound premium / sum insured. Varies year to year as the attritional EWMA updates ATP. A declining trend over benign years indicates EWMA softening. Flag any year where Rate% falls below the earliest-year Rate% by more than 0.5pp as a soft-market signal.
 
 **Dominant peril:** "Attritional" if Cat GUL% < 30%, "Mixed" if 30–60%, "Cat" if > 60%.
 
-**TotalCap(B):** total estimated capital across all insurers at year-end, in billions USD (floored at 0 per insurer). Read from the "Capital and solvency per year" section of `analyse_sim.py` output. A declining trend flags capital erosion from cumulative losses.
+**TotalCap(B):** total capital across all insurers at year-end (billions USD, floored at 0 per insurer). A declining trend flags capital erosion from cumulative losses.
 
-**Insolvent#:** count of `InsurerInsolvent` events in the year. Read from the same section. Any non-zero value should be noted explicitly.
+**Insolvent#:** count of `InsurerInsolvent` events in the year. Any non-zero value should be noted explicitly.
 
 After the table, note any year with Insolvent# > 0 and call out years where CombR% > 100% (market loss-making).
 
