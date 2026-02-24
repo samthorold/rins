@@ -212,13 +212,28 @@ impl Insurer {
 
     /// Update attritional_elf via EWMA from this year's realized attritional burning cost,
     /// then reset YTD accumulators. cat_elf is never updated. No-op if no exposure written.
-    pub fn on_year_end(&mut self) {
+    /// Also detects "zombie" state: capital > 0 but max_line < min_sum_insured — the insurer
+    /// can no longer write any new business. Marks it insolvent and emits InsurerInsolvent.
+    pub fn on_year_end(&mut self, day: Day, min_sum_insured: u64) -> Vec<(Day, Event)> {
         if self.ytd.exposure > 0 {
             let realized_att_lf = self.ytd.attritional_loss_fraction();
             self.attritional_elf = self.ewma_credibility * realized_att_lf
                 + (1.0 - self.ewma_credibility) * self.attritional_elf;
         }
         self.ytd.reset();
+
+        // Zombie check: capital > 0 but max_line < min writeable policy size.
+        // Functionally equivalent to insolvency — no new business can be written.
+        if !self.insolvent {
+            if let Some(nlc) = self.net_line_capacity {
+                let max_line = (nlc * self.capital.max(0) as f64) as u64;
+                if max_line < min_sum_insured {
+                    self.insolvent = true;
+                    return vec![(day, Event::InsurerInsolvent { insurer_id: self.id })];
+                }
+            }
+        }
+        vec![]
     }
 }
 
@@ -538,7 +553,7 @@ mod tests {
         let atp_before = quote_atp(&ins);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
         let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
-        ins.on_year_end();
+        let _ = ins.on_year_end(Day(0), ASSET_VALUE);
         let atp_after = quote_atp(&ins);
         assert!(atp_after > atp_before, "ATP must rise after a 100% LF year: {atp_after} vs {atp_before}");
     }
@@ -550,7 +565,7 @@ mod tests {
         let atp_before = quote_atp(&ins);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
         // no claims
-        ins.on_year_end();
+        let _ = ins.on_year_end(Day(0), ASSET_VALUE);
         let atp_after = quote_atp(&ins);
         assert!(atp_after < atp_before, "ATP must fall after a 0% LF year: {atp_after} vs {atp_before}");
     }
@@ -562,7 +577,7 @@ mod tests {
         let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
         let _ = ins.on_claim_settled(Day(0), ASSET_VALUE / 2, Peril::Attritional);
-        ins.on_year_end();
+        let _ = ins.on_year_end(Day(0), ASSET_VALUE);
         let expected_elf = 0.3 * 0.5 + 0.7 * 0.239;
         let expected_atp = (expected_elf * ASSET_VALUE as f64 / 0.70).round() as u64;
         assert_eq!(quote_atp(&ins), expected_atp, "EWMA must match α × realized + (1-α) × prior");
@@ -572,7 +587,7 @@ mod tests {
     fn on_year_end_with_no_exposure_leaves_atp_unchanged() {
         let mut ins = make_insurer(InsurerId(1), 0);
         let atp_before = quote_atp(&ins);
-        ins.on_year_end(); // no policies bound, no claims
+        let _ = ins.on_year_end(Day(0), ASSET_VALUE); // no policies bound, no claims
         assert_eq!(quote_atp(&ins), atp_before, "ATP must not change if no exposure was written");
     }
 
@@ -583,9 +598,9 @@ mod tests {
         let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
         let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
-        ins.on_year_end(); // ELF updated, counters reset
+        let _ = ins.on_year_end(Day(0), ASSET_VALUE); // ELF updated, counters reset
         let atp_year1 = quote_atp(&ins);
-        ins.on_year_end(); // no new data → noop
+        let _ = ins.on_year_end(Day(0), ASSET_VALUE); // no new data → noop
         assert_eq!(quote_atp(&ins), atp_year1, "second on_year_end with no data must be a noop");
     }
 
@@ -595,12 +610,12 @@ mod tests {
         let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
         let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
-        ins.on_year_end();
+        let _ = ins.on_year_end(Day(0), ASSET_VALUE);
         let atp_after_year1 = quote_atp(&ins);
 
         ins.on_policy_bound(PolicyId(2), ASSET_VALUE, 0, &[Peril::Attritional]);
         let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
-        ins.on_year_end();
+        let _ = ins.on_year_end(Day(0), ASSET_VALUE);
         let atp_after_year2 = quote_atp(&ins);
 
         assert!(atp_after_year2 > atp_after_year1, "consecutive bad years must compound ELF upward");
@@ -618,6 +633,40 @@ mod tests {
             1_000_000 + expected_net,
             "capital must increase by net premium (gross × (1 − expense_ratio))"
         );
+    }
+
+    // ── Zombie insurer detection ──────────────────────────────────────────────
+
+    #[test]
+    fn zombie_insurer_marked_insolvent_at_year_end() {
+        // capital = 100M USD → max_line = 0.30 × 100M = 30M < ASSET_VALUE (50M) → zombie
+        let capital_cents = 10_000_000_000i64; // 100M USD
+        let mut ins = Insurer::new(
+            InsurerId(1), capital_cents,
+            0.239, 0.0, 0.70, 0.3, 0.0, 0.0,
+            Some(0.30), None, 0.252,
+        );
+        let events = ins.on_year_end(Day(360), ASSET_VALUE);
+        assert!(ins.insolvent, "zombie insurer must be marked insolvent");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].1,
+            Event::InsurerInsolvent { insurer_id } if insurer_id == InsurerId(1)
+        ));
+    }
+
+    #[test]
+    fn insurer_at_max_line_threshold_not_marked_insolvent() {
+        // capital = ceil(ASSET_VALUE / 0.30) cents → max_line = 0.30 × capital ≥ ASSET_VALUE → not zombie
+        let capital_cents = (ASSET_VALUE as f64 / 0.30).ceil() as i64;
+        let mut ins = Insurer::new(
+            InsurerId(1), capital_cents,
+            0.239, 0.0, 0.70, 0.3, 0.0, 0.0,
+            Some(0.30), None, 0.252,
+        );
+        let events = ins.on_year_end(Day(360), ASSET_VALUE);
+        assert!(!ins.insolvent, "insurer at threshold must not be marked insolvent");
+        assert!(events.is_empty());
     }
 
 }

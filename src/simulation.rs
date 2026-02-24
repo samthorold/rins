@@ -13,7 +13,7 @@ fn pml_damage_fraction(scale: f64, shape: f64, annual_frequency: f64, return_per
 }
 
 use crate::broker::Broker;
-use crate::config::SimulationConfig;
+use crate::config::{SimulationConfig, ASSET_VALUE};
 use crate::events::{Event, EventLog, Peril, Risk, SimEvent};
 use crate::insured::Insured;
 use crate::insurer::Insurer;
@@ -475,8 +475,15 @@ impl Simulation {
         eprintln!("Year {} complete", year.0);
 
         // Update each insurer's expected_loss_fraction via EWMA from this year's experience.
-        for insurer in &mut self.insurers {
-            insurer.on_year_end();
+        // Also detect zombies (capital > 0 but max_line < min policy size) and mark them insolvent.
+        // Collect emitted events before scheduling to avoid conflicting mutable borrows.
+        let zombie_events: Vec<(Day, Event)> = self
+            .insurers
+            .iter_mut()
+            .flat_map(|insurer| insurer.on_year_end(day, ASSET_VALUE))
+            .collect();
+        for (d, ev) in zombie_events {
+            self.schedule(d, ev);
         }
 
         // ── Entry criterion ───────────────────────────────────────────────────
