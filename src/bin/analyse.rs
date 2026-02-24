@@ -19,9 +19,12 @@ use rins::{
 };
 
 fn main() {
+    // ── Resolve events file path: first positional arg, else default ──────────
+    let events_path = std::env::args().nth(1).unwrap_or_else(|| "events.ndjson".to_string());
+
     // ── Load events ──────────────────────────────────────────────────────────
-    let file = File::open("events.ndjson").unwrap_or_else(|e| {
-        eprintln!("error: cannot open events.ndjson — {e}");
+    let file = File::open(&events_path).unwrap_or_else(|e| {
+        eprintln!("error: cannot open {events_path} — {e}");
         eprintln!("Run `cargo run --release` first to generate the event stream.");
         std::process::exit(1);
     });
