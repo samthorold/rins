@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     events::{Event, Peril, SimEvent},
@@ -96,6 +96,31 @@ pub enum MechanicsViolation {
     CatFractionInconsistent { peril: String, day: u64, detail: String },
 }
 
+
+impl std::fmt::Display for MechanicsViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DayOffsetChain { submission_id, detail } => {
+                write!(f, "DayOffsetChain sub={submission_id}: {detail}")
+            }
+            Self::LossBeforeBound { policy_id, loss_day, bound_day } => {
+                write!(f, "LossBeforeBound policy={policy_id}: loss_day={loss_day} bound_day={bound_day}")
+            }
+            Self::AttrNotStrictlyPostBound { policy_id, loss_day, bound_day } => {
+                write!(f, "AttrNotStrictlyPostBound policy={policy_id}: loss_day={loss_day} bound_day={bound_day}")
+            }
+            Self::PolicyExpiredTiming { policy_id, expected, actual } => {
+                write!(f, "PolicyExpiredTiming policy={policy_id}: expected={expected} actual={actual}")
+            }
+            Self::ClaimAfterExpiry { policy_id, claim_day, expiry_day } => {
+                write!(f, "ClaimAfterExpiry policy={policy_id}: claim_day={claim_day} expiry_day={expiry_day}")
+            }
+            Self::CatFractionInconsistent { peril, day, detail } => {
+                write!(f, "CatFractionInconsistent peril={peril} day={day}: {detail}")
+            }
+        }
+    }
+}
 
 /// Compute per-year statistics from a typed event slice.
 ///
@@ -280,6 +305,223 @@ pub fn verify_mechanics(events: &[SimEvent]) -> Vec<MechanicsViolation> {
                 }
             }
             _ => {}
+        }
+    }
+
+    violations
+}
+
+/// A structural integrity violation detected in the event stream.
+///
+/// These are universal truths that must hold for any valid simulation run:
+/// claim amounts, routing consistency, and bind-flow completeness.
+#[derive(Debug)]
+pub enum IntegrityViolation {
+    // From verify_claims.py
+    GulExceedsSumInsured { policy_id: u64, day: u64, peril: String, gul: u64, sum_insured: u64 },
+    AggregateClaimExceedsSumInsured { policy_id: u64, year: u32, aggregate: u64, sum_insured: u64 },
+    ClaimWithoutMatchingLoss { policy_id: u64, day: u64 },
+    // From verify_insolvency.py
+    ClaimAmountZero { policy_id: u64, day: u64 },
+    ClaimInsurerMismatch { policy_id: u64, day: u64, claim_insurer: u64, bound_insurer: u64 },
+    // From verify_panel_integrity.py
+    QuoteAcceptedWithoutPolicyBound { submission_id: u64, accepted_day: u64 },
+    PolicyBoundInsurerMismatch { submission_id: u64, policy_id: u64, bound_insurer: u64, accepted_insurer: u64 },
+    DuplicatePolicyBound { policy_id: u64 },
+    PolicyExpiredWithoutBound { policy_id: u64 },
+}
+
+impl std::fmt::Display for IntegrityViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GulExceedsSumInsured { policy_id, day, peril, gul, sum_insured } => {
+                write!(f, "GulExceedsSumInsured policy={policy_id} day={day} peril={peril} gul={gul} sum_insured={sum_insured}")
+            }
+            Self::AggregateClaimExceedsSumInsured { policy_id, year, aggregate, sum_insured } => {
+                write!(f, "AggregateClaimExceedsSumInsured policy={policy_id} year={year} aggregate={aggregate} sum_insured={sum_insured}")
+            }
+            Self::ClaimWithoutMatchingLoss { policy_id, day } => {
+                write!(f, "ClaimWithoutMatchingLoss policy={policy_id} day={day}")
+            }
+            Self::ClaimAmountZero { policy_id, day } => {
+                write!(f, "ClaimAmountZero policy={policy_id} day={day}")
+            }
+            Self::ClaimInsurerMismatch { policy_id, day, claim_insurer, bound_insurer } => {
+                write!(f, "ClaimInsurerMismatch policy={policy_id} day={day} claim_insurer={claim_insurer} bound_insurer={bound_insurer}")
+            }
+            Self::QuoteAcceptedWithoutPolicyBound { submission_id, accepted_day } => {
+                write!(f, "QuoteAcceptedWithoutPolicyBound sub={submission_id} accepted_day={accepted_day}")
+            }
+            Self::PolicyBoundInsurerMismatch { submission_id, policy_id, bound_insurer, accepted_insurer } => {
+                write!(f, "PolicyBoundInsurerMismatch sub={submission_id} policy={policy_id} bound_insurer={bound_insurer} accepted_insurer={accepted_insurer}")
+            }
+            Self::DuplicatePolicyBound { policy_id } => {
+                write!(f, "DuplicatePolicyBound policy={policy_id}")
+            }
+            Self::PolicyExpiredWithoutBound { policy_id } => {
+                write!(f, "PolicyExpiredWithoutBound policy={policy_id}")
+            }
+        }
+    }
+}
+
+/// Check all 9 structural integrity invariants. Returns one item per violation found.
+pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
+    // ── Index pass ────────────────────────────────────────────────────────────
+    let mut max_day: u64 = 0;
+    let mut policy_sum_insured: HashMap<PolicyId, u64> = HashMap::new();
+    let mut policy_insurer: HashMap<PolicyId, InsurerId> = HashMap::new();
+    let mut sub_insurer_quoted: HashMap<SubmissionId, InsurerId> = HashMap::new();
+    let mut sub_accepted_day: HashMap<SubmissionId, u64> = HashMap::new();
+    let mut sub_policy: HashMap<SubmissionId, PolicyId> = HashMap::new();
+    let mut policy_bind_count: HashMap<PolicyId, u32> = HashMap::new();
+    let mut bound_policies: HashSet<PolicyId> = HashSet::new();
+    let mut loss_keys: HashSet<(u64, PolicyId)> = HashSet::new();
+    let mut claim_agg: HashMap<(PolicyId, u32), u64> = HashMap::new();
+    let mut claim_settled_list: Vec<(u64, PolicyId, InsurerId, u64)> = Vec::new();
+
+    for ev in events {
+        let day = ev.day.0;
+        if day > max_day {
+            max_day = day;
+        }
+        match &ev.event {
+            Event::QuoteAccepted { submission_id, insurer_id, .. } => {
+                sub_accepted_day.insert(*submission_id, day);
+                // Track the insurer whose quote was accepted — this is the correct reference for
+                // PolicyBoundInsurerMismatch. With multi-insurer solicitation, multiple
+                // LeadQuoteIssued events share a submission_id; only QuoteAccepted identifies the
+                // selected insurer unambiguously.
+                sub_insurer_quoted.insert(*submission_id, *insurer_id);
+            }
+            Event::PolicyBound { policy_id, submission_id, insurer_id, sum_insured, .. } => {
+                policy_sum_insured.insert(*policy_id, *sum_insured);
+                policy_insurer.insert(*policy_id, *insurer_id);
+                sub_policy.insert(*submission_id, *policy_id);
+                *policy_bind_count.entry(*policy_id).or_insert(0) += 1;
+                bound_policies.insert(*policy_id);
+            }
+            Event::InsuredLoss { policy_id, .. } => {
+                loss_keys.insert((day, *policy_id));
+            }
+            Event::ClaimSettled { policy_id, insurer_id, amount, .. } => {
+                let year = ev.day.year().0;
+                *claim_agg.entry((*policy_id, year)).or_insert(0) += amount;
+                claim_settled_list.push((day, *policy_id, *insurer_id, *amount));
+            }
+            _ => {}
+        }
+    }
+
+    let mut violations: Vec<IntegrityViolation> = Vec::new();
+
+    // ── Claims (3) ────────────────────────────────────────────────────────────
+
+    // Check 1: GulExceedsSumInsured — gul must not exceed sum_insured for any peril.
+    for ev in events {
+        if let Event::InsuredLoss { policy_id, peril, ground_up_loss, .. } = &ev.event {
+            if let Some(&si) = policy_sum_insured.get(policy_id) {
+                if *ground_up_loss > si {
+                    violations.push(IntegrityViolation::GulExceedsSumInsured {
+                        policy_id: policy_id.0,
+                        day: ev.day.0,
+                        peril: format!("{peril:?}"),
+                        gul: *ground_up_loss,
+                        sum_insured: si,
+                    });
+                }
+            }
+        }
+    }
+
+    // Check 2: AggregateClaimExceedsSumInsured — sum of claims per (policy, year) ≤ sum_insured.
+    for ((policy_id, year), &agg) in &claim_agg {
+        if let Some(&si) = policy_sum_insured.get(policy_id) {
+            if agg > si {
+                violations.push(IntegrityViolation::AggregateClaimExceedsSumInsured {
+                    policy_id: policy_id.0,
+                    year: *year,
+                    aggregate: agg,
+                    sum_insured: si,
+                });
+            }
+        }
+    }
+
+    // Check 3 (Claims), 4 (Routing), 5 (Routing) — iterate ClaimSettled.
+    for &(day, policy_id, insurer_id, amount) in &claim_settled_list {
+        // ClaimWithoutMatchingLoss: every ClaimSettled must have a matching InsuredLoss.
+        if !loss_keys.contains(&(day, policy_id)) {
+            violations.push(IntegrityViolation::ClaimWithoutMatchingLoss {
+                policy_id: policy_id.0,
+                day,
+            });
+        }
+        // ClaimAmountZero: claim amount must be positive.
+        if amount == 0 {
+            violations.push(IntegrityViolation::ClaimAmountZero {
+                policy_id: policy_id.0,
+                day,
+            });
+        }
+        // ClaimInsurerMismatch: claim must be paid by the insurer who bound the policy.
+        if let Some(&bound_insurer) = policy_insurer.get(&policy_id) {
+            if insurer_id != bound_insurer {
+                violations.push(IntegrityViolation::ClaimInsurerMismatch {
+                    policy_id: policy_id.0,
+                    day,
+                    claim_insurer: insurer_id.0,
+                    bound_insurer: bound_insurer.0,
+                });
+            }
+        }
+    }
+
+    // ── Bind Flow (4) ─────────────────────────────────────────────────────────
+
+    // Check 6: QuoteAcceptedWithoutPolicyBound — every non-final-day accepted quote binds.
+    for (&sub_id, &acc_day) in &sub_accepted_day {
+        if acc_day < max_day && !sub_policy.contains_key(&sub_id) {
+            violations.push(IntegrityViolation::QuoteAcceptedWithoutPolicyBound {
+                submission_id: sub_id.0,
+                accepted_day: acc_day,
+            });
+        }
+    }
+
+    // Check 7: PolicyBoundInsurerMismatch — bound insurer must match the insurer who quoted.
+    for (&sub_id, &policy_id) in &sub_policy {
+        if let (Some(&quoted), Some(&bound)) =
+            (sub_insurer_quoted.get(&sub_id), policy_insurer.get(&policy_id))
+        {
+            if quoted != bound {
+                violations.push(IntegrityViolation::PolicyBoundInsurerMismatch {
+                    submission_id: sub_id.0,
+                    policy_id: policy_id.0,
+                    bound_insurer: bound.0,
+                    accepted_insurer: quoted.0,
+                });
+            }
+        }
+    }
+
+    // Check 8: DuplicatePolicyBound — each policy_id must bind exactly once.
+    for (&policy_id, &count) in &policy_bind_count {
+        if count > 1 {
+            violations.push(IntegrityViolation::DuplicatePolicyBound {
+                policy_id: policy_id.0,
+            });
+        }
+    }
+
+    // Check 9: PolicyExpiredWithoutBound — every PolicyExpired must reference a bound policy.
+    for ev in events {
+        if let Event::PolicyExpired { policy_id } = &ev.event {
+            if !bound_policies.contains(policy_id) {
+                violations.push(IntegrityViolation::PolicyExpiredWithoutBound {
+                    policy_id: policy_id.0,
+                });
+            }
         }
     }
 
@@ -689,5 +931,72 @@ mod tests {
             violations.iter().any(|v| matches!(v, MechanicsViolation::LossBeforeBound { .. })),
             "expected LossBeforeBound violation, got: {violations:?}"
         );
+    }
+
+    // ── Integration tests ─────────────────────────────────────────────────────
+
+    fn small_test_config(seed: u64) -> crate::config::SimulationConfig {
+        use crate::config::{AttritionalConfig, CatConfig, InsurerConfig, SimulationConfig};
+        SimulationConfig {
+            seed,
+            years: 5,
+            warmup_years: 0,
+            insurers: (1u64..=2)
+                .map(|i| InsurerConfig {
+                    id: InsurerId(i),
+                    initial_capital: 10_000_000_000, // 100M USD in cents
+                    attritional_elf: 0.030,
+                    cat_elf: 0.033,
+                    target_loss_ratio: 0.80,
+                    ewma_credibility: 0.3,
+                    profit_loading: 0.05,
+                    expense_ratio: 0.344,
+                    net_line_capacity: None,
+                    solvency_capital_fraction: None,
+                    cycle_sensitivity: 0.0,
+                    pml_damage_fraction_override: None,
+                })
+                .collect(),
+            n_insureds: 20,
+            attritional: AttritionalConfig { annual_rate: 2.0, mu: -4.7, sigma: 1.0 },
+            catastrophe: CatConfig {
+                annual_frequency: 0.5,
+                pareto_scale: 0.04,
+                pareto_shape: 2.5,
+            },
+            quotes_per_submission: None,
+        }
+    }
+
+    #[test]
+    fn integrity_holds_small_config() {
+        use crate::simulation::Simulation;
+        for seed in [1u64, 2, 3] {
+            let config = small_test_config(seed);
+            let mut sim = Simulation::from_config(config);
+            sim.start();
+            sim.run();
+            let mech = verify_mechanics(&sim.log);
+            assert!(mech.is_empty(), "seed {seed}: mechanics violations: {mech:?}");
+            let integ = verify_integrity(&sim.log);
+            assert!(integ.is_empty(), "seed {seed}: integrity violations: {integ:?}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn integrity_holds_canonical_multi_seed() {
+        use crate::simulation::Simulation;
+        for seed in [42u64, 43, 44, 45, 46] {
+            let mut config = crate::config::SimulationConfig::canonical();
+            config.seed = seed;
+            let mut sim = Simulation::from_config(config);
+            sim.start();
+            sim.run();
+            let mech = verify_mechanics(&sim.log);
+            assert!(mech.is_empty(), "seed {seed}: mechanics violations: {mech:?}");
+            let integ = verify_integrity(&sim.log);
+            assert!(integ.is_empty(), "seed {seed}: integrity violations: {integ:?}");
+        }
     }
 }

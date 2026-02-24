@@ -12,25 +12,21 @@ Follow these steps exactly. Do not skip regeneration.
 Run `cargo run --release` in /Users/sam/Projects/rins to produce a fresh events.ndjson.
 Report any build or runtime errors and stop if the run fails.
 
-> **Maintenance note:** Mechanics checks in `scripts/verify_mechanics.py` are derived from
-> the `[ACTIVE]` sections of `docs/market-mechanics.md`. When that document changes — new
-> `[ACTIVE]` sections added, existing ones promoted from `[PARTIAL]`, or invariants revised —
-> review and update `scripts/verify_mechanics.py` to match.
-
 ## Step 2 — Analyse and verify
 
-From /Users/sam/Projects/rins, run the Rust analyser first (Tier 1 mechanics + Tier 2 table),
-then the secondary Python verifiers. If Tier 1 FAILs, report violations prominently before proceeding.
+From /Users/sam/Projects/rins, run the Rust analyser (Tier 1 mechanics + integrity + Tier 2 table),
+then the remaining Python verifier. If any Tier 1 invariant FAILs, report violations prominently before proceeding.
 
 ```
 cargo run --release --bin analyse 2>&1
-python3 scripts/verify_claims.py
-python3 scripts/verify_insolvency.py
-python3 scripts/verify_panel_integrity.py
 python3 scripts/verify_quoting_flow.py
 ```
 
-Report any FAIL lines from the Rust analyser and each Python verifier before the Step 3 analysis.
+The Rust analyser now covers all 15 structural invariants (Inv 1–6 mechanics, Inv 7–15 integrity).
+`verify_claims.py`, `verify_insolvency.py`, and `verify_panel_integrity.py` have been deleted —
+their checks are part of the Rust Tier 1 output.
+
+Report any FAIL lines from the Rust analyser and the Python verifier before the Step 3 analysis.
 
 ## Step 3 — Report
 
@@ -40,11 +36,28 @@ Structure the report as four explicit priority tiers. Work top-to-bottom; if Tie
 
 ### Tier 1 — Mechanics & Verifier Status (always)
 
-List each of the 6 mechanics invariants as **PASS** or **FAIL** (from `cargo run --release --bin analyse` output).
-List each secondary verifier as **PASS** or **FAIL**:
-- `verify_claims.py`
-- `verify_insolvency.py`
-- `verify_panel_integrity.py`
+List each of the 15 invariants as **PASS** or **FAIL** (from `cargo run --release --bin analyse` output):
+
+**Mechanics (Inv 1–6):**
+- Inv 1 — Day offset chain
+- Inv 2 — No loss before bound
+- Inv 3 — Attritional strictly post-bound
+- Inv 4 — PolicyExpired timing
+- Inv 5 — No claim after expiry
+- Inv 6 — Cat GUL ≤ sum insured
+
+**Integrity (Inv 7–15):**
+- Inv 7 — GUL ≤ sum insured (all perils)
+- Inv 8 — Aggregate claim ≤ sum insured per (policy, year)
+- Inv 9 — Every ClaimSettled has matching InsuredLoss
+- Inv 10 — Claim amount > 0
+- Inv 11 — ClaimSettled insurer matches PolicyBound insurer
+- Inv 12 — Every QuoteAccepted (non-final-day) has PolicyBound
+- Inv 13 — PolicyBound insurer matches LeadQuoteIssued insurer
+- Inv 14 — No duplicate PolicyBound for same policy_id
+- Inv 15 — Every PolicyExpired references a bound policy
+
+**Python verifier:**
 - `verify_quoting_flow.py`
 
 If any invariant or verifier FAILs: name it and its violation count prominently.
@@ -55,7 +68,7 @@ If critical failures exist, note that Tiers 2–4 may be unreliable and stop.
 
 ### Tier 1.5 — Phenomena Check (always)
 
-Assess each phenomenon currently tagged `[EMERGING]` or `[PARTIAL]` in `docs/phenomena.md`. Use data already produced by `analyse_sim.py`; no new scripts required. Deliver a one-line verdict per phenomenon.
+Assess each phenomenon currently tagged `[EMERGING]` or `[PARTIAL]` in `docs/phenomena.md`. Use data already produced by the Rust analyser and the inline snippets below; no additional scripts required. Deliver a one-line verdict per phenomenon.
 
 > **Maintenance note:** When a badge changes in `docs/phenomena.md` (PLANNED → PARTIAL → EMERGING), add or update the corresponding check here. Remove a check only when the phenomenon is so well-established it no longer warrants active monitoring.
 
@@ -121,7 +134,7 @@ Report: individual attritional CV, market attritional CV, CV ratio, LLN predicti
 
 *Claim: cat events drive simultaneous losses across all insurers large enough to breach 100% LR. Capital is persistent (no annual re-endowment) and floors at zero — a severe cat year can trigger insolvency and permanently erode market capacity.*
 
-1. Identify severe years (market LR ≥ 100%) that are cat-driven (cat GUL% > 50% of total GUL).
+1. Identify severe years (market LR ≥ 100%) that are cat-driven (Dominant Peril = Cat or Mixed) from the Tier 2 table.
 2. In each such year, confirm all five insurers have LR > 100% (shared occurrence, not idiosyncratic).
 3. Check TotalCap(B) trend around severe years — a drop confirms capital erosion is landing. Check Insolvent# for any terminal failures.
 
@@ -133,13 +146,11 @@ Report: individual attritional CV, market attritional CV, CV ratio, LLN predicti
 
 ### Tier 2 — Year Character Table (always)
 
-Produce one row per year:
+Read all values directly from the `cargo run --release --bin analyse` output above — every column is
+guaranteed to be populated (the Rust binary computes them all in a single typed event scan).
 
 | Year | LossR% | CombR% | Rate% | Dominant Peril | TotalCap(B) | Insolvent# |
 |------|--------|--------|-------|----------------|-------------|------------|
-
-Read all values directly from the `cargo run --release --bin analyse` output above — every column is
-guaranteed to be populated (the Rust binary computes them all in a single typed event scan).
 
 **LossR%:** pure loss ratio = total claims / total gross premium.
 
@@ -162,7 +173,7 @@ After the table, note any year with Insolvent# > 0 and call out years where Comb
 For each loss-making year (LossR% ≥ 100%):
 - What triggered it: number of cat `LossEvent`s and total cat GUL
 - Top insured GUL driver that year and their share of total GUL
-- ATP adequacy ratio for that year (from "ATP adequacy ratio per year" section): quote the value and note whether claims exceeded the actuarial floor (adequacy > 1.0)
+- Whether claims exceeded the actuarial floor: LossR% > ~95% implies ATP adequacy > 1.0, since premium ≈ ATP × 1.10 (5% profit loading + ~5% cycle adj floor)
 - Pattern: is stress worsening over time (trend), or random cat-driven spikes?
 
 Skip this tier entirely if no year has LossR% ≥ 100%.

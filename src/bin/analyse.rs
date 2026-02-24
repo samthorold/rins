@@ -12,7 +12,7 @@ use std::{
 };
 
 use rins::{
-    analysis::{analyse, verify_mechanics, MechanicsViolation},
+    analysis::{analyse, verify_integrity, verify_mechanics, IntegrityViolation, MechanicsViolation},
     config::SimulationConfig,
     events::SimEvent,
     types::InsurerId,
@@ -107,7 +107,7 @@ fn main() {
     );
 
     if violations.is_empty() {
-        println!("  All invariants PASS ({} events checked)", events.len());
+        println!("  All mechanics invariants PASS ({} events checked)", events.len());
     } else {
         println!("\n  {} violation(s) detected:", violations.len());
         for v in &violations {
@@ -135,6 +135,61 @@ fn main() {
                     println!("    CatFractionInconsistent  peril={peril}  day={day}  {detail}");
                 }
             }
+        }
+    }
+
+    println!();
+
+    // ── Tier 1 continued: integrity invariants ────────────────────────────────
+    let int_violations = verify_integrity(&events);
+
+    println!("=== Tier 1 — Integrity Invariants ===");
+
+    let ihas = |f: fn(&IntegrityViolation) -> bool| int_violations.iter().any(f);
+
+    println!(
+        "  [{}] Inv 7  — GUL ≤ sum insured (all perils)",
+        status(ihas(|v| matches!(v, IntegrityViolation::GulExceedsSumInsured { .. })))
+    );
+    println!(
+        "  [{}] Inv 8  — Aggregate claim ≤ sum insured per (policy, year)",
+        status(ihas(|v| matches!(v, IntegrityViolation::AggregateClaimExceedsSumInsured { .. })))
+    );
+    println!(
+        "  [{}] Inv 9  — Every ClaimSettled has a matching InsuredLoss",
+        status(ihas(|v| matches!(v, IntegrityViolation::ClaimWithoutMatchingLoss { .. })))
+    );
+    println!(
+        "  [{}] Inv 10 — Claim amount > 0",
+        status(ihas(|v| matches!(v, IntegrityViolation::ClaimAmountZero { .. })))
+    );
+    println!(
+        "  [{}] Inv 11 — ClaimSettled insurer matches PolicyBound insurer",
+        status(ihas(|v| matches!(v, IntegrityViolation::ClaimInsurerMismatch { .. })))
+    );
+    println!(
+        "  [{}] Inv 12 — Every QuoteAccepted (non-final-day) has a PolicyBound",
+        status(ihas(|v| matches!(v, IntegrityViolation::QuoteAcceptedWithoutPolicyBound { .. })))
+    );
+    println!(
+        "  [{}] Inv 13 — PolicyBound insurer matches LeadQuoteIssued insurer",
+        status(ihas(|v| matches!(v, IntegrityViolation::PolicyBoundInsurerMismatch { .. })))
+    );
+    println!(
+        "  [{}] Inv 14 — No duplicate PolicyBound for same policy_id",
+        status(ihas(|v| matches!(v, IntegrityViolation::DuplicatePolicyBound { .. })))
+    );
+    println!(
+        "  [{}] Inv 15 — Every PolicyExpired references a bound policy",
+        status(ihas(|v| matches!(v, IntegrityViolation::PolicyExpiredWithoutBound { .. })))
+    );
+
+    if int_violations.is_empty() {
+        println!("  All integrity invariants PASS");
+    } else {
+        println!("\n  {} integrity violation(s) detected:", int_violations.len());
+        for v in &int_violations {
+            println!("    {v}");
         }
     }
 

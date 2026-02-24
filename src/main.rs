@@ -1,18 +1,11 @@
-mod broker;
-mod config;
-mod events;
-mod insured;
-mod insurer;
-mod market;
-mod perils;
-mod simulation;
-mod types;
-
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-use config::SimulationConfig;
-use simulation::Simulation;
+use rins::analysis::{self, IntegrityViolation, MechanicsViolation};
+use rins::config::SimulationConfig;
+use rins::simulation::Simulation;
+use rins::types::InsurerId;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -75,6 +68,15 @@ fn main() {
             }
         });
     } else {
+        // Extract analysis inputs before base_config is moved.
+        let initial_capitals: HashMap<InsurerId, u64> = base_config
+            .insurers
+            .iter()
+            .map(|ic| (ic.id, ic.initial_capital.max(0) as u64))
+            .collect();
+        let expense_ratio =
+            base_config.insurers.first().map(|ic| ic.expense_ratio).unwrap_or(0.344);
+
         let mut config = base_config;
         config.seed = start_seed;
 
@@ -92,12 +94,94 @@ fn main() {
 
         if !quiet {
             println!("Events fired: {}", sim.log.len());
-
-            // Report final insurer capitals.
-            println!("\nFinal insurer capitals (end of simulation):");
-            for ins in &sim.insurers {
-                println!("  Insurer {:?}: {} cents", ins.id, ins.capital);
-            }
+            print_analysis(&sim.log, &initial_capitals, expense_ratio);
         }
+    }
+}
+
+fn print_analysis(
+    log: &[rins::events::SimEvent],
+    initial_capitals: &HashMap<InsurerId, u64>,
+    expense_ratio: f64,
+) {
+    // ── Mechanics invariants ──────────────────────────────────────────────────
+    let violations = analysis::verify_mechanics(log);
+
+    let inv = |variant: fn(&MechanicsViolation) -> bool| {
+        if violations.iter().any(variant) { "FAIL" } else { "PASS" }
+    };
+
+    println!("\n=== Mechanics invariants ===");
+    println!("  [1] Day-offset chain:               {}", inv(|v| matches!(v, MechanicsViolation::DayOffsetChain { .. })));
+    println!("  [2] Loss before bound:               {}", inv(|v| matches!(v, MechanicsViolation::LossBeforeBound { .. })));
+    println!("  [3] Attritional strictly post-bound: {}", inv(|v| matches!(v, MechanicsViolation::AttrNotStrictlyPostBound { .. })));
+    println!("  [4] PolicyExpired timing:            {}", inv(|v| matches!(v, MechanicsViolation::PolicyExpiredTiming { .. })));
+    println!("  [5] Claim after expiry:              {}", inv(|v| matches!(v, MechanicsViolation::ClaimAfterExpiry { .. })));
+    println!("  [6] Cat fraction consistency:        {}", inv(|v| matches!(v, MechanicsViolation::CatFractionInconsistent { .. })));
+
+    if violations.is_empty() {
+        println!("  All mechanics invariants: PASS");
+    } else {
+        println!("\n  {} violation(s):", violations.len());
+        for v in &violations {
+            println!("    {v}");
+        }
+    }
+
+    let int_violations = analysis::verify_integrity(log);
+    let iinv = |variant: fn(&IntegrityViolation) -> bool| {
+        if int_violations.iter().any(variant) { "FAIL" } else { "PASS" }
+    };
+    println!("\n=== Integrity invariants ===");
+    println!("  [7]  GUL ≤ sum insured (all perils):                          {}", iinv(|v| matches!(v, IntegrityViolation::GulExceedsSumInsured { .. })));
+    println!("  [8]  Aggregate claim ≤ sum insured per (policy, year):        {}", iinv(|v| matches!(v, IntegrityViolation::AggregateClaimExceedsSumInsured { .. })));
+    println!("  [9]  Every ClaimSettled has matching InsuredLoss:              {}", iinv(|v| matches!(v, IntegrityViolation::ClaimWithoutMatchingLoss { .. })));
+    println!("  [10] Claim amount > 0:                                         {}", iinv(|v| matches!(v, IntegrityViolation::ClaimAmountZero { .. })));
+    println!("  [11] ClaimSettled insurer matches PolicyBound insurer:         {}", iinv(|v| matches!(v, IntegrityViolation::ClaimInsurerMismatch { .. })));
+    println!("  [12] Every QuoteAccepted (non-final-day) has PolicyBound:      {}", iinv(|v| matches!(v, IntegrityViolation::QuoteAcceptedWithoutPolicyBound { .. })));
+    println!("  [13] PolicyBound insurer matches LeadQuoteIssued insurer:      {}", iinv(|v| matches!(v, IntegrityViolation::PolicyBoundInsurerMismatch { .. })));
+    println!("  [14] No duplicate PolicyBound for same policy_id:              {}", iinv(|v| matches!(v, IntegrityViolation::DuplicatePolicyBound { .. })));
+    println!("  [15] Every PolicyExpired references a bound policy:            {}", iinv(|v| matches!(v, IntegrityViolation::PolicyExpiredWithoutBound { .. })));
+    if int_violations.is_empty() {
+        println!("  All integrity invariants: PASS");
+    } else {
+        println!("\n  {} violation(s):", int_violations.len());
+        for v in &int_violations {
+            println!("    {v}");
+        }
+    }
+
+    // ── Year character table ──────────────────────────────────────────────────
+    let (warmup, stats) = analysis::analyse(log, initial_capitals, expense_ratio);
+
+    if stats.is_empty() {
+        return;
+    }
+
+    let last_year = stats.last().map(|s| s.year).unwrap_or(0);
+    println!(
+        "\n=== Year character table (warmup: {warmup}, analysis: years {}–{last_year}) ===",
+        warmup + 1
+    );
+    println!(
+        "{:>4}  {:>6}  {:>6}  {:>6}  {:<14}  {:>11}  {:>6}",
+        "Year", "LossR%", "CombR%", "Rate%", "Peril", "TotalCap(B)", "Insolv"
+    );
+    println!("{}", "-".repeat(66));
+
+    const CENTS_PER_BUSD: f64 = 100_000_000_000.0; // cents per billion USD
+
+    for s in &stats {
+        let marker = if s.insolvent_count > 0 { " !" } else { "  " };
+        println!(
+            "{:>4}  {:>6.1}  {:>6.1}  {:>6.2}  {:<14}  {:>11.2}  {:>6}{marker}",
+            s.year,
+            s.loss_ratio() * 100.0,
+            s.combined_ratio(expense_ratio) * 100.0,
+            s.rate_on_line() * 100.0,
+            s.dominant_peril(),
+            s.total_capital as f64 / CENTS_PER_BUSD,
+            s.insolvent_count,
+        );
     }
 }

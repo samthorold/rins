@@ -3,6 +3,7 @@ name = "rins"
 version = "0.1.0"
 edition = "2024"
 autobenches = false
+default-run = "rins"
 
 [dependencies]
 rand = "0.9"
