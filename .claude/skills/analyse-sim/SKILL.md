@@ -14,19 +14,18 @@ Report any build or runtime errors and stop if the run fails.
 
 ## Step 2 — Analyse and verify
 
-From /Users/sam/Projects/rins, run the Rust analyser (Tier 1 mechanics + integrity + Tier 2 table),
-then the remaining Python verifier. If any Tier 1 invariant FAILs, report violations prominently before proceeding.
+From /Users/sam/Projects/rins, run the Rust analyser (Tier 1 mechanics + integrity + Tier 2 table).
+If any Tier 1 invariant FAILs, report violations prominently before proceeding.
 
 ```
 cargo run --release --bin analyse 2>&1
-python3 scripts/verify_quoting_flow.py
 ```
 
-The Rust analyser now covers all 15 structural invariants (Inv 1–6 mechanics, Inv 7–15 integrity).
-`verify_claims.py`, `verify_insolvency.py`, and `verify_panel_integrity.py` have been deleted —
-their checks are part of the Rust Tier 1 output.
+The Rust analyser covers all 18 invariants (Inv 1–6 mechanics, Inv 7–18 integrity).
+`verify_claims.py`, `verify_insolvency.py`, `verify_panel_integrity.py`, and `verify_quoting_flow.py`
+have been deleted — their checks are part of the Rust Tier 1 output.
 
-Report any FAIL lines from the Rust analyser and the Python verifier before the Step 3 analysis.
+Report any FAIL lines from the Rust analyser before the Step 3 analysis.
 
 ## Step 3 — Report
 
@@ -36,7 +35,7 @@ Structure the report as four explicit priority tiers. Work top-to-bottom; if Tie
 
 ### Tier 1 — Mechanics & Verifier Status (always)
 
-List each of the 15 invariants as **PASS** or **FAIL** (from `cargo run --release --bin analyse` output):
+List each of the 18 invariants as **PASS** or **FAIL** (from `cargo run --release --bin analyse` output):
 
 **Mechanics (Inv 1–6):**
 - Inv 1 — Day offset chain
@@ -46,7 +45,7 @@ List each of the 15 invariants as **PASS** or **FAIL** (from `cargo run --releas
 - Inv 5 — No claim after expiry
 - Inv 6 — Cat GUL ≤ sum insured
 
-**Integrity (Inv 7–15):**
+**Integrity (Inv 7–18):**
 - Inv 7 — GUL ≤ sum insured (all perils)
 - Inv 8 — Aggregate claim ≤ sum insured per (policy, year)
 - Inv 9 — Every ClaimSettled has matching InsuredLoss
@@ -56,11 +55,11 @@ List each of the 15 invariants as **PASS** or **FAIL** (from `cargo run --releas
 - Inv 13 — PolicyBound insurer matches LeadQuoteIssued insurer
 - Inv 14 — No duplicate PolicyBound for same policy_id
 - Inv 15 — Every PolicyExpired references a bound policy
+- Inv 16 — Every LeadQuoteRequested has exactly one insurer response
+- Inv 17 — No duplicate insurer responses for same (submission, insurer)
+- Inv 18 — Every insurer response has a prior LeadQuoteRequested
 
-**Python verifier:**
-- `verify_quoting_flow.py`
-
-If any invariant or verifier FAILs: name it and its violation count prominently.
+If any invariant FAILs: name it and its violation count prominently.
 If any WARN appears: flag it as an unusual run signal.
 If critical failures exist, note that Tiers 2–4 may be unreliable and stop.
 

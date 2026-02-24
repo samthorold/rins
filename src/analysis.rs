@@ -336,6 +336,12 @@ pub enum IntegrityViolation {
     PolicyBoundInsurerMismatch { submission_id: u64, policy_id: u64, bound_insurer: u64, accepted_insurer: u64 },
     DuplicatePolicyBound { policy_id: u64 },
     PolicyExpiredWithoutBound { policy_id: u64 },
+    /// Inv 16 — LeadQuoteRequested with no insurer response.
+    LeadQuoteOrphanRequest { submission_id: u64, insurer_id: u64, day: u64 },
+    /// Inv 17 — (submission_id, insurer_id) received more than one insurer response.
+    LeadQuoteDuplicateResponse { submission_id: u64, insurer_id: u64, count: u32 },
+    /// Inv 18 — LeadQuoteIssued or LeadQuoteDeclined without a prior LeadQuoteRequested.
+    LeadQuoteOrphanResponse { submission_id: u64, insurer_id: u64, day: u64, kind: String },
 }
 
 impl std::fmt::Display for IntegrityViolation {
@@ -368,11 +374,20 @@ impl std::fmt::Display for IntegrityViolation {
             Self::PolicyExpiredWithoutBound { policy_id } => {
                 write!(f, "PolicyExpiredWithoutBound policy={policy_id}")
             }
+            Self::LeadQuoteOrphanRequest { submission_id, insurer_id, day } => {
+                write!(f, "LeadQuoteOrphanRequest sub={submission_id} insurer={insurer_id} day={day}")
+            }
+            Self::LeadQuoteDuplicateResponse { submission_id, insurer_id, count } => {
+                write!(f, "LeadQuoteDuplicateResponse sub={submission_id} insurer={insurer_id} count={count}")
+            }
+            Self::LeadQuoteOrphanResponse { submission_id, insurer_id, day, kind } => {
+                write!(f, "LeadQuoteOrphanResponse sub={submission_id} insurer={insurer_id} day={day} kind={kind}")
+            }
         }
     }
 }
 
-/// Check all 9 structural integrity invariants. Returns one item per violation found.
+/// Check all 12 structural integrity invariants. Returns one item per violation found.
 pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
     // ── Index pass ────────────────────────────────────────────────────────────
     let mut max_day: u64 = 0;
@@ -386,6 +401,10 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
     let mut loss_keys: HashSet<(u64, PolicyId)> = HashSet::new();
     let mut claim_agg: HashMap<(PolicyId, u32), u64> = HashMap::new();
     let mut claim_settled_list: Vec<(u64, PolicyId, InsurerId, u64)> = Vec::new();
+    // Quoting flow tracking for Inv 16–18.
+    let mut lead_requested: HashMap<(SubmissionId, InsurerId), u64> = HashMap::new();
+    let mut lead_responses: HashMap<(SubmissionId, InsurerId), u32> = HashMap::new();
+    let mut orphan_responses: Vec<(SubmissionId, InsurerId, u64, String)> = Vec::new();
 
     for ev in events {
         let day = ev.day.0;
@@ -415,6 +434,21 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
                 let year = ev.day.year().0;
                 *claim_agg.entry((*policy_id, year)).or_insert(0) += amount;
                 claim_settled_list.push((day, *policy_id, *insurer_id, *amount));
+            }
+            Event::LeadQuoteRequested { submission_id, insurer_id, .. } => {
+                lead_requested.entry((*submission_id, *insurer_id)).or_insert(day);
+            }
+            Event::LeadQuoteIssued { submission_id, insurer_id, .. } => {
+                if !lead_requested.contains_key(&(*submission_id, *insurer_id)) {
+                    orphan_responses.push((*submission_id, *insurer_id, day, "LeadQuoteIssued".to_string()));
+                }
+                *lead_responses.entry((*submission_id, *insurer_id)).or_insert(0) += 1;
+            }
+            Event::LeadQuoteDeclined { submission_id, insurer_id, .. } => {
+                if !lead_requested.contains_key(&(*submission_id, *insurer_id)) {
+                    orphan_responses.push((*submission_id, *insurer_id, day, "LeadQuoteDeclined".to_string()));
+                }
+                *lead_responses.entry((*submission_id, *insurer_id)).or_insert(0) += 1;
             }
             _ => {}
         }
@@ -530,6 +564,40 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
                 });
             }
         }
+    }
+
+    // ── Quoting Flow (3) ──────────────────────────────────────────────────────
+
+    // Check 10 (Inv 16): LeadQuoteOrphanRequest — every request must have a response.
+    for (&(sub_id, ins_id), &req_day) in &lead_requested {
+        if !lead_responses.contains_key(&(sub_id, ins_id)) {
+            violations.push(IntegrityViolation::LeadQuoteOrphanRequest {
+                submission_id: sub_id.0,
+                insurer_id: ins_id.0,
+                day: req_day,
+            });
+        }
+    }
+
+    // Check 11 (Inv 17): LeadQuoteDuplicateResponse — at most one response per (sub, ins).
+    for (&(sub_id, ins_id), &count) in &lead_responses {
+        if count > 1 {
+            violations.push(IntegrityViolation::LeadQuoteDuplicateResponse {
+                submission_id: sub_id.0,
+                insurer_id: ins_id.0,
+                count,
+            });
+        }
+    }
+
+    // Check 12 (Inv 18): LeadQuoteOrphanResponse — every response needs a prior request.
+    for (sub_id, ins_id, orphan_day, kind) in orphan_responses {
+        violations.push(IntegrityViolation::LeadQuoteOrphanResponse {
+            submission_id: sub_id.0,
+            insurer_id: ins_id.0,
+            day: orphan_day,
+            kind,
+        });
     }
 
     violations
@@ -988,6 +1056,91 @@ mod tests {
             let integ = verify_integrity(&sim.log);
             assert!(integ.is_empty(), "seed {seed}: integrity violations: {integ:?}");
         }
+    }
+
+    // ── Quoting flow invariant tests (Inv 16–18) ─────────────────────────────
+
+    #[test]
+    fn test_integrity_quoting_orphan_request() {
+        // LeadQuoteRequested with no following response → LeadQuoteOrphanRequest.
+        let events = vec![sim_ev(
+            1,
+            Event::LeadQuoteRequested {
+                submission_id: SubmissionId(1),
+                insured_id: InsuredId(1),
+                insurer_id: InsurerId(1),
+                risk: dummy_risk(),
+            },
+        )];
+        let violations = verify_integrity(&events);
+        assert!(
+            violations.iter().any(|v| matches!(v, IntegrityViolation::LeadQuoteOrphanRequest { .. })),
+            "expected LeadQuoteOrphanRequest violation, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_integrity_quoting_duplicate_response() {
+        // Two LeadQuoteIssued for the same (sub, ins) pair → LeadQuoteDuplicateResponse.
+        let events = vec![
+            sim_ev(
+                1,
+                Event::LeadQuoteRequested {
+                    submission_id: SubmissionId(1),
+                    insured_id: InsuredId(1),
+                    insurer_id: InsurerId(1),
+                    risk: dummy_risk(),
+                },
+            ),
+            sim_ev(
+                1,
+                Event::LeadQuoteIssued {
+                    submission_id: SubmissionId(1),
+                    insured_id: InsuredId(1),
+                    insurer_id: InsurerId(1),
+                    atp: 100,
+                    premium: 105,
+                    cat_exposure_at_quote: 0,
+                },
+            ),
+            sim_ev(
+                2,
+                Event::LeadQuoteIssued {
+                    submission_id: SubmissionId(1),
+                    insured_id: InsuredId(1),
+                    insurer_id: InsurerId(1),
+                    atp: 100,
+                    premium: 105,
+                    cat_exposure_at_quote: 0,
+                },
+            ),
+        ];
+        let violations = verify_integrity(&events);
+        assert!(
+            violations.iter().any(|v| matches!(v, IntegrityViolation::LeadQuoteDuplicateResponse { .. })),
+            "expected LeadQuoteDuplicateResponse violation, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_integrity_quoting_orphan_response() {
+        // LeadQuoteIssued with no prior LeadQuoteRequested → LeadQuoteOrphanResponse.
+        let events = vec![sim_ev(
+            1,
+            Event::LeadQuoteIssued {
+                submission_id: SubmissionId(1),
+                insured_id: InsuredId(1),
+                insurer_id: InsurerId(1),
+                atp: 100,
+                premium: 105,
+                cat_exposure_at_quote: 0,
+            },
+        )];
+        let violations = verify_integrity(&events);
+        assert!(
+            violations.iter().any(|v| matches!(v, IntegrityViolation::LeadQuoteOrphanResponse { .. })),
+            "expected LeadQuoteOrphanResponse violation, got: {violations:?}"
+        );
     }
 
     #[test]

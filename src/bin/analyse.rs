@@ -2,7 +2,7 @@
 //!
 //! Reads `events.ndjson` from the current directory, deserializes it using the
 //! same `SimEvent` type the simulation writes, then prints:
-//!   Tier 1  — mechanics invariant status (PASS/FAIL per invariant)
+//!   Tier 1  — 18 invariant status (PASS/FAIL per invariant: 6 mechanics, 12 integrity)
 //!   Tier 2  — year-over-year character table (all columns guaranteed non-empty)
 
 use std::{
@@ -185,6 +185,18 @@ fn main() {
     println!(
         "  [{}] Inv 15 — Every PolicyExpired references a bound policy",
         status(ihas(|v| matches!(v, IntegrityViolation::PolicyExpiredWithoutBound { .. })))
+    );
+    println!(
+        "  [{}] Inv 16 — Every LeadQuoteRequested has exactly one insurer response",
+        status(ihas(|v| matches!(v, IntegrityViolation::LeadQuoteOrphanRequest { .. })))
+    );
+    println!(
+        "  [{}] Inv 17 — No duplicate insurer responses for same (submission, insurer)",
+        status(ihas(|v| matches!(v, IntegrityViolation::LeadQuoteDuplicateResponse { .. })))
+    );
+    println!(
+        "  [{}] Inv 18 — Every insurer response has a prior LeadQuoteRequested",
+        status(ihas(|v| matches!(v, IntegrityViolation::LeadQuoteOrphanResponse { .. })))
     );
 
     if int_violations.is_empty() {
