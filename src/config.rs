@@ -30,6 +30,9 @@ pub struct InsurerConfig {
     pub max_cat_aggregate: Option<u64>,
     /// Max sum_insured on any single risk (None = unlimited).
     pub max_line_size: Option<u64>,
+    /// Cycle sensitivity: how aggressively the underwriter reprices after a bad own-CR year.
+    /// 0.0 = through-cycle writer; 0.5 = cycle trader.
+    pub cycle_sensitivity: f64,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -92,6 +95,8 @@ impl SimulationConfig {
                     profit_loading: 0.05, // 5% markup above ATP; MS3 risk/capital charge
                     max_cat_aggregate: Some(75_000_000_000), // 750M USD = 15 × ASSET_VALUE
                     max_line_size: None,
+                    // 0.10 = through-cycle writer; 0.50 = cycle trader.
+                    cycle_sensitivity: [0.10, 0.20, 0.30, 0.40, 0.50][(i - 1) as usize],
                 })
                 .collect(),
             n_insureds: 100,

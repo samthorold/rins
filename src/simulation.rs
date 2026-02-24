@@ -50,6 +50,7 @@ impl Simulation {
                     c.profit_loading,
                     c.max_cat_aggregate,
                     c.max_line_size,
+                    c.cycle_sensitivity,
                 )
             })
             .collect();
@@ -436,6 +437,7 @@ mod tests {
                 profit_loading: 0.0,
                 max_cat_aggregate: None,
                 max_line_size: None,
+                cycle_sensitivity: 0.0,
             }],
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -727,6 +729,7 @@ mod tests {
                 profit_loading: 0.0,
                 max_cat_aggregate: None,
                 max_line_size: None,
+                cycle_sensitivity: 0.0,
             })
             .collect();
         let sim = run_sim(config);
@@ -940,6 +943,7 @@ mod tests {
                 profit_loading: 0.0,
                 max_cat_aggregate: Some(0), // always declines cat risks
                 max_line_size: None,
+                cycle_sensitivity: 0.0,
             },
             InsurerConfig {
                 id: InsurerId(2),
@@ -952,6 +956,7 @@ mod tests {
                 profit_loading: 0.0,
                 max_cat_aggregate: None,
                 max_line_size: None,
+                cycle_sensitivity: 0.0,
             },
         ];
 

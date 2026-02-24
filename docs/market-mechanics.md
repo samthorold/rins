@@ -24,7 +24,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
 | Exposure management (max line size, max cat aggregate) | ACTIVE | `src/insurer.rs::on_lead_quote_requested`, `src/broker.rs::on_lead_quote_declined` |
 | Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
-| Underwriter channel / cycle adjustment | PLANNED — Step 0: premium = ATP (factor = 1.0) | `src/insurer.rs::underwriter_premium` |
+| Underwriter channel / cycle adjustment | ACTIVE — Step 1: own-CR cycle adjustment above ATP floor | `src/insurer.rs::underwriter_premium` |
 | Broker relationship scores | PLANNED | — |
 | Syndicate entry / exit | PLANNED | — |
 | Annual coordinator statistics | PLANNED | — |
@@ -256,19 +256,25 @@ What is not yet modelled:
 
 ---
 
-### §4.2 Underwriter channel `[PLANNED]`
+### §4.2 Underwriter channel `[ACTIVE]`
 
 The underwriter channel reflects non-actuarial market intelligence: the current cycle position, relationship with the placing broker, and the observed lead quote (if any). It produces a multiplicative adjustment applied to the ATP: `premium = ATP × underwriter_factor`.
 
-**Step 0 — Technical baseline (current):** a structural `profit_loading` (canonical 0.05 = 5%) is applied above ATP:
+**Step 1 — Own-CR cycle adjustment (current):**
+
+The underwriter observes its own prior-year loss ratio and shades its quote above the ATP floor when losses exceeded the target. The formula is:
 
 ```
-premium = ATP × (1 + profit_loading)
+cycle_adj   = max(0, cycle_sensitivity × (prior_year_loss_ratio − target_loss_ratio))
+uw_factor   = profit_loading + cycle_adj
+premium     = ATP × (1 + uw_factor)
 ```
 
-This loading represents the minimum risk/uncertainty charge that a syndicate requires above the pure actuarial price — the cost of holding capital against adverse deviation. In standard actuarial ratemaking (CAS, Solvency II, Lloyd's MS3), premiums must cover expected loss *plus* a profit provision that justifies the capital deployed. Setting `profit_loading = 0` produces a market where rates race to the actuarial floor, which is not observed in practice.
+`prior_year_loss_ratio` is the insurer's own `year_total_claims / year_premium` from the previous year, initialised to `target_loss_ratio` in year 1 (neutral — no adjustment). The floor on `cycle_adj` enforces the MS3 minimum AvT invariant: premiums never fall below `ATP × (1 + profit_loading)`.
 
-The `profit_loading` is logged as the gap between `LeadQuoteIssued.premium` and `LeadQuoteIssued.atp`. At Step 0, all syndicates apply the same loading; heterogeneous loading (reflecting risk appetite, cycle position, and relationship strength) is a future underwriter channel concern.
+`cycle_sensitivity` (canonical range 0.10–0.50) is the primary heterogeneity parameter. Insurers with low sensitivity are through-cycle writers; those with high sensitivity are cycle traders that reprice aggressively after bad years.
+
+The signal is deliberately insurer-local — each insurer reacts to its own combined ratio, not a market-wide aggregate. This prevents perfect cycle coordination and makes the market cycle emerge from independent agent reactions.
 
 **Inputs:**
 - Current market cycle indicator (coordinator-published annually; derived from aggregate premium movement — see §8).
