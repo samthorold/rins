@@ -36,10 +36,12 @@ pub struct Insurer {
     year_exposure: u64,
     /// Exposure management: live WindstormAtlantic aggregate sum_insured.
     pub cat_aggregate: u64,
-    /// Max WindstormAtlantic aggregate (None = unlimited).
-    pub max_cat_aggregate: Option<u64>,
-    /// Max sum_insured on any single risk (None = unlimited).
-    pub max_line_size: Option<u64>,
+    /// Fraction of current capital committable to a single risk net line (None = unlimited).
+    net_line_capacity: Option<f64>,
+    /// Fraction of capital for the 1-in-200 cat scenario (None = unlimited).
+    solvency_capital_fraction: Option<f64>,
+    /// Pareto 1-in-200 damage fraction derived from cat model at construction.
+    pml_damage_fraction_200: f64,
     /// Map from policy_id to its WindstormAtlantic sum_insured, for release on expiry.
     cat_policy_map: HashMap<PolicyId, u64>,
     /// How strongly the underwriter reacts to own prior-year loss ratio deviating from target.
@@ -64,8 +66,9 @@ impl Insurer {
         ewma_credibility: f64,
         expense_ratio: f64,
         profit_loading: f64,
-        max_cat_aggregate: Option<u64>,
-        max_line_size: Option<u64>,
+        net_line_capacity: Option<f64>,
+        solvency_capital_fraction: Option<f64>,
+        pml_damage_fraction_200: f64,
         cycle_sensitivity: f64,
     ) -> Self {
         Insurer {
@@ -81,8 +84,9 @@ impl Insurer {
             year_attritional_claims: 0,
             year_exposure: 0,
             cat_aggregate: 0,
-            max_cat_aggregate,
-            max_line_size,
+            net_line_capacity,
+            solvency_capital_fraction,
+            pml_damage_fraction_200,
             cat_policy_map: HashMap::new(),
             cycle_sensitivity,
             year_premium: 0,
@@ -114,32 +118,36 @@ impl Insurer {
                 },
             )];
         }
-        if let Some(max_line) = self.max_line_size
-            && risk.sum_insured > max_line
-        {
-            return vec![(
-                day,
-                Event::LeadQuoteDeclined {
-                    submission_id,
-                    insured_id,
-                    insurer_id: self.id,
-                    reason: DeclineReason::MaxLineSizeExceeded,
-                },
-            )];
+        if let Some(nlc) = self.net_line_capacity {
+            let effective_line_limit = (nlc * self.capital.max(0) as f64) as u64;
+            if risk.sum_insured > effective_line_limit {
+                return vec![(
+                    day,
+                    Event::LeadQuoteDeclined {
+                        submission_id,
+                        insured_id,
+                        insurer_id: self.id,
+                        reason: DeclineReason::MaxLineSizeExceeded,
+                    },
+                )];
+            }
         }
-        if let Some(max_agg) = self.max_cat_aggregate
-            && risk.perils_covered.contains(&Peril::WindstormAtlantic)
-            && self.cat_aggregate + risk.sum_insured > max_agg
-        {
-            return vec![(
-                day,
-                Event::LeadQuoteDeclined {
-                    submission_id,
-                    insured_id,
-                    insurer_id: self.id,
-                    reason: DeclineReason::MaxCatAggregateBreached,
-                },
-            )];
+        if let Some(scf) = self.solvency_capital_fraction {
+            let effective_cat_limit =
+                (scf * self.capital.max(0) as f64 / self.pml_damage_fraction_200) as u64;
+            if risk.perils_covered.contains(&Peril::WindstormAtlantic)
+                && self.cat_aggregate + risk.sum_insured > effective_cat_limit
+            {
+                return vec![(
+                    day,
+                    Event::LeadQuoteDeclined {
+                        submission_id,
+                        insured_id,
+                        insurer_id: self.id,
+                        reason: DeclineReason::MaxCatAggregateBreached,
+                    },
+                )];
+            }
         }
         let atp = self.actuarial_price(risk);
         let premium = self.underwriter_premium(risk);
@@ -264,7 +272,7 @@ mod tests {
 
     fn make_insurer(id: InsurerId, capital: i64) -> Insurer {
         // attritional_elf=0.239, cat_elf=0.0, profit_loading=0.0, cycle_sensitivity=0.0 → premium = ATP (tests unchanged)
-        Insurer::new(id, capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.0)
+        Insurer::new(id, capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0)
     }
 
     /// Helper: quote and return the ATP for a standard small_risk().
@@ -314,7 +322,7 @@ mod tests {
         let initial_capital = 1_000_000i64;
         let gross_premium = 200_000u64;
         // expense_ratio=0.0 → net premium = gross premium
-        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.55, 0.3, 0.0, 0.0, None, None, 0.0);
+        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.55, 0.3, 0.0, 0.0, None, None, 0.252, 0.0);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         ins.on_policy_bound(PolicyId(2), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         let total_net_premiums = (gross_premium * 2) as i64;
@@ -518,8 +526,9 @@ mod tests {
 
     #[test]
     fn max_line_size_exceeded_emits_declined() {
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(ASSET_VALUE - 1), 0.0);
-        let risk = cat_risk(); // sum_insured = ASSET_VALUE > max_line_size
+        // capital=0 → effective_line = 0.30 × 0 = 0 < ASSET_VALUE → declines MaxLineSizeExceeded.
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0);
+        let risk = cat_risk(); // sum_insured = ASSET_VALUE > effective_line_limit (0)
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         assert!(
             matches!(event, Event::LeadQuoteDeclined { reason: DeclineReason::MaxLineSizeExceeded, .. }),
@@ -529,8 +538,9 @@ mod tests {
 
     #[test]
     fn max_cat_aggregate_breached_emits_declined() {
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0), None, 0.0);
-        let risk = cat_risk(); // cat_aggregate(0) + sum_insured > max_cat_aggregate(0)
+        // net_line_capacity=None skips the line check; capital=0 → effective_cat = 0 → declines MaxCatAggregateBreached.
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0);
+        let risk = cat_risk(); // cat_aggregate(0) + sum_insured > effective_cat_limit(0)
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         assert!(
             matches!(event, Event::LeadQuoteDeclined { reason: DeclineReason::MaxCatAggregateBreached, .. }),
@@ -540,9 +550,10 @@ mod tests {
 
     #[test]
     fn within_limits_after_partial_fill_emits_quote_issued() {
-        let mut ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(2 * ASSET_VALUE), None, 0.0);
+        // capital=200M USD; effective_cat = 0.30 × 20B / 0.252 ≈ 23.8B > 2×ASSET_VALUE=10B → room for second policy.
+        let mut ins = Insurer::new(InsurerId(1), 20_000_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
-        // cat_aggregate = ASSET_VALUE, max = 2×ASSET_VALUE → still room for one more
+        // cat_aggregate = ASSET_VALUE; effective_cat ≈ 23.8B → still room for one more
         let risk = cat_risk();
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk));
         assert!(
@@ -632,7 +643,7 @@ mod tests {
     #[test]
     fn on_policy_bound_credits_net_premium_to_capital() {
         // expense_ratio=0.25 → net = 75% of gross premium.
-        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.55, 0.3, 0.25, 0.0, None, None, 0.0);
+        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.55, 0.3, 0.25, 0.0, None, None, 0.252, 0.0);
         let gross_premium = 400_000u64;
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         let expected_net = (gross_premium as f64 * 0.75).round() as i64;
@@ -664,8 +675,8 @@ mod tests {
         // Both see the same EWMA update so the difference is purely from cycle_adj.
         let gross_premium = 500_000u64;
 
-        let mut sensitive = Insurer::new(InsurerId(1), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.3);
-        let mut flat = Insurer::new(InsurerId(2), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.0);
+        let mut sensitive = Insurer::new(InsurerId(1), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.252, 0.3);
+        let mut flat = Insurer::new(InsurerId(2), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.252, 0.0);
 
         for ins in [&mut sensitive, &mut flat] {
             ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
@@ -681,7 +692,7 @@ mod tests {
     #[test]
     fn cycle_adj_floors_at_profit_loading_after_good_year() {
         // A benign year (LR < target) must not push premium below ATP × (1 + profit_loading).
-        let mut ins = Insurer::new(InsurerId(1), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.5);
+        let mut ins = Insurer::new(InsurerId(1), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.252, 0.5);
         // Simulate a benign year: bind one policy, no claims → LR = 0.
         let gross_premium = 500_000u64;
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
@@ -697,7 +708,7 @@ mod tests {
     #[test]
     fn zero_cycle_sensitivity_is_unchanged_by_prior_year_lr() {
         // With cycle_sensitivity=0.0, prior_year_LR has no effect regardless of its value.
-        let mut ins = Insurer::new(InsurerId(1), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.0);
+        let mut ins = Insurer::new(InsurerId(1), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.252, 0.0);
         let baseline = quote_premium(&ins);
 
         // Simulate a terrible year.

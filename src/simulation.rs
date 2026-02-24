@@ -7,6 +7,11 @@ use rand_chacha::ChaCha20Rng;
 /// Days from CoverageRequested to PolicyBound (the quoting chain length).
 const QUOTING_CHAIN_DAYS: u64 = 3;
 
+/// 1-in-N Pareto damage fraction: scale × (return_period × annual_frequency)^(1/shape).
+fn pml_damage_fraction(scale: f64, shape: f64, annual_frequency: f64, return_period: f64) -> f64 {
+    scale * (return_period * annual_frequency).powf(1.0 / shape)
+}
+
 use crate::broker::Broker;
 use crate::config::SimulationConfig;
 use crate::events::{Event, EventLog, Peril, Risk, SimEvent};
@@ -35,6 +40,12 @@ pub struct Simulation {
 impl Simulation {
     /// Construct from a canonical config.
     pub fn from_config(config: SimulationConfig) -> Self {
+        let pml_200 = pml_damage_fraction(
+            config.catastrophe.pareto_scale,
+            config.catastrophe.pareto_shape,
+            config.catastrophe.annual_frequency,
+            200.0,
+        );
         let insurers: Vec<Insurer> = config
             .insurers
             .iter()
@@ -48,8 +59,9 @@ impl Simulation {
                     c.ewma_credibility,
                     c.expense_ratio,
                     c.profit_loading,
-                    c.max_cat_aggregate,
-                    c.max_line_size,
+                    c.net_line_capacity,
+                    c.solvency_capital_fraction,
+                    pml_200,
                     c.cycle_sensitivity,
                 )
             })
@@ -435,8 +447,8 @@ mod tests {
                 ewma_credibility: 0.3,
                 expense_ratio: 0.0,
                 profit_loading: 0.0,
-                max_cat_aggregate: None,
-                max_line_size: None,
+                net_line_capacity: None,
+                solvency_capital_fraction: None,
                 cycle_sensitivity: 0.0,
             }],
             n_insureds,
@@ -727,8 +739,8 @@ mod tests {
                 ewma_credibility: 0.3,
                 expense_ratio: 0.0,
                 profit_loading: 0.0,
-                max_cat_aggregate: None,
-                max_line_size: None,
+                net_line_capacity: None,
+                solvency_capital_fraction: None,
                 cycle_sensitivity: 0.0,
             })
             .collect();
@@ -941,8 +953,8 @@ mod tests {
                 ewma_credibility: 0.3,
                 expense_ratio: 0.0,
                 profit_loading: 0.0,
-                max_cat_aggregate: Some(0), // always declines cat risks
-                max_line_size: None,
+                net_line_capacity: None,
+                solvency_capital_fraction: Some(0.0), // 0 × capital / pml = 0 → always declines cat
                 cycle_sensitivity: 0.0,
             },
             InsurerConfig {
@@ -954,8 +966,8 @@ mod tests {
                 ewma_credibility: 0.3,
                 expense_ratio: 0.0,
                 profit_loading: 0.0,
-                max_cat_aggregate: None,
-                max_line_size: None,
+                net_line_capacity: None,
+                solvency_capital_fraction: None,
                 cycle_sensitivity: 0.0,
             },
         ];

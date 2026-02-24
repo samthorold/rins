@@ -62,8 +62,8 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
                 ewma_credibility: 0.3,
                 expense_ratio: 0.344,
                 profit_loading: 0.0,
-                max_cat_aggregate: None,
-                max_line_size: None,
+                net_line_capacity: Some(0.30),
+                solvency_capital_fraction: Some(0.30),
                 cycle_sensitivity: 0.0,
             })
             .collect(),

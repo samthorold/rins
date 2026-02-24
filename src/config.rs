@@ -26,10 +26,13 @@ pub struct InsurerConfig {
     /// Fraction of gross premium consumed by acquisition costs + overhead.
     /// Lloyd's 2024: 22.6% acquisition + 11.8% management ≈ 34.4%.
     pub expense_ratio: f64,
-    /// Max WindstormAtlantic aggregate sum_insured across all in-force policies (None = unlimited).
-    pub max_cat_aggregate: Option<u64>,
-    /// Max sum_insured on any single risk (None = unlimited).
-    pub max_line_size: Option<u64>,
+    /// Fraction of current capital committable to a single risk net line (Lloyd's: 0.30).
+    /// None = no limit (tests only; the canonical config always sets Some).
+    pub net_line_capacity: Option<f64>,
+    /// Fraction of capital allocated to cover the 1-in-200 cat scenario (Lloyd's: ~0.30).
+    /// Effective cat aggregate limit = solvency_capital_fraction × capital / pml_damage_fraction_200.
+    /// None = no limit (tests only; the canonical config always sets Some).
+    pub solvency_capital_fraction: Option<f64>,
     /// Cycle sensitivity: how aggressively the underwriter reprices after a bad own-CR year.
     /// 0.0 = through-cycle writer; 0.5 = cycle trader.
     pub cycle_sensitivity: f64,
@@ -93,8 +96,8 @@ impl SimulationConfig {
                     ewma_credibility: 0.3,
                     expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
                     profit_loading: 0.05, // 5% markup above ATP; MS3 risk/capital charge
-                    max_cat_aggregate: Some(75_000_000_000), // 750M USD = 15 × ASSET_VALUE
-                    max_line_size: None,
+                    net_line_capacity: Some(0.30),
+                    solvency_capital_fraction: Some(0.30),
                     // 0.10 = through-cycle writer; 0.50 = cycle trader.
                     cycle_sensitivity: [0.10, 0.20, 0.30, 0.40, 0.50][(i - 1) as usize],
                 })
