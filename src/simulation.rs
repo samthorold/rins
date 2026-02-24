@@ -566,8 +566,6 @@ impl Simulation {
             event: Event::InsurerEntered { insurer_id: id, initial_capital: initial_capital_u64, is_aggressive },
         });
 
-        eprintln!("Year {}: new insurer {} entered ({})",
-            year.0, id.0, if is_aggressive { "aggressive" } else { "standard" });
     }
 }
 
