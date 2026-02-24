@@ -1,3 +1,4 @@
 /target
 .DS_Store
 *.ndjson
+scripts/__pycache__/
