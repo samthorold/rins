@@ -472,8 +472,6 @@ impl Simulation {
     }
 
     fn handle_year_end(&mut self, day: Day, year: Year) {
-        eprintln!("Year {} complete", year.0);
-
         // Update each insurer's expected_loss_fraction via EWMA from this year's experience.
         // Also detect zombies (capital > 0 but max_line < min policy size) and mark them insolvent.
         // Collect emitted events before scheduling to avoid conflicting mutable borrows.

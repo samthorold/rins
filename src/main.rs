@@ -15,7 +15,7 @@ fn main() {
     let mut output_path = "events.ndjson".to_string();
     let mut quiet = false;
     let mut runs: Option<u64> = None;
-    let mut output_dir = ".".to_string();
+    let mut output_dir_opt: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -39,7 +39,7 @@ fn main() {
             }
             "--output-dir" => {
                 i += 1;
-                output_dir = args[i].clone();
+                output_dir_opt = Some(args[i].clone());
             }
             _ => {}
         }
@@ -52,39 +52,59 @@ fn main() {
         base_config.years = y;
     }
 
+    // Extract analysis inputs before base_config is (potentially) moved.
+    let initial_capitals: HashMap<InsurerId, u64> = base_config
+        .insurers
+        .iter()
+        .map(|ic| (ic.id, ic.initial_capital.max(0) as u64))
+        .collect();
+    let expense_ratio =
+        base_config.insurers.first().map(|ic| ic.expense_ratio).unwrap_or(0.344);
+
     if let Some(n) = runs {
         use rayon::prelude::*;
 
-        std::fs::create_dir_all(&output_dir).expect("failed to create output directory");
-        (0u64..n).into_par_iter().for_each(|i| {
-            let seed = start_seed + i;
-            let mut config = base_config.clone();
-            config.seed = seed;
-            let mut sim = Simulation::from_config(config);
-            sim.start();
-            sim.run();
-            let path = format!("{}/events_seed_{}.ndjson", output_dir, seed);
-            let file = File::create(&path)
-                .unwrap_or_else(|e| panic!("failed to create {path}: {e}"));
-            let mut writer = BufWriter::new(file);
-            for ev in &sim.log {
-                serde_json::to_writer(&mut writer, ev).expect("serialize");
-                writeln!(writer).expect("newline");
-            }
-            if !quiet {
-                println!("Seed {seed}: {} events → {path}", sim.log.len());
-            }
-        });
-    } else {
-        // Extract analysis inputs before base_config is moved.
-        let initial_capitals: HashMap<InsurerId, u64> = base_config
-            .insurers
-            .iter()
-            .map(|ic| (ic.id, ic.initial_capital.max(0) as u64))
-            .collect();
-        let expense_ratio =
-            base_config.insurers.first().map(|ic| ic.expense_ratio).unwrap_or(0.344);
+        if let Some(ref dir) = output_dir_opt {
+            std::fs::create_dir_all(dir).expect("failed to create output directory");
+        }
 
+        let all_stats: Vec<Vec<rins::analysis::YearStats>> = (0u64..n)
+            .into_par_iter()
+            .map(|i| {
+                let seed = start_seed + i;
+                let mut config = base_config.clone();
+                config.seed = seed;
+                let mut sim = Simulation::from_config(config);
+                sim.start();
+                sim.run();
+
+                if let Some(ref dir) = output_dir_opt {
+                    let path = format!("{dir}/events_seed_{seed}.ndjson");
+                    let file = File::create(&path)
+                        .unwrap_or_else(|e| panic!("failed to create {path}: {e}"));
+                    let mut writer = BufWriter::new(file);
+                    for ev in &sim.log {
+                        serde_json::to_writer(&mut writer, ev).expect("serialize");
+                        writeln!(writer).expect("newline");
+                    }
+                    if !quiet {
+                        println!("Seed {seed}: {} events → {path}", sim.log.len());
+                    }
+                }
+
+                analysis::analyse(&sim.log, &initial_capitals, expense_ratio).1
+            })
+            .collect();
+
+        if !quiet {
+            if n < 2 {
+                eprintln!("Warning: Distribution requires >= 2 runs");
+            } else {
+                let dists = analysis::analyse_distributions(&all_stats, expense_ratio);
+                print_distributions(&dists, n);
+            }
+        }
+    } else {
         let mut config = base_config;
         config.seed = start_seed;
 
@@ -199,6 +219,63 @@ fn print_analysis(
             s.insolvent_count,
             s.dropped_count,
             s.entrant_count,
+        );
+    }
+}
+
+fn print_dist_section<F>(title: &str, dists: &[rins::analysis::YearDist], scale: f64, extract: F)
+where
+    F: Fn(&rins::analysis::YearDist) -> &rins::analysis::DistStats,
+{
+    println!("\n--- {title} ---");
+    println!(
+        "{:>4} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7}",
+        "Year", "min", "p5", "p25", "p50", "p75", "p95", "max", "mean", "stddev"
+    );
+    for yd in dists {
+        let ds = extract(yd);
+        println!(
+            "{:>4} | {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1}",
+            yd.year,
+            ds.min * scale,
+            ds.p5 * scale,
+            ds.p25 * scale,
+            ds.p50 * scale,
+            ds.p75 * scale,
+            ds.p95 * scale,
+            ds.max * scale,
+            ds.mean * scale,
+            ds.std_dev * scale,
+        );
+    }
+}
+
+fn print_distributions(dists: &[rins::analysis::YearDist], n_runs: u64) {
+    println!("\n=== Multi-Run Distribution (N={n_runs} runs) ===");
+
+    print_dist_section("LossR%", dists, 100.0, |yd| &yd.loss_ratio);
+    print_dist_section("Rate%", dists, 100.0, |yd| &yd.rate_on_line);
+    print_dist_section("CombR%", dists, 100.0, |yd| &yd.combined_ratio);
+    print_dist_section("TotalCap (B USD)", dists, 1.0, |yd| &yd.total_cap_b);
+
+    println!("\n--- Discrete Counts (p50 | max) ---");
+    println!(
+        "{:>4} | {:>8} | {:>8} | {:>9} | {:>9} | {:>8} | {:>8} | {:>8} | {:>8}",
+        "Year", "Cats p50", "Cats max", "Insol p50", "Insol max", "Drop p50", "Drop max",
+        "Entr p50", "Entr max"
+    );
+    for yd in dists {
+        println!(
+            "{:>4} | {:>8} | {:>8} | {:>9} | {:>9} | {:>8} | {:>8} | {:>8} | {:>8}",
+            yd.year,
+            yd.cat_events.p50,
+            yd.cat_events.max,
+            yd.insolvents.p50,
+            yd.insolvents.max,
+            yd.dropped.p50,
+            yd.dropped.max,
+            yd.entrants.p50,
+            yd.entrants.max,
         );
     }
 }

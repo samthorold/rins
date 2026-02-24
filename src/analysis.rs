@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::{
     events::{Event, Peril, SimEvent},
@@ -74,6 +74,147 @@ impl YearStats {
         self.loss_ratio() + expense_ratio
     }
 
+}
+
+/// Distribution statistics for a continuous metric across N simulation runs.
+#[derive(Debug, Clone)]
+pub struct DistStats {
+    pub n: usize,
+    pub min: f64,
+    pub p5: f64,
+    pub p25: f64,
+    pub p50: f64,
+    pub p75: f64,
+    pub p95: f64,
+    pub max: f64,
+    pub mean: f64,
+    pub std_dev: f64,
+}
+
+/// Distribution statistics for a sparse integer count metric (p50 + max are sufficient).
+#[derive(Debug, Clone)]
+pub struct CountDist {
+    pub n: usize,
+    pub p50: u32,
+    pub max: u32,
+    pub mean: f64,
+}
+
+/// Per-year cross-run distribution of all key YearStats metrics.
+#[derive(Debug, Clone)]
+pub struct YearDist {
+    pub year: u32,
+    pub loss_ratio: DistStats,
+    pub rate_on_line: DistStats,
+    pub combined_ratio: DistStats,
+    pub total_cap_b: DistStats,
+    pub cat_events: CountDist,
+    pub insolvents: CountDist,
+    pub dropped: CountDist,
+    pub entrants: CountDist,
+}
+
+fn percentile_stats(values: &mut Vec<f64>) -> Option<DistStats> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = values.len();
+
+    let interp = |p: f64| -> f64 {
+        let h = p * (n - 1) as f64;
+        let lo = h.floor() as usize;
+        let hi = (lo + 1).min(n - 1);
+        let frac = h - lo as f64;
+        values[lo] * (1.0 - frac) + values[hi] * frac
+    };
+
+    let mean = values.iter().sum::<f64>() / n as f64;
+    let variance = if n > 1 {
+        values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64
+    } else {
+        0.0
+    };
+
+    Some(DistStats {
+        n,
+        min: values[0],
+        p5: interp(0.05),
+        p25: interp(0.25),
+        p50: interp(0.50),
+        p75: interp(0.75),
+        p95: interp(0.95),
+        max: values[n - 1],
+        mean,
+        std_dev: variance.sqrt(),
+    })
+}
+
+fn count_dist(values: &mut Vec<u32>) -> Option<CountDist> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort();
+    let n = values.len();
+    let mean = values.iter().map(|&x| x as f64).sum::<f64>() / n as f64;
+
+    let h = 0.5 * (n - 1) as f64;
+    let lo = h.floor() as usize;
+    let hi = (lo + 1).min(n - 1);
+    let frac = h - lo as f64;
+    let p50 = (values[lo] as f64 * (1.0 - frac) + values[hi] as f64 * frac).round() as u32;
+
+    Some(CountDist { n, p50, max: values[n - 1], mean })
+}
+
+/// Compute per-year cross-run distributions for key YearStats metrics.
+///
+/// Years present in fewer than 2 runs are excluded (insufficient data for a distribution).
+/// Returns results sorted by year.
+pub fn analyse_distributions(all_runs: &[Vec<YearStats>], expense_ratio: f64) -> Vec<YearDist> {
+    let all_years: BTreeSet<u32> =
+        all_runs.iter().flat_map(|run| run.iter().map(|s| s.year)).collect();
+
+    let mut result = Vec::new();
+
+    for year in all_years {
+        let year_stats: Vec<&YearStats> = all_runs
+            .iter()
+            .filter_map(|run| run.iter().find(|s| s.year == year))
+            .collect();
+
+        if year_stats.len() < 2 {
+            continue;
+        }
+
+        let mut lr_vals: Vec<f64> = year_stats.iter().map(|s| s.loss_ratio()).collect();
+        let mut rol_vals: Vec<f64> = year_stats.iter().map(|s| s.rate_on_line()).collect();
+        let mut cr_vals: Vec<f64> =
+            year_stats.iter().map(|s| s.combined_ratio(expense_ratio)).collect();
+        let mut cap_vals: Vec<f64> = year_stats
+            .iter()
+            .map(|s| s.total_capital as f64 / 100_000_000_000.0)
+            .collect();
+        let mut cat_vals: Vec<u32> = year_stats.iter().map(|s| s.cat_event_count).collect();
+        let mut insol_vals: Vec<u32> = year_stats.iter().map(|s| s.insolvent_count).collect();
+        let mut drop_vals: Vec<u32> = year_stats.iter().map(|s| s.dropped_count).collect();
+        let mut entr_vals: Vec<u32> = year_stats.iter().map(|s| s.entrant_count).collect();
+
+        // All vecs have the same length (>= 2), so unwrap is safe.
+        result.push(YearDist {
+            year,
+            loss_ratio: percentile_stats(&mut lr_vals).unwrap(),
+            rate_on_line: percentile_stats(&mut rol_vals).unwrap(),
+            combined_ratio: percentile_stats(&mut cr_vals).unwrap(),
+            total_cap_b: percentile_stats(&mut cap_vals).unwrap(),
+            cat_events: count_dist(&mut cat_vals).unwrap(),
+            insolvents: count_dist(&mut insol_vals).unwrap(),
+            dropped: count_dist(&mut drop_vals).unwrap(),
+            entrants: count_dist(&mut entr_vals).unwrap(),
+        });
+    }
+
+    result
 }
 
 /// A mechanics invariant violation detected in the event stream.
@@ -1115,6 +1256,101 @@ mod tests {
             violations.iter().any(|v| matches!(v, IntegrityViolation::LeadQuoteOrphanResponse { .. })),
             "expected LeadQuoteOrphanResponse violation, got: {violations:?}"
         );
+    }
+
+    // ── Distribution analysis tests ───────────────────────────────────────────
+
+    #[test]
+    fn percentile_stats_known_values() {
+        let mut values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let ds = percentile_stats(&mut values).unwrap();
+        assert_eq!(ds.n, 5);
+        assert!((ds.min - 1.0).abs() < 1e-10, "min");
+        assert!((ds.max - 5.0).abs() < 1e-10, "max");
+        assert!((ds.p50 - 3.0).abs() < 1e-10, "p50");
+        assert!((ds.mean - 3.0).abs() < 1e-10, "mean");
+    }
+
+    #[test]
+    fn percentile_stats_empty_returns_none() {
+        let mut values: Vec<f64> = vec![];
+        assert!(percentile_stats(&mut values).is_none());
+    }
+
+    #[test]
+    fn analyse_distributions_two_runs() {
+        // Run 1: premium=100, claims=50 → LR=0.5
+        // Run 2: premium=100, claims=100 → LR=1.0
+        // p50 of [0.5, 1.0]: h = 0.5*(2-1) = 0.5, lo=0, hi=1, frac=0.5 → 0.5*0.5 + 1.0*0.5 = 0.75
+        let mut s1 = YearStats::zero(1);
+        s1.bound_premium = 100;
+        s1.claims = 50;
+        s1.sum_insured = 1_000;
+
+        let mut s2 = YearStats::zero(1);
+        s2.bound_premium = 100;
+        s2.claims = 100;
+        s2.sum_insured = 1_000;
+
+        let all_runs = vec![vec![s1], vec![s2]];
+        let dists = analyse_distributions(&all_runs, 0.344);
+
+        assert_eq!(dists.len(), 1);
+        assert_eq!(dists[0].year, 1);
+        assert_eq!(dists[0].loss_ratio.n, 2);
+        assert!((dists[0].loss_ratio.p50 - 0.75).abs() < 1e-10, "p50 LR");
+    }
+
+    #[test]
+    fn analyse_distributions_missing_year_filtered() {
+        // Year 2 only in run 1 → must be excluded (only 1 run has it).
+        let mut s1_y1 = YearStats::zero(1);
+        s1_y1.bound_premium = 100;
+        s1_y1.claims = 50;
+
+        let mut s1_y2 = YearStats::zero(2);
+        s1_y2.bound_premium = 100;
+        s1_y2.claims = 50;
+
+        let mut s2_y1 = YearStats::zero(1);
+        s2_y1.bound_premium = 100;
+        s2_y1.claims = 80;
+
+        let all_runs = vec![vec![s1_y1, s1_y2], vec![s2_y1]];
+        let dists = analyse_distributions(&all_runs, 0.344);
+
+        assert_eq!(dists.len(), 1, "year 2 (single-run) must be excluded");
+        assert_eq!(dists[0].year, 1);
+    }
+
+    #[test]
+    fn analyse_distributions_integration_small_config() {
+        use crate::simulation::Simulation;
+
+        let mut all_runs: Vec<Vec<YearStats>> = Vec::new();
+        for seed in [1u64, 2, 3] {
+            let config = small_test_config(seed);
+            let initials: HashMap<InsurerId, u64> = config
+                .insurers
+                .iter()
+                .map(|ic| (ic.id, ic.initial_capital as u64))
+                .collect();
+            let expense = config.insurers.first().map(|ic| ic.expense_ratio).unwrap_or(0.344);
+            let mut sim = Simulation::from_config(config);
+            sim.start();
+            sim.run();
+            let (_, stats) = analyse(&sim.log, &initials, expense);
+            all_runs.push(stats);
+        }
+
+        let result = analyse_distributions(&all_runs, 0.344);
+
+        assert!(!result.is_empty(), "should produce at least one year");
+        for yd in &result {
+            assert!(yd.loss_ratio.n >= 2, "year {} must have >= 2 runs", yd.year);
+            assert!(yd.loss_ratio.p50 >= 0.0, "LR p50 must be non-negative");
+            assert!(yd.rate_on_line.p50 >= 0.0, "RoL p50 must be non-negative");
+        }
     }
 
     #[test]
