@@ -16,6 +16,7 @@ fn main() {
     let mut quiet = false;
     let mut runs: Option<u64> = None;
     let mut output_dir_opt: Option<String> = None;
+    let mut csv_path_opt: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -40,6 +41,10 @@ fn main() {
             "--output-dir" => {
                 i += 1;
                 output_dir_opt = Some(args[i].clone());
+            }
+            "--csv" => {
+                i += 1;
+                csv_path_opt = Some(args[i].clone());
             }
             _ => {}
         }
@@ -96,7 +101,12 @@ fn main() {
             })
             .collect();
 
+        if let Some(ref csv_path) = csv_path_opt {
+            write_runs_csv(&all_stats, start_seed, expense_ratio, csv_path);
+        }
+
         if !quiet {
+            print_all_run_years(&all_stats, start_seed, expense_ratio);
             if n < 2 {
                 eprintln!("Warning: Distribution requires >= 2 runs");
             } else {
@@ -220,6 +230,74 @@ fn print_analysis(
             s.dropped_count,
             s.entrant_count,
         );
+    }
+}
+
+fn write_runs_csv(
+    all_stats: &[Vec<rins::analysis::YearStats>],
+    start_seed: u64,
+    expense_ratio: f64,
+    path: &str,
+) {
+    const CENTS_PER_BUSD: f64 = 100_000_000_000.0;
+    let file = File::create(path).unwrap_or_else(|e| panic!("failed to create {path}: {e}"));
+    let mut w = BufWriter::new(file);
+    writeln!(w, "seed,year,loss_ratio,combined_ratio,rate_on_line,total_cap_b,cat_events,insolvent_count,dropped_count,entrant_count")
+        .expect("write");
+    for (i, run) in all_stats.iter().enumerate() {
+        let seed = start_seed + i as u64;
+        for s in run {
+            writeln!(
+                w,
+                "{},{},{:.6},{:.6},{:.6},{:.6},{},{},{},{}",
+                seed,
+                s.year,
+                s.loss_ratio(),
+                s.combined_ratio(expense_ratio),
+                s.rate_on_line(),
+                s.total_capital as f64 / CENTS_PER_BUSD,
+                s.cat_event_count,
+                s.insolvent_count,
+                s.dropped_count,
+                s.entrant_count,
+            )
+            .expect("write");
+        }
+    }
+}
+
+fn print_all_run_years(
+    all_stats: &[Vec<rins::analysis::YearStats>],
+    start_seed: u64,
+    expense_ratio: f64,
+) {
+    const CENTS_PER_BUSD: f64 = 100_000_000_000.0;
+
+    println!("\n=== Per-Run Year Data ===");
+    println!(
+        "{:>6} | {:>4} | {:>7} | {:>7} | {:>6} | {:>11} | {:>5} | {:>6} | {:>5} | {:>5}",
+        "Seed", "Year", "LossR%", "CombR%", "Rate%", "TotalCap(B)", "Cats#", "Insol#",
+        "Drop#", "Entr#"
+    );
+    println!("{}", "-".repeat(80));
+
+    for (i, run) in all_stats.iter().enumerate() {
+        let seed = start_seed + i as u64;
+        for s in run {
+            println!(
+                "{:>6} | {:>4} | {:>6.1}% | {:>6.1}% | {:>5.2}% | {:>11.2} | {:>5} | {:>6} | {:>5} | {:>5}",
+                seed,
+                s.year,
+                s.loss_ratio() * 100.0,
+                s.combined_ratio(expense_ratio) * 100.0,
+                s.rate_on_line() * 100.0,
+                s.total_capital as f64 / CENTS_PER_BUSD,
+                s.cat_event_count,
+                s.insolvent_count,
+                s.dropped_count,
+                s.entrant_count,
+            );
+        }
     }
 }
 
