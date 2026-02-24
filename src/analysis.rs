@@ -27,6 +27,10 @@ pub struct YearStats {
     pub dropped_count: u32,
     /// Sum of unique-insured sum_insured from CoverageRequested in the year (cents).
     pub total_assets: u64,
+    /// Count of WindstormAtlantic LossEvent firings in the year.
+    pub cat_event_count: u32,
+    /// Count of InsurerEntered events in the year.
+    pub entrant_count: u32,
 }
 
 impl YearStats {
@@ -42,6 +46,8 @@ impl YearStats {
             insolvent_count: 0,
             dropped_count: 0,
             total_assets: 0,
+            cat_event_count: 0,
+            entrant_count: 0,
         }
     }
 
@@ -68,21 +74,6 @@ impl YearStats {
         self.loss_ratio() + expense_ratio
     }
 
-    /// Dominant peril by GUL share: "Cat" >60%, "Mixed" 30–60%, "Attritional" <30%.
-    pub fn dominant_peril(&self) -> &'static str {
-        let total = self.attr_gul + self.cat_gul;
-        if total == 0 {
-            return "Attritional";
-        }
-        let cat_pct = self.cat_gul as f64 / total as f64;
-        if cat_pct > 0.60 {
-            "Cat"
-        } else if cat_pct >= 0.30 {
-            "Mixed"
-        } else {
-            "Attritional"
-        }
-    }
 }
 
 /// A mechanics invariant violation detected in the event stream.
@@ -184,6 +175,15 @@ pub fn analyse(
             Event::SubmissionDropped { .. } => {
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.dropped_count += 1;
+            }
+            Event::LossEvent { peril: Peril::WindstormAtlantic, .. } => {
+                let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
+                s.cat_event_count += 1;
+            }
+            Event::InsurerEntered { insurer_id, initial_capital, .. } => {
+                last_capital.insert(*insurer_id, *initial_capital);
+                let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
+                s.entrant_count += 1;
             }
             Event::CoverageRequested { insured_id, risk } => {
                 let seen = assets_seen.entry(year).or_default();
@@ -743,74 +743,25 @@ mod tests {
     }
 
     #[test]
-    fn test_dominant_peril_cat() {
+    fn test_cat_event_count() {
+        // Two LossEvent(WindstormAtlantic) in year 1 → cat_event_count = 2.
+        // Attritional AssetDamage must not increment cat_event_count.
         let events = vec![
             sim_start(),
+            sim_ev(50, Event::LossEvent { event_id: 1, peril: Peril::WindstormAtlantic }),
+            sim_ev(80, Event::LossEvent { event_id: 2, peril: Peril::WindstormAtlantic }),
             sim_ev(
-                50,
-                Event::AssetDamage {
-                    insured_id: InsuredId(1),
-                    peril: Peril::WindstormAtlantic,
-                    ground_up_loss: 700,
-                },
-            ),
-            sim_ev(
-                50,
+                80,
                 Event::AssetDamage {
                     insured_id: InsuredId(1),
                     peril: Peril::Attritional,
-                    ground_up_loss: 300,
+                    ground_up_loss: 500,
                 },
             ),
             sim_ev(359, Event::YearEnd { year: Year(1) }),
         ];
         let (_, stats) = analyse(&events, &empty_capitals(), 0.344);
-        assert_eq!(stats[0].dominant_peril(), "Cat");
-    }
-
-    #[test]
-    fn test_dominant_peril_attritional() {
-        let events = vec![
-            sim_start(),
-            sim_ev(
-                50,
-                Event::AssetDamage {
-                    insured_id: InsuredId(1),
-                    peril: Peril::Attritional,
-                    ground_up_loss: 1_000,
-                },
-            ),
-            sim_ev(359, Event::YearEnd { year: Year(1) }),
-        ];
-        let (_, stats) = analyse(&events, &empty_capitals(), 0.344);
-        assert_eq!(stats[0].dominant_peril(), "Attritional");
-    }
-
-    #[test]
-    fn test_dominant_peril_mixed() {
-        let events = vec![
-            sim_start(),
-            // cat = 450, attr = 550 → cat_pct = 45% → Mixed
-            sim_ev(
-                50,
-                Event::AssetDamage {
-                    insured_id: InsuredId(1),
-                    peril: Peril::WindstormAtlantic,
-                    ground_up_loss: 450,
-                },
-            ),
-            sim_ev(
-                50,
-                Event::AssetDamage {
-                    insured_id: InsuredId(1),
-                    peril: Peril::Attritional,
-                    ground_up_loss: 550,
-                },
-            ),
-            sim_ev(359, Event::YearEnd { year: Year(1) }),
-        ];
-        let (_, stats) = analyse(&events, &empty_capitals(), 0.344);
-        assert_eq!(stats[0].dominant_peril(), "Mixed");
+        assert_eq!(stats[0].cat_event_count, 2);
     }
 
     #[test]

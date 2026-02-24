@@ -223,10 +223,10 @@ fn main() {
 
     println!("=== Tier 2 — Year Character Table ===");
     println!(
-        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>7} | {:<16} | {:>11} | {:>10} | {:>8}",
-        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "Rate%", "Dominant Peril", "TotalCap(B)", "Insolvent#", "Dropped#"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>10} | {:>8} | {:>9}",
+        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "Rate%", "Cats#", "TotalCap(B)", "Insolvent#", "Dropped#", "Entrants#"
     );
-    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 18 + 3 + 13 + 3 + 12 + 3 + 10));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 12 + 3 + 10 + 3 + 11));
 
     for s in &stats {
         let lr_pct = s.loss_ratio() * 100.0;
@@ -238,7 +238,7 @@ fn main() {
         let cov_b = s.sum_insured as f64 / CENTS_PER_BUSD;
         let claims_b = s.claims as f64 / CENTS_PER_BUSD;
         println!(
-            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {:>6.2}% | {:<16} | {:>11.2} | {:>10} | {:>8}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {:>6.2}% | {:>5} | {:>11.2} | {:>10} | {:>8} | {:>9}",
             s.year,
             assets_b,
             gul_b,
@@ -247,10 +247,11 @@ fn main() {
             lr_pct,
             cr_pct,
             rol_pct,
-            s.dominant_peril(),
+            s.cat_event_count,
             cap_b,
             s.insolvent_count,
             s.dropped_count,
+            s.entrant_count,
         );
     }
     println!();

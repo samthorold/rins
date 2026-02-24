@@ -24,9 +24,10 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
 | Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE — capital-linked fractions (net_line_capacity=0.30, solvency_capital_fraction=0.30, pml_200 derived from cat model) | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
 | Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
-| Underwriter channel / cycle adjustment | PARTIAL — profit loading above ATP floor; explicit cycle adjustment removed | `src/insurer.rs::underwriter_premium` |
+| Underwriter channel / cycle adjustment | PARTIAL — profit loading above ATP floor; explicit cycle adjustment removed; RAROC-style capital-linked required return planned | `src/insurer.rs::underwriter_premium` |
+| Supply / demand balance (insured reservation price) | ACTIVE — step-function demand curve; inelastic at current 6–8% rates; Dropped# is supply-constrained not demand-constrained | `src/insured.rs::on_quote_presented` |
 | Broker relationship scores | PLANNED | — |
-| Syndicate entry / exit | PLANNED | — |
+| Syndicate entry / exit (capital entry) | PLANNED — minimum viable: trailing CR threshold + new insurer spawn; critical for underwriting cycle emergence | — |
 | Annual coordinator statistics | PLANNED | — |
 | Quarterly renewal seasonality | PLANNED | — |
 | Programme structures / towers | PLANNED | — |
@@ -124,6 +125,10 @@ All policies are **annual contracts** written for a 12-month period, reflecting 
 Each Insured owns one or more Assets and seeks insurance coverage each year. Insureds are active agents: they evaluate quotes against a **reservation price** and accumulate GUL history. State: `id`, `risk` (asset description), `max_rate_on_line`. Source: `src/insured.rs`.
 
 **Reservation price:** each insured has a maximum acceptable rate on line (`max_rate_on_line`). `Insured::on_quote_presented` computes `rate = premium / sum_insured`; if `rate > max_rate_on_line` it emits `QuoteRejected` instead of `QuoteAccepted`. A rejected insured is uninsured for the year but retries at the next annual renewal (same timing offset as an accepted quote — the renewal `CoverageRequested` fires `361 − 3 = 358` days after the rejection day). Canonical value: **0.15** (15% RoL — above the typical 6–8% rate band, so rarely binding at current pricing; lowers as capital-linked pricing is introduced).
+
+**Demand curve structure:** the reservation price creates a step-function demand curve — inelastic until the price ceiling is hit, then vertically zero. At canonical rates of 6–8%, demand is near-fully inelastic: every insured that can find a willing insurer will buy. The `Dropped#` column in the year table therefore measures supply-side capacity exhaustion, not demand-side price sensitivity — insureds are willing buyers shut out by capital-constrained insurers.
+
+This is a reasonable first-order model for Lloyd's *primary* commercial lines (marine, property, energy), which are largely mandatory or balance-sheet driven and for which demand is genuinely inelastic across the historical rate range. It is less appropriate for upper excess-of-loss layers, where buyers make explicit cost-benefit decisions about each additional layer and will drop remote layers when ROLs spike — a demand-side behaviour that would reduce the pressure on `Dropped#` in hard markets. Heterogeneous reservation prices by layer position would capture this, and is a future extension aligned with phenomenon 10 (Layer-Position Premium Gradient).
 
 Canonical config: 100 uniform insureds (sum_insured = 50M USD each).
 
@@ -458,6 +463,16 @@ Source: `src/insurer.rs`, `src/config.rs`.
 ### §7.1 Syndicate entry `[PLANNED]`
 
 After each annual review, the coordinator checks whether the industry combined ratio and current market premium rate index cross an entry-attractiveness threshold. If so, it creates one or more new Syndicate agents with parameters drawn from a calibrated distribution (risk appetite, specialism, initial capital). New syndicates receive low initial relationship scores with all brokers.
+
+**Entry trigger:** canonical threshold design — fire a new entrant when the trailing 2-year average industry CR falls below ~80% (indicating sustained profitability above cost of capital). A single good year is insufficient; a sustained signal avoids false positives from the random benign years that occur even in balanced markets.
+
+**Capital sources in practice:** new Lloyd's capacity enters via Names capital top-up, corporate member capital injection, PE-backed managing agency formation, or ILS/sidecar structures collateralised against a specific underwriting year. The simulation can represent all of these as a single `NewInsurerCapital` event that creates an insurer agent with initial capital drawn from a calibrated size distribution.
+
+**Timing lag:** historical pattern (Bermuda class of 1993 post-Andrew; class of 2001 post-9/11; class of 2006 post-Katrina) — meaningful new capacity emerged 12–18 months after the triggering event. This is the statutory formation and regulatory approval lag. In the simulation, the coordinator fires entry at the *following* `YearStart` after the threshold is crossed — a minimum 1-year lag.
+
+**Relationship-building lag:** a new entrant starts with low broker relationship scores and must win business (often at competitive prices) to build placement share. This second lag means new capacity contributes little to the market in its first year and reaches full participation only after 2–3 years of active placement. The combination of the two lags — formation + relationship-building — sustains elevated rates for several years after the shock, which is the empirically observed hard-market duration.
+
+**Minimum viable implementation for cycle emergence:** (1) trailing CR check at each `YearStart`; (2) spawn new insurer if threshold crossed; (3) insurer starts with low relationship scores and round-robin weight. This alone should convert the permanent hard market into a cycle. Voluntary exit during soft markets (§7.4) would close the other tail of the cycle.
 
 ### §7.2 Exit via insolvency `[ACTIVE (PARTIAL)]`
 

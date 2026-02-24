@@ -117,6 +117,13 @@ pub enum Event {
     /// Emitted the first time a claim drives an insurer's capital to zero.
     /// From this point on the insurer declines all new quote requests.
     InsurerInsolvent { insurer_id: InsurerId },
+    /// A new insurer has entered the market, spawned by the coordinator after observing
+    /// sustained market profitability. Logged at the YearEnd day that triggered entry.
+    InsurerEntered {
+        insurer_id: InsurerId,
+        initial_capital: u64,
+        is_aggressive: bool,
+    },
 }
 
 /// A dispatched event with its simulation day. Position in `Simulation.log` is its implicit sequence number.

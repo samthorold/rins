@@ -93,7 +93,7 @@ impl SimulationConfig {
         SimulationConfig {
             seed: 42,
             years: 20,
-            warmup_years: 2,
+            warmup_years: 5,
             // 5 established insurers (500M USD capital) + 3 aggressive small entrants (200M USD).
             //
             // Established (IDs 1–5): calibrated cat_elf=0.033, target_LR=0.80, profit_loading=0.05.

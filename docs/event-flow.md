@@ -103,6 +103,7 @@ flowchart TD
 | 13 | `AssetDamage { insured_id, peril, ground_up_loss }` | `Market::on_loss_event` (cat, fired for all registered insureds) / `perils::schedule_attritional_losses_for_insured` (attritional, fired at `CoverageRequested` time) | `Market::on_asset_damage` → emit `ClaimSettled` only for covered insureds; uninsured insureds log GUL but generate no claim | same day as trigger | §1.3 GUL, §2.1 Policy terms, §6 Loss Settlement |
 | 14 | `ClaimSettled { policy_id, insurer_id, amount, peril }` | `Market` | `Insurer::on_claim_settled` (capital deduction, floored at 0; emits `InsurerInsolvent` on first zero-crossing) | same day as `InsuredLoss` | §6 Loss Settlement, §7.2 Insolvency |
 | 15 | `InsurerInsolvent { insurer_id }` | `Insurer::on_claim_settled` | `Simulation::dispatch` (no-op — logged); insurer's `insolvent` flag set; future `LeadQuoteRequested` returns `LeadQuoteDeclined { reason: Insolvent }` | same day as triggering `ClaimSettled` | §7.2 Insolvency |
+| 16 | `InsurerEntered { insurer_id, initial_capital, is_aggressive }` | `Simulation::spawn_new_insurer` (called from `handle_year_end`) | Logged directly (not dispatched); insurer added to `self.insurers` and `Broker::add_insurer`; seeded into analysis `last_capital`; counted in `Entrants#` column | `YearEnd` day that triggered entry | §7 Capital & Solvency — entry criterion: trailing 2-year avg CR < 85%, 3-year cooldown, analysis years only; 1-in-3 chance `is_aggressive = true` (optimistic cat model) |
 
 ## Day offsets
 

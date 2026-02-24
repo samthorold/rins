@@ -7,7 +7,7 @@ This is a living document. Phenomena are added as the literature review progress
 | # | Phenomenon | Status |
 |---|---|---|
 | 0 | Risk Pooling (Law of Large Numbers) | CONFIRMED |
-| 1 | Underwriting Cycle | PLANNED |
+| 1 | Underwriting Cycle | PARTIAL |
 | 2 | Catastrophe-Amplified Capital Crisis | PARTIAL |
 | 3 | Broker-Syndicate Network Herding | PLANNED |
 | 4 | Specialist vs. Generalist Divergence | PLANNED |
@@ -37,15 +37,33 @@ No hardcoded smoothing produces this; it arises from the LogNormal attritional m
 
 ---
 
-## 1. Underwriting Cycle (Hard/Soft Market Alternation) `[PLANNED]`
+## 1. Underwriting Cycle (Hard/Soft Market Alternation) `[PARTIAL]`
 
 **What it is:** Aggregate market premium rates oscillate over multi-year cycles. Hard markets follow large loss events or capital shocks; soft markets emerge as capital is rebuilt and competition intensifies. Cycles in Lloyd's have historically run 5–10 years peak-to-peak.
 
 **Why it matters:** The cycle is the most robust stylised fact in property-catastrophe reinsurance. A model that cannot reproduce it is not capturing the market's fundamental dynamics.
 
-**Expected agent mechanism:** After a large loss event, syndicates reduce capacity (capital constraint), survivors raise rates. New capital enters attracted by elevated returns, capacity expands, competition drives rates down. The lag between loss, capital adjustment, and pricing response produces the oscillation. No agent targets a cycle — it emerges from individual capital management and competitive pricing responses.
+**Full cycle mechanism (Cummins & Outreville 1987; Venezian 1985):**
 
-*Requires: pricing-response mechanism (§4.1/4.2 of market-mechanics.md).*
+1. Soft market — capital abundant, competition drives rates toward ATP, CRs approach or exceed 100%.
+2. Shock — catastrophe or reserve deterioration depletes capital.
+3. Hard market — capacity scarce (capital-linked limits tighten), rates rise, CRs fall below 100%, profits rebuild capital.
+4. Capital entry — elevated returns attract new capital (new syndicates, ILS, sidecars), capacity expands, competition drives rates back down.
+5. Repeat.
+
+Steps 1–3 are now emergent from capital dynamics alone. Step 4 is absent (not yet modelled). Without step 4, the simulation produces a **permanent hard market** rather than a cycle.
+
+**Currently visible (canonical seed=42, years 3–22):**
+- Rate-on-line rises monotonically: 6.23% (year 3) → 8.26% (year 13) → 8.06% (year 22). No mean-reversion.
+- Coverage contracts from 5.00B → ~2.85–3.00B after year 7 (double-cat, Cats#=2) and stays there.
+- `Dropped#` rises from 0 (years 3–4) to 40–44 (years 13–22): ~40% of submissions find no available capacity.
+- Total capital depleted from 3.62B → ~2.75B by year 8; recovers slowly to ~3.09B by year 22 but never returns to the pre-stress level within the simulation horizon.
+
+The supply-side contraction and price hardening are correct in sign and qualitatively realistic. What is missing is the signal that attracts new capital into the market when returns are elevated, and the subsequent capacity expansion that compresses rates back toward the ATP floor.
+
+**Missing mechanism — capital entry (step 4):** a sustained hard market (CR well below 100% for multiple consecutive years) is a strong profit signal to external capital. Historically: Bermuda class of 1993 (post-Andrew), class of 2001 (post-9/11), class of 2006 (post-Katrina/Rita/Wilma) — meaningful new capacity in each case within 12–18 months of the triggering event. Implementing this as an endogenous coordinator action is the minimum addition required for cycle emergence. See phenomenon 6 and market-mechanics.md §7.1.
+
+*Supply side emergent from capital dynamics. Requires: syndicate entry (market-mechanics.md §7.1) for full cycle.*
 
 ---
 
@@ -59,7 +77,7 @@ No hardcoded smoothing produces this; it arises from the LogNormal attritional m
 
 **Correlation mechanism note:** within a single catastrophe event, damage fractions across policies are sampled independently. The correlation across syndicates arises entirely from the *shared occurrence*: every syndicate writing US-SE property risks is struck by the same windstorm year. Per-policy severity remains independent; diversification *within* a single territory therefore does not reduce cat exposure materially. Only diversification *across* perils and territories reduces a syndicate's probability of being hit hard in a given year. This distinction is important: a syndicate writing 500 US-SE property risks is not more protected than one writing 50 — only one writing across US-SE, EU, and JP is.
 
-*Capital losses land correctly and insolvency processing is active: `InsurerInsolvent` is emitted on first zero-crossing and insolvent insurers decline future quotes. Year 18 (double-cat) drove all five insurers to LR 204–230% with a $260M market-wide capital drop — the shared-occurrence criterion is met. No insolvencies have occurred because current capitalisation (500M USD/insurer) is sufficient to absorb even a double-cat year. The capital-crisis cascade requires either a more severe draw or tighter capital ratios.*
+*Capital losses land correctly and insolvency processing is active: `InsurerInsolvent` is emitted on first zero-crossing and insolvent insurers decline future quotes. Year 7 (double-cat, Cats#=2) drove a $480M+ market-wide capital drop from 3.52B → 2.75B (−22%) — the shared-occurrence criterion is met. No insolvencies have occurred in canonical runs because 500M USD/insurer absorbs even a double-cat year. The capital-crisis cascade requires either more severe draws, tighter capital ratios, or an accumulation of multiple bad years without intervening capital entry.*
 
 ---
 
@@ -106,6 +124,10 @@ No hardcoded smoothing produces this; it arises from the LogNormal attritional m
 **Why it matters:** Without this dynamic, catastrophe-driven insolvencies produce permanently concentrated markets; with it, capital supply responds to profit signals over multi-year lags, producing the capacity rebuilding arc that characterises real hard-market recoveries. The delay between the profit signal and meaningful new capacity — because entrants take years to build broker relationships — is what allows hard markets to sustain elevated rates long enough to attract capital.
 
 **Expected agent mechanism:** When industry aggregate statistics cross an entry-attractiveness threshold the coordinator creates a new Syndicate with low initial broker relationship scores. The new syndicate must compete for placements to build scores; brokers route to it slowly because it ranks below established partners. Its capacity contribution is therefore delayed. The interaction of this lag with phenomena 1 (underwriting cycle) and 7 (concentration surge) produces the full multi-year recovery arc.
+
+**Simulation evidence for its absence:** without capital entry, the canonical run produces a permanent hard market (phenomenon 1 note): `Dropped#` rising to 40–44, rate-on-line climbing to 8%+, coverage staying at ~57–60% of total insured assets — stable for a decade rather than cycling. This is the diagnostic signature of missing counter-cyclical supply. Once capital entry fires, the expected signature would be: elevated `Dropped#` → new insurer added → `Dropped#` falls → rate softens → new cycle phase.
+
+**Calibration target:** new capacity should absorb the majority of the capacity shortfall within 2–3 years of the shock, consistent with the Bermuda classes (12–18 month formation, 2–3 year relationship-building before material panel share). The timing lag is the mechanism that prevents immediate rate collapse after a hard market begins and produces the elevated-rate period during which capital recovers.
 
 *Requires: syndicate entry/exit (market-mechanics.md §7).*
 

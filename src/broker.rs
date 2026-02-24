@@ -39,6 +39,12 @@ impl Broker {
         }
     }
 
+    /// Add a new insurer to the round-robin routing pool.
+    /// The insurer will be reached in the normal rotation from this point forward.
+    pub fn add_insurer(&mut self, id: InsurerId) {
+        self.insurer_ids.push(id);
+    }
+
     /// An insured has requested coverage. Solicit k insurers concurrently (round-robin
     /// start, wrapping), create a submission, and schedule k `LeadQuoteRequested` at day+1.
     pub fn on_coverage_requested(

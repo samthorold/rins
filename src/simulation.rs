@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use rand::SeedableRng;
+use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
 /// Days from CoverageRequested to PolicyBound (the quoting chain length).
@@ -39,6 +39,18 @@ pub struct Simulation {
     /// Prevents double-scheduling when the same insured gets multiple CoverageRequested
     /// in one year (e.g. QuoteRejected retry or QuoteAccepted renewal).
     attritional_scheduled: HashSet<(InsuredId, Year)>,
+    /// Gross premium written this year (PolicyBound.premium). Reset at YearStart.
+    year_premium_written: u64,
+    /// Claims settled this year (ClaimSettled.amount). Reset at YearStart.
+    year_claims_settled: u64,
+    /// Rolling 2-year buffer of annual loss ratios (for trailing CR check).
+    recent_loss_ratios: std::collections::VecDeque<f64>,
+    /// 1-in-200 damage fraction computed at construction; used to size new standard entrants.
+    pml_200: f64,
+    /// Next InsurerId to assign to a dynamically-spawned entrant.
+    next_insurer_id: u64,
+    /// Year in which the most recent entrant was spawned (cooldown guard).
+    last_entry_year: Option<u32>,
 }
 
 impl Simulation {
@@ -108,6 +120,9 @@ impl Simulation {
         let total_years = config.warmup_years + config.years;
         let max_day = Day::year_end(Year(total_years));
 
+        let next_insurer_id =
+            config.insurers.iter().map(|ic| ic.id.0).max().unwrap_or(0) + 1;
+
         Simulation {
             queue: BinaryHeap::new(),
             log: EventLog::new(),
@@ -121,6 +136,12 @@ impl Simulation {
             damage_models,
             config,
             attritional_scheduled: HashSet::new(),
+            year_premium_written: 0,
+            year_claims_settled: 0,
+            recent_loss_ratios: std::collections::VecDeque::new(),
+            pml_200,
+            next_insurer_id,
+            last_entry_year: None,
         }
     }
 
@@ -195,7 +216,7 @@ impl Simulation {
             }
 
             Event::YearEnd { year } => {
-                self.handle_year_end(year);
+                self.handle_year_end(day, year);
             }
 
             Event::CoverageRequested { insured_id, risk } => {
@@ -337,6 +358,8 @@ impl Simulation {
                         }
                     }
                 }
+
+                self.year_premium_written += premium;
             }
 
             Event::PolicyExpired { policy_id } => {
@@ -393,13 +416,21 @@ impl Simulation {
                 for (d, e) in new_events {
                     self.schedule(d, e);
                 }
+                self.year_claims_settled += amount;
             }
 
             Event::InsurerInsolvent { .. } => {}
+
+            // InsurerEntered is logged directly by spawn_new_insurer — no further dispatch.
+            Event::InsurerEntered { .. } => {}
         }
     }
 
     fn handle_year_start(&mut self, day: Day, year: Year) {
+        // Reset annual accumulators used for the entry-criterion loss ratio.
+        self.year_premium_written = 0;
+        self.year_claims_settled = 0;
+
         // Endow insurers with fresh capital each year.
         for insurer in &mut self.insurers {
             insurer.on_year_start();
@@ -440,12 +471,39 @@ impl Simulation {
         self.schedule(Day::year_end(year), Event::YearEnd { year });
     }
 
-    fn handle_year_end(&mut self, year: Year) {
+    fn handle_year_end(&mut self, day: Day, year: Year) {
         eprintln!("Year {} complete", year.0);
 
         // Update each insurer's expected_loss_fraction via EWMA from this year's experience.
         for insurer in &mut self.insurers {
             insurer.on_year_end();
+        }
+
+        // ── Entry criterion ───────────────────────────────────────────────────
+        let expense_ratio = self.config.insurers.first()
+            .map(|ic| ic.expense_ratio)
+            .unwrap_or(0.344);
+        let lr = if self.year_premium_written > 0 {
+            self.year_claims_settled as f64 / self.year_premium_written as f64
+        } else {
+            0.0
+        };
+        self.recent_loss_ratios.push_back(lr);
+        if self.recent_loss_ratios.len() > 2 {
+            self.recent_loss_ratios.pop_front();
+        }
+
+        // Only fire during analysis years (not warmup) and respect 3-year cooldown.
+        if year.0 > self.config.warmup_years && self.recent_loss_ratios.len() >= 2 {
+            let avg_lr = self.recent_loss_ratios.iter().sum::<f64>()
+                / self.recent_loss_ratios.len() as f64;
+            let avg_cr = avg_lr + expense_ratio;
+            let cooldown_ok = self.last_entry_year
+                .map(|y| year.0.saturating_sub(y) >= 3)
+                .unwrap_or(true);
+            if avg_cr < 0.85 && cooldown_ok {
+                self.spawn_new_insurer(day, year);
+            }
         }
 
         // Schedule next year if within simulation horizon.
@@ -454,6 +512,57 @@ impl Simulation {
             let next = Year(year.0 + 1);
             self.schedule(Day::year_start(next), Event::YearStart { year: next });
         }
+    }
+
+    fn spawn_new_insurer(&mut self, day: Day, year: Year) {
+        // 1-in-3 chance of an aggressive entrant (optimistic cat model).
+        let is_aggressive = (self.rng.next_u32() % 3) == 0;
+
+        let id = InsurerId(self.next_insurer_id);
+        self.next_insurer_id += 1;
+
+        // Extract template params from config before any mutable borrows.
+        let pml_200 = self.pml_200;
+        let (initial_capital, cat_elf, target_loss_ratio, profit_loading, pml_frac) = {
+            let template = if is_aggressive {
+                self.config.insurers.iter().find(|ic| ic.pml_damage_fraction_override.is_some())
+            } else {
+                self.config.insurers.iter().find(|ic| ic.pml_damage_fraction_override.is_none())
+            };
+            template.map(|t| {
+                let pml = t.pml_damage_fraction_override.unwrap_or(pml_200);
+                (t.initial_capital, t.cat_elf, t.target_loss_ratio, t.profit_loading, pml)
+            }).unwrap_or_else(|| {
+                if is_aggressive {
+                    (40_000_000_000i64, 0.015, 0.90, 0.00, 0.126)
+                } else {
+                    (50_000_000_000i64, 0.033, 0.80, 0.05, pml_200)
+                }
+            })
+        };
+        let (attritional_elf, ewma_credibility, expense_ratio, net_line_capacity, scf) =
+            self.config.insurers.first()
+                .map(|ic| (ic.attritional_elf, ic.ewma_credibility, ic.expense_ratio,
+                           ic.net_line_capacity, ic.solvency_capital_fraction))
+                .unwrap_or((0.030, 0.3, 0.344, Some(0.30), Some(0.30)));
+
+        let insurer = Insurer::new(
+            id, initial_capital, attritional_elf, cat_elf, target_loss_ratio,
+            ewma_credibility, expense_ratio, profit_loading, net_line_capacity, scf, pml_frac,
+        );
+        let initial_capital_u64 = initial_capital.max(0) as u64;
+
+        self.insurers.push(insurer);
+        self.broker.add_insurer(id);
+        self.last_entry_year = Some(year.0);
+
+        self.log.push(SimEvent {
+            day,
+            event: Event::InsurerEntered { insurer_id: id, initial_capital: initial_capital_u64, is_aggressive },
+        });
+
+        eprintln!("Year {}: new insurer {} entered ({})",
+            year.0, id.0, if is_aggressive { "aggressive" } else { "standard" });
     }
 }
 
@@ -1105,6 +1214,26 @@ mod tests {
         );
 
         let _ = ASSET_VALUE; // suppress unused warning
+    }
+
+    #[test]
+    fn syndicate_entry_fires_after_profitable_years() {
+        // minimal_config has expense_ratio=0.0 and att_ELF≈23.9% with target_LR=0.70.
+        // Realized LR ≈ 0.70, so avg_CR ≈ LR + 0.0 = 0.70 < 0.85 → entry criterion met.
+        // warmup_years=0 → entry criterion active from year 2 onward.
+        // 3-year cooldown → expect entries at approx years 2, 5, 8 over a 10-year run.
+        let config = minimal_config(10, 5);
+        let sim = run_sim(config);
+
+        let entered = sim
+            .log
+            .iter()
+            .filter(|e| matches!(e.event, Event::InsurerEntered { .. }))
+            .count();
+        assert!(
+            entered > 0,
+            "expected at least one InsurerEntered event over 10 quiet years (avg CR ≈ 0.70 < 0.85)"
+        );
     }
 
     #[test]
