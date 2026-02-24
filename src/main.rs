@@ -11,6 +11,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let mut seed_override: Option<u64> = None;
+    let mut years_override: Option<u32> = None;
     let mut output_path = "events.ndjson".to_string();
     let mut quiet = false;
     let mut runs: Option<u64> = None;
@@ -22,6 +23,10 @@ fn main() {
             "--seed" => {
                 i += 1;
                 seed_override = Some(args[i].parse().expect("--seed requires a u64"));
+            }
+            "--years" => {
+                i += 1;
+                years_override = Some(args[i].parse().expect("--years requires a u32"));
             }
             "--output" => {
                 i += 1;
@@ -41,8 +46,11 @@ fn main() {
         i += 1;
     }
 
-    let base_config = SimulationConfig::canonical();
+    let mut base_config = SimulationConfig::canonical();
     let start_seed = seed_override.unwrap_or(base_config.seed);
+    if let Some(y) = years_override {
+        base_config.years = y;
+    }
 
     if let Some(n) = runs {
         use rayon::prelude::*;
