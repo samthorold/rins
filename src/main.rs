@@ -135,7 +135,7 @@ fn print_analysis(
     println!("\n=== Integrity invariants ===");
     println!("  [7]  GUL ≤ sum insured (all perils):                          {}", iinv(|v| matches!(v, IntegrityViolation::GulExceedsSumInsured { .. })));
     println!("  [8]  Aggregate claim ≤ sum insured per (policy, year):        {}", iinv(|v| matches!(v, IntegrityViolation::AggregateClaimExceedsSumInsured { .. })));
-    println!("  [9]  Every ClaimSettled has matching InsuredLoss:              {}", iinv(|v| matches!(v, IntegrityViolation::ClaimWithoutMatchingLoss { .. })));
+    println!("  [9]  Every ClaimSettled has matching AssetDamage:              {}", iinv(|v| matches!(v, IntegrityViolation::ClaimWithoutMatchingLoss { .. })));
     println!("  [10] Claim amount > 0:                                         {}", iinv(|v| matches!(v, IntegrityViolation::ClaimAmountZero { .. })));
     println!("  [11] ClaimSettled insurer matches PolicyBound insurer:         {}", iinv(|v| matches!(v, IntegrityViolation::ClaimInsurerMismatch { .. })));
     println!("  [12] Every QuoteAccepted (non-final-day) has PolicyBound:      {}", iinv(|v| matches!(v, IntegrityViolation::QuoteAcceptedWithoutPolicyBound { .. })));
@@ -164,24 +164,32 @@ fn print_analysis(
         warmup + 1
     );
     println!(
-        "{:>4}  {:>6}  {:>6}  {:>6}  {:<14}  {:>11}  {:>6}",
-        "Year", "LossR%", "CombR%", "Rate%", "Peril", "TotalCap(B)", "Insolv"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>7} | {:<16} | {:>11} | {:>10} | {:>8}",
+        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "Rate%", "Dominant Peril", "TotalCap(B)", "Insolvent#", "Dropped#"
     );
-    println!("{}", "-".repeat(66));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 18 + 3 + 13 + 3 + 12 + 3 + 10));
 
     const CENTS_PER_BUSD: f64 = 100_000_000_000.0; // cents per billion USD
 
     for s in &stats {
-        let marker = if s.insolvent_count > 0 { " !" } else { "  " };
+        let assets_b = s.total_assets as f64 / CENTS_PER_BUSD;
+        let gul_b = (s.attr_gul + s.cat_gul) as f64 / CENTS_PER_BUSD;
+        let cov_b = s.sum_insured as f64 / CENTS_PER_BUSD;
+        let claims_b = s.claims as f64 / CENTS_PER_BUSD;
         println!(
-            "{:>4}  {:>6.1}  {:>6.1}  {:>6.2}  {:<14}  {:>11.2}  {:>6}{marker}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {:>6.2}% | {:<16} | {:>11.2} | {:>10} | {:>8}",
             s.year,
+            assets_b,
+            gul_b,
+            cov_b,
+            claims_b,
             s.loss_ratio() * 100.0,
             s.combined_ratio(expense_ratio) * 100.0,
             s.rate_on_line() * 100.0,
             s.dominant_peril(),
             s.total_capital as f64 / CENTS_PER_BUSD,
             s.insolvent_count,
+            s.dropped_count,
         );
     }
 }

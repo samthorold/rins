@@ -46,7 +46,7 @@ flowchart TD
     subgraph Market["Market (Coordinator)"]
         PB["**PolicyBound**\n{policy_id, submission_id, insured_id,\n insurer_id, premium, sum_insured}\n+1 day from QuoteAccepted"]
         PE["**PolicyExpired**\n{policy_id}\n+361 days from QuoteAccepted"]
-        IL["**InsuredLoss**\n{policy_id, insured_id, peril, ground_up_loss}"]
+        AD["**AssetDamage**\n{insured_id, peril, ground_up_loss}"]
         CS["**ClaimSettled**\n{policy_id, insurer_id, amount, peril}"]
     end
 
@@ -59,16 +59,17 @@ flowchart TD
     QA -->|"+1 day"| PB
     QA -->|"+361 days"| PE
 
-    PB -->|"on_policy_bound\nactivates policy for loss routing\nschedules attritional InsuredLoss"| IL
+    PB -->|"on_policy_bound\nactivates policy for loss routing"| INS_PB
     PB -->|"Insurer::on_policy_bound\ncat_aggregate tracking"| INS_PB
     PE -->|"Insurer::on_policy_expired\nreleases cat_aggregate"| INS_PE
     PE -->|"Market::on_policy_expired\nremoves policy"| PE
 
     %% ── Loss cascade ─────────────────────────────────────────────────────────
 
-    LE -->|"on_loss_event\nsamples damage_fraction × sum_insured\nper active policy"| IL
-    IL --> INS_H
-    IL -->|"on_insured_loss\napplies full coverage\ncapped at remaining_asset_value"| CS
+    CR -->|"schedule_attritional_losses_for_insured\nonce per (insured, year)"| AD
+    LE -->|"on_loss_event\nsamples damage_fraction × sum_insured\nper registered insured"| AD
+    AD --> INS_H
+    AD -->|"on_asset_damage\nroutes to ClaimSettled only\nfor covered insureds"| CS
     CS --> CS_I
     CS_I -->|"first capital=0"| II
 ```
@@ -88,7 +89,7 @@ flowchart TD
 | 1 | `SimulationStart { year_start, warmup_years, analysis_years }` | `Simulation::start()` | `Simulation::dispatch` → schedule `YearStart`; metadata read by analysis scripts to skip warm-up years | Day 0 | — |
 | 2 | `YearStart { year }` | `SimulationStart` handler / `YearEnd` handler | `Simulation::handle_year_start`: schedule `CoverageRequested` per insured (year 1), schedule cat, schedule `YearEnd`. Capital is NOT reset — it persists from prior year. | `(year-1) × 360` | §7 Capital & Solvency |
 | 3 | `YearEnd { year }` | `YearStart` handler | `Simulation::handle_year_end`: call `Insurer::on_year_end` (EWMA update + YTD reset), schedule next `YearStart` | `year × 360 − 1` | §4.1 Actuarial channel, §8.2 Coordinator Statistics |
-| 4 | `CoverageRequested { insured_id, risk }` | `YearStart` handler | `Broker::on_coverage_requested` → emit `LeadQuoteRequested` | spread days 0–179 of year | §5 Placement |
+| 4 | `CoverageRequested { insured_id, risk }` | `YearStart` handler (year 1) / renewal from `QuoteAccepted`, `QuoteRejected`, `SubmissionDropped` | `Market::register_insured` (idempotent) + `perils::schedule_attritional_losses_for_insured` (once per insured per year) + `Broker::on_coverage_requested` → emit `LeadQuoteRequested` | spread days 0–179 of year | §5 Placement |
 | 5 | `LeadQuoteRequested { submission_id, insured_id, insurer_id, risk }` | `Broker` | `Insurer::on_lead_quote_requested` → emit `LeadQuoteIssued` | +1 from `CoverageRequested` | §5 Placement, §4.1 Actuarial channel |
 | 6 | `LeadQuoteIssued { submission_id, insured_id, insurer_id, atp, premium, cat_exposure_at_quote }` | `Insurer` | `Broker::on_lead_quote_issued` → emit `QuotePresented` | same day as `LeadQuoteRequested` | §4 Pricing, §5 Placement |
 | 6b | `LeadQuoteDeclined { submission_id, insured_id, insurer_id, reason }` | `Insurer` | `Broker::on_lead_quote_declined` → emit `LeadQuoteRequested` to next insurer (or drop if all declined) | same day as `LeadQuoteRequested` | §4 Pricing, §5 Placement |
@@ -96,10 +97,10 @@ flowchart TD
 | 8 | `QuoteAccepted { submission_id, insured_id, insurer_id, premium }` | `Insured` | `Market::on_quote_accepted` → create `BoundPolicy` (pending), emit `PolicyBound` + `PolicyExpired` | same day as `QuotePresented` | §5 Placement, §2.2 Annual policy terms |
 | 9 | `QuoteRejected { submission_id, insured_id }` | `Insured` (when `premium / sum_insured > max_rate_on_line`) | `Market::on_quote_rejected` (no-op); simulation schedules renewal `CoverageRequested` at day + 358 | same day as `QuotePresented` | §3.1 Insureds, §5 Placement |
 | 9b | `SubmissionDropped { submission_id, insured_id }` | `Broker::on_lead_quote_declined` (when all insurers decline, no best quote) | `Simulation::dispatch` schedules renewal `CoverageRequested` at day + 358 | same day as final `LeadQuoteDeclined` | §3.3 Broker, §5 Placement |
-| 10 | `PolicyBound { policy_id, submission_id, insured_id, insurer_id, premium, sum_insured }` | `Market` | `Market::on_policy_bound` (activate policy) + `perils::schedule_attritional_claims_for_policy` + `Insurer::on_policy_bound` (cat aggregate tracking) | +1 from `QuoteAccepted` | §2.2 Annual policy terms, §1.3 Attritional occurrences |
+| 10 | `PolicyBound { policy_id, submission_id, insured_id, insurer_id, premium, sum_insured }` | `Market` | `Market::on_policy_bound` (activate policy) + `Insurer::on_policy_bound` (cat aggregate tracking). Attritional losses are scheduled at `CoverageRequested` time, not here. | +1 from `QuoteAccepted` | §2.2 Annual policy terms |
 | 11 | `PolicyExpired { policy_id }` | `Market::on_quote_accepted` | `Insurer::on_policy_expired` (release cat aggregate) + `Market::on_policy_expired` (remove policy) | +361 from `QuoteAccepted` (= +360 from `PolicyBound`) | §2.2 Annual policy terms |
 | 12 | `LossEvent { event_id, peril }` | `perils::schedule_loss_events` at `YearStart` | `Market::on_loss_event` → emit `InsuredLoss` per active policy | Poisson-scheduled within year | §1.3 Occurrences, §1.2 Catastrophe peril class |
-| 13 | `InsuredLoss { policy_id, insured_id, peril, ground_up_loss }` | `Market` (cat) / `perils` (attritional) | `Insured::on_insured_loss` (GUL tracking) + `Market::on_insured_loss` → emit `ClaimSettled` | same day as trigger | §1.3 GUL, §2.1 Policy terms, §6 Loss Settlement |
+| 13 | `AssetDamage { insured_id, peril, ground_up_loss }` | `Market::on_loss_event` (cat, fired for all registered insureds) / `perils::schedule_attritional_losses_for_insured` (attritional, fired at `CoverageRequested` time) | `Market::on_asset_damage` → emit `ClaimSettled` only for covered insureds; uninsured insureds log GUL but generate no claim | same day as trigger | §1.3 GUL, §2.1 Policy terms, §6 Loss Settlement |
 | 14 | `ClaimSettled { policy_id, insurer_id, amount, peril }` | `Market` | `Insurer::on_claim_settled` (capital deduction, floored at 0; emits `InsurerInsolvent` on first zero-crossing) | same day as `InsuredLoss` | §6 Loss Settlement, §7.2 Insolvency |
 | 15 | `InsurerInsolvent { insurer_id }` | `Insurer::on_claim_settled` | `Simulation::dispatch` (no-op — logged); insurer's `insolvent` flag set; future `LeadQuoteRequested` returns `LeadQuoteDeclined { reason: Insolvent }` | same day as triggering `ClaimSettled` | §7.2 Insolvency |
 
@@ -113,21 +114,22 @@ flowchart TD
 - Total `CoverageRequested` → `PolicyBound`: **3 days**
 - `QuoteAccepted` → `PolicyExpired`: **+361 days** (= 360 days of coverage from `PolicyBound`)
 - `QuoteRejected` / `SubmissionDropped` → renewal `CoverageRequested`: **+358 days** (= 361 − 3 QUOTING_CHAIN_DAYS; new `PolicyBound` aligns with the original `PolicyExpired` would-have-been date)
-- `LossEvent` → `InsuredLoss` → `ClaimSettled`: **same day**
-- Attritional `InsuredLoss`: Poisson-scheduled strictly after `PolicyBound` day, within policy year
+- `LossEvent` → `AssetDamage` → `ClaimSettled` (for covered insureds): **same day**
+- Attritional `AssetDamage`: Poisson-scheduled strictly after `CoverageRequested` day, within year
 
 ## Damage fraction model
 
 `LossEvent` carries no severity field. When a `LossEvent` fires, `Market::on_loss_event`
-samples a **damage fraction** from `DamageFractionModel` for each active (bound) policy:
+samples a **damage fraction** from `DamageFractionModel` for each registered insured:
 
 ```
 ground_up_loss = damage_fraction × sum_insured   (naturally ≤ sum_insured)
+→ AssetDamage(insured_id, peril, ground_up_loss)   fired for ALL registered insureds
 ```
 
 The damage fraction is drawn from per-peril `DamageFractionModel` distributions
 (LogNormal for attritional, Pareto for cat), clipped to [0.0, 1.0]. Full coverage is applied
-in `Market::on_insured_loss`:
+in `Market::on_asset_damage` only for insureds with an active policy:
 
 ```
 effective_gul = min(ground_up_loss, remaining_asset_value[policy, year])
@@ -135,10 +137,15 @@ effective_gul = min(ground_up_loss, remaining_asset_value[policy, year])
 ```
 
 Aggregate annual GUL per (policy, year) is capped at `sum_insured`.
+Uninsured insureds receive `AssetDamage` but no `ClaimSettled`; their losses appear in GUL
+statistics but not in claims.
 
 ## Policy activation invariant
 
 A policy is **only loss-eligible after `PolicyBound` fires**:
 
-1. `QuoteAccepted` → `Market::on_quote_accepted`: creates `BoundPolicy` in `pending_policies`; updates `ytd_premiums`; schedules `PolicyBound` and `PolicyExpired`.
-2. `PolicyBound` → `Market::on_policy_bound`: moves policy from `pending_policies` to `policies`; registers in `insured_active_policies`. Only after this call does `on_loss_event` see the policy.
+1. `QuoteAccepted` → `Market::on_quote_accepted`: creates `BoundPolicy` in `pending_policies`; schedules `PolicyBound` and `PolicyExpired`.
+2. `PolicyBound` → `Market::on_policy_bound`: moves policy from `pending_policies` to `policies`; registers in `insured_active_policies`. Only after this call does `on_asset_damage` produce a `ClaimSettled`.
+
+Note: `AssetDamage` fires for **all registered insureds** (registered at `CoverageRequested` time)
+regardless of policy status. Uninsured insureds receive `AssetDamage` but no `ClaimSettled`.

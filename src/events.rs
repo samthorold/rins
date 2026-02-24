@@ -102,12 +102,10 @@ pub enum Event {
         event_id: u64,
         peril: Peril,
     },
-    InsuredLoss {
-        policy_id: PolicyId,
-        insured_id: InsuredId,
-        peril: Peril,
-        ground_up_loss: u64,
-    },
+    /// A peril has damaged an insured's assets. Fired for every registered insured
+    /// regardless of whether they hold an active policy. The market handler
+    /// `on_asset_damage` routes to `ClaimSettled` only for covered insureds.
+    AssetDamage { insured_id: InsuredId, peril: Peril, ground_up_loss: u64 },
     ClaimSettled {
         policy_id: PolicyId,
         insurer_id: InsurerId,

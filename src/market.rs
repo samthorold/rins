@@ -32,6 +32,9 @@ pub struct Market {
     /// Per-(policy, year) remaining insurable asset value.
     /// Initialized to sum_insured on first hit; decremented to prevent aggregate GUL > sum_insured.
     remaining_asset_value: HashMap<(PolicyId, Year), u64>,
+    /// insured_id → sum_insured. Populated via register_insured() at CoverageRequested time.
+    /// Used by on_loss_event to emit AssetDamage for every insured regardless of policy status.
+    pub insured_registry: HashMap<InsuredId, u64>,
 }
 
 impl Default for Market {
@@ -48,7 +51,14 @@ impl Market {
             policies: HashMap::new(),
             insured_active_policies: HashMap::new(),
             remaining_asset_value: HashMap::new(),
+            insured_registry: HashMap::new(),
         }
+    }
+
+    /// Register an insured in the market registry. Called at `CoverageRequested` time.
+    /// Idempotent — only the first call for each `insured_id` takes effect.
+    pub fn register_insured(&mut self, insured_id: InsuredId, sum_insured: u64) {
+        self.insured_registry.entry(insured_id).or_insert(sum_insured);
     }
 
     /// Insured has accepted a quote. Create the policy record (not yet loss-eligible) and
@@ -121,12 +131,13 @@ impl Market {
         }
     }
 
-    /// A catastrophe loss event has fired. Emit InsuredLoss for every active policy
-    /// that covers this peril. Full coverage: ground_up_loss = damage_fraction × sum_insured.
+    /// A catastrophe loss event has fired. Emit `AssetDamage` for every registered
+    /// insured regardless of policy status.
     ///
     /// A single damage fraction is drawn once for the entire event and applied to every
-    /// affected policy. This reflects the physical reality: a cat event's intensity field
+    /// insured. This reflects the physical reality: a cat event's intensity field
     /// (wind speed, ground motion) is a property of the occurrence, not of individual assets.
+    /// Routing to `ClaimSettled` happens downstream in `on_asset_damage`.
     pub fn on_loss_event(
         &self,
         day: Day,
@@ -138,47 +149,44 @@ impl Market {
             return vec![];
         };
         let df = model.sample(rng);
-        self.policies
-            .values()
-            // Guard against the DES race where a LossEvent and PolicyExpired share the
-            // same day but the loss fires first (before on_policy_expired removes the
-            // policy). The expiry day is not a coverage day: the policy covers
-            // [bound_day, expire_day), so losses on expire_day are excluded.
-            .filter(|p| day < p.expire_day)
-            .filter(|p| p.risk.perils_covered.contains(&peril))
-            .filter_map(|policy| {
-                let gul = (df * policy.risk.sum_insured as f64) as u64;
+        self.insured_registry
+            .iter()
+            .filter_map(|(&insured_id, &sum_insured)| {
+                let gul = (df * sum_insured as f64) as u64;
                 if gul == 0 {
                     return None;
                 }
-                Some((
-                    day,
-                    Event::InsuredLoss {
-                        policy_id: policy.policy_id,
-                        insured_id: policy.insured_id,
-                        peril,
-                        ground_up_loss: gul,
-                    },
-                ))
+                Some((day, Event::AssetDamage { insured_id, peril, ground_up_loss: gul }))
             })
             .collect()
     }
 
-    /// Apply full coverage (limit = sum_insured, attachment = 0) to a ground-up loss.
-    /// Caps at remaining insurable asset value for the (policy, year) to prevent
-    /// aggregate annual GUL exceeding sum_insured.
-    /// Returns a ClaimSettled event if the effective loss is non-zero.
-    pub fn on_insured_loss(
+    /// An `AssetDamage` event has fired for an insured. Routes to `ClaimSettled` only
+    /// when the insured holds an active policy that covers the peril.
+    /// Uninsured insureds (no active policy, policy expired, or peril not covered) generate
+    /// no claim — the loss is counted in analysis but not passed to any insurer.
+    pub fn on_asset_damage(
         &mut self,
         day: Day,
-        policy_id: PolicyId,
+        insured_id: InsuredId,
         ground_up_loss: u64,
         peril: Peril,
     ) -> Vec<(Day, Event)> {
+        // No active policy → uninsured; no claim.
+        let Some(&policy_id) = self.insured_active_policies.get(&insured_id) else {
+            return vec![];
+        };
         let policy = match self.policies.get(&policy_id) {
             Some(p) => p,
             None => return vec![],
         };
+        // expire_day race guard: policy covers [bound_day, expire_day).
+        if day >= policy.expire_day {
+            return vec![];
+        }
+        if !policy.risk.perils_covered.contains(&peril) {
+            return vec![];
+        }
         let insurer_id = policy.insurer_id;
         let sum_insured = policy.risk.sum_insured;
 
@@ -236,11 +244,13 @@ mod tests {
             .collect()
     }
 
-    /// Helper: create an accepted + activated policy. Returns the PolicyId.
+    /// Helper: register an insured, create an accepted + activated policy. Returns the PolicyId.
     fn bind_policy(market: &mut Market, submission_id: u64, insured_id: u64) -> PolicyId {
         let sid = SubmissionId(submission_id);
         let iid = InsuredId(insured_id);
         let insurer_id = InsurerId(1);
+        // Register insured so on_loss_event emits AssetDamage for them.
+        market.register_insured(iid, ASSET_VALUE);
         let events = market.on_quote_accepted(
             Day(0),
             sid,
@@ -390,14 +400,14 @@ mod tests {
     // ── on_loss_event ─────────────────────────────────────────────────────────
 
     /// Damage fraction must be drawn once per cat event and shared across all
-    /// affected policies. Two identical policies in the same event must receive
-    /// the same ground_up_loss. This test fails with per-policy draws.
+    /// registered insureds. Two identical insureds in the same event must receive
+    /// the same ground_up_loss. This test fails with per-insured draws.
     #[test]
     fn cat_loss_uses_shared_damage_fraction() {
         let mut market = Market::new();
         bind_policy(&mut market, 1, 1);
         bind_policy(&mut market, 2, 2);
-        // Both policies have ASSET_VALUE. Use a variable model (not the
+        // Both insureds have ASSET_VALUE. Use a variable model (not the
         // degenerate Pareto(1,2) that always clips to 1.0).
         let models: HashMap<Peril, DamageFractionModel> = [(
             Peril::WindstormAtlantic,
@@ -410,53 +420,62 @@ mod tests {
         let guls: Vec<u64> = events
             .iter()
             .filter_map(|(_, e)| {
-                if let Event::InsuredLoss { ground_up_loss, .. } = e { Some(*ground_up_loss) }
+                if let Event::AssetDamage { ground_up_loss, .. } = e { Some(*ground_up_loss) }
                 else { None }
             })
             .collect();
         assert_eq!(
             guls[0], guls[1],
-            "all policies in the same cat event must share the damage fraction"
+            "all insureds in the same cat event must share the damage fraction"
         );
     }
 
     #[test]
-    fn on_loss_event_emits_insured_loss_per_policy() {
+    fn on_loss_event_emits_asset_damage_per_registered_insured() {
         let mut market = Market::new();
         bind_policy(&mut market, 1, 1);
         bind_policy(&mut market, 2, 2);
 
         let events =
             market.on_loss_event(Day(100), Peril::WindstormAtlantic, &full_damage_models(), &mut rng());
-        assert_eq!(events.len(), 2, "one InsuredLoss per matching active policy");
+        assert_eq!(events.len(), 2, "one AssetDamage per registered insured");
         for (_, e) in &events {
-            assert!(matches!(e, Event::InsuredLoss { peril: Peril::WindstormAtlantic, .. }));
+            assert!(matches!(e, Event::AssetDamage { peril: Peril::WindstormAtlantic, .. }));
         }
     }
 
     #[test]
-    fn on_loss_event_skips_policy_on_expiry_day() {
-        // DES race: LossEvent and PolicyExpired share the same day. The loss must not
-        // hit a policy whose expire_day equals the loss day, even if on_policy_expired
-        // has not yet been called.
+    fn on_loss_event_emits_asset_damage_regardless_of_expiry() {
+        // on_loss_event fires for all registered insureds; expiry guard lives in on_asset_damage.
         let mut market = Market::new();
-        // bind_policy uses Day(0) as the accepted day, so expire_day = Day(0+361) = Day(361)
-        // and bound_day = Day(1). Loss on Day(361) must be skipped.
+        // bind_policy uses Day(0), so expire_day = Day(361).
         bind_policy(&mut market, 1, 1);
+        // Loss on expiry day: on_loss_event still emits AssetDamage (expiry is checked later).
         let events =
             market.on_loss_event(Day(361), Peril::WindstormAtlantic, &full_damage_models(), &mut rng());
-        assert!(events.is_empty(), "loss on expiry day must be skipped");
-
-        // Loss one day before expiry must still be emitted.
-        let events =
-            market.on_loss_event(Day(360), Peril::WindstormAtlantic, &full_damage_models(), &mut rng());
-        assert_eq!(events.len(), 1, "loss one day before expiry must be emitted");
+        assert_eq!(events.len(), 1, "on_loss_event emits AssetDamage even on expiry day");
     }
 
     #[test]
-    fn on_loss_event_only_hits_active_policies() {
+    fn on_asset_damage_skips_claim_on_expiry_day() {
+        // on_asset_damage guards: policy covers [bound_day, expire_day).
+        // Loss on expire_day must not produce a ClaimSettled.
         let mut market = Market::new();
-        // Create a policy via on_quote_accepted but do NOT call on_policy_bound.
+        bind_policy(&mut market, 1, 1); // bound at Day(1), expires at Day(361)
+        let events =
+            market.on_asset_damage(Day(361), InsuredId(1), ASSET_VALUE, Peril::WindstormAtlantic);
+        assert!(events.is_empty(), "claim on expiry day must be skipped");
+
+        // Loss one day before expiry must still produce a claim.
+        let events =
+            market.on_asset_damage(Day(360), InsuredId(1), ASSET_VALUE, Peril::WindstormAtlantic);
+        assert_eq!(events.len(), 1, "claim one day before expiry must be emitted");
+    }
+
+    #[test]
+    fn on_loss_event_no_events_for_unregistered_insured() {
+        // Insured created a pending policy (quote accepted) but never called register_insured.
+        let mut market = Market::new();
         market.on_quote_accepted(
             Day(0),
             SubmissionId(1),
@@ -466,14 +485,14 @@ mod tests {
             small_risk(),
             Year(1),
         );
-        // Policy is pending, not active — should not appear in loss events.
+        // Insured not registered → no AssetDamage.
         let events = market.on_loss_event(
             Day(100),
             Peril::WindstormAtlantic,
             &full_damage_models(),
             &mut rng(),
         );
-        assert!(events.is_empty(), "pending (unbound) policy must not be loss-eligible");
+        assert!(events.is_empty(), "unregistered insured must not receive AssetDamage");
     }
 
     #[test]
@@ -492,7 +511,7 @@ mod tests {
         let events =
             market.on_loss_event(Day(100), Peril::WindstormAtlantic, &full_damage_models(), &mut rng());
         for (_, e) in &events {
-            if let Event::InsuredLoss { ground_up_loss, .. } = e {
+            if let Event::AssetDamage { ground_up_loss, .. } = e {
                 assert!(
                     *ground_up_loss <= ASSET_VALUE,
                     "gul {ground_up_loss} > sum_insured {ASSET_VALUE}"
@@ -501,13 +520,13 @@ mod tests {
         }
     }
 
-    // ── on_insured_loss ───────────────────────────────────────────────────────
+    // ── on_asset_damage ───────────────────────────────────────────────────────
 
     #[test]
-    fn on_insured_loss_returns_claim_settled() {
+    fn on_asset_damage_returns_claim_settled() {
         let mut market = Market::new();
-        let pid = bind_policy(&mut market, 1, 1);
-        let events = market.on_insured_loss(Day(10), pid, 100_000, Peril::WindstormAtlantic);
+        bind_policy(&mut market, 1, 1);
+        let events = market.on_asset_damage(Day(10), InsuredId(1), 100_000, Peril::WindstormAtlantic);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0].1, Event::ClaimSettled { amount: 100_000, .. }));
     }
@@ -515,10 +534,10 @@ mod tests {
     #[test]
     fn aggregate_annual_gul_capped_at_sum_insured() {
         let mut market = Market::new();
-        let pid = bind_policy(&mut market, 1, 1);
+        bind_policy(&mut market, 1, 1);
         let half = ASSET_VALUE / 2 + 1;
-        let e1 = market.on_insured_loss(Day(10), pid, half, Peril::WindstormAtlantic);
-        let e2 = market.on_insured_loss(Day(20), pid, half, Peril::WindstormAtlantic);
+        let e1 = market.on_asset_damage(Day(10), InsuredId(1), half, Peril::WindstormAtlantic);
+        let e2 = market.on_asset_damage(Day(20), InsuredId(1), half, Peril::WindstormAtlantic);
 
         let total: u64 = e1
             .iter()
@@ -532,10 +551,42 @@ mod tests {
     }
 
     #[test]
-    fn on_insured_loss_unknown_policy_produces_no_event() {
+    fn on_asset_damage_unknown_insured_produces_no_event() {
         let mut market = Market::new();
-        let events = market.on_insured_loss(Day(0), PolicyId(999), 100_000, Peril::Attritional);
-        assert!(events.is_empty(), "unknown policy_id must produce no events");
+        let events = market.on_asset_damage(Day(0), InsuredId(999), 100_000, Peril::Attritional);
+        assert!(events.is_empty(), "unknown insured_id must produce no events");
+    }
+
+    #[test]
+    fn on_asset_damage_uninsured_returns_empty() {
+        // Insured is registered but has no active policy (SubmissionDropped / unbound).
+        let mut market = Market::new();
+        market.register_insured(InsuredId(1), ASSET_VALUE);
+        let events = market.on_asset_damage(Day(10), InsuredId(1), 100_000, Peril::WindstormAtlantic);
+        assert!(events.is_empty(), "uninsured insured must not generate a ClaimSettled");
+    }
+
+    #[test]
+    fn on_asset_damage_peril_not_covered_returns_empty() {
+        // Policy covers only WindstormAtlantic; Attritional damage must not generate a claim.
+        let mut market = Market::new();
+        let iid = InsuredId(1);
+        market.register_insured(iid, ASSET_VALUE);
+        let cat_only_risk = Risk {
+            sum_insured: ASSET_VALUE,
+            territory: "US-SE".to_string(),
+            perils_covered: vec![Peril::WindstormAtlantic],
+        };
+        let events = market.on_quote_accepted(
+            Day(0), SubmissionId(1), iid, InsurerId(1), 100_000, cat_only_risk, Year(1),
+        );
+        let pid = events
+            .iter()
+            .find_map(|(_, e)| if let Event::PolicyBound { policy_id, .. } = e { Some(*policy_id) } else { None })
+            .unwrap();
+        market.on_policy_bound(pid);
+        let events = market.on_asset_damage(Day(10), iid, 100_000, Peril::Attritional);
+        assert!(events.is_empty(), "peril not covered by policy must not generate a claim");
     }
 
     // ── on_quote_rejected ─────────────────────────────────────────────────────

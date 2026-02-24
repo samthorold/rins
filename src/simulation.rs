@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -35,6 +35,10 @@ pub struct Simulation {
     next_event_id: u64,
     damage_models: HashMap<Peril, DamageFractionModel>,
     config: SimulationConfig,
+    /// (insured_id, year) pairs for which attritional losses have already been scheduled.
+    /// Prevents double-scheduling when the same insured gets multiple CoverageRequested
+    /// in one year (e.g. QuoteRejected retry or QuoteAccepted renewal).
+    attritional_scheduled: HashSet<(InsuredId, Year)>,
 }
 
 impl Simulation {
@@ -116,6 +120,7 @@ impl Simulation {
             next_event_id: 0,
             damage_models,
             config,
+            attritional_scheduled: HashSet::new(),
         }
     }
 
@@ -194,6 +199,22 @@ impl Simulation {
             }
 
             Event::CoverageRequested { insured_id, risk } => {
+                // Register insured in market (idempotent — first call wins).
+                self.market.register_insured(insured_id, risk.sum_insured);
+
+                // Schedule attritional losses once per (insured, year) so that
+                // retries (QuoteRejected / SubmissionDropped renewals) don't
+                // double-schedule losses for the same insured in the same year.
+                let year = day.year();
+                if self.attritional_scheduled.insert((insured_id, year)) {
+                    let att = perils::schedule_attritional_losses_for_insured(
+                        insured_id, &risk, day, &mut self.rng, &self.config.attritional,
+                    );
+                    for (d, e) in att {
+                        self.schedule(d, e);
+                    }
+                }
+
                 let events = self.broker.on_coverage_requested(day, insured_id, risk);
                 for (d, e) in events {
                     self.schedule(d, e);
@@ -295,23 +316,14 @@ impl Simulation {
                 // Activate the policy for loss routing.
                 self.market.on_policy_bound(policy_id);
 
-                // Schedule attritional InsuredLoss events for this policy,
-                // starting from the current day so no event is scheduled in the past.
+                // Attritional AssetDamage events are scheduled at CoverageRequested time
+                // (see the CoverageRequested arm above) so all insureds accumulate
+                // attritional exposure regardless of policy status.
+
                 if let Some(policy) = self.market.policies.get(&policy_id) {
                     let insurer_id = policy.insurer_id;
                     let sum_insured = policy.risk.sum_insured;
                     let perils = policy.risk.perils_covered.clone();
-                    let att_events = perils::schedule_attritional_claims_for_policy(
-                        policy_id,
-                        policy.insured_id,
-                        &policy.risk.clone(),
-                        day,
-                        &mut self.rng,
-                        &self.config.attritional,
-                    );
-                    for (d, e) in att_events {
-                        self.schedule(d, e);
-                    }
                     if let Some(ins) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
                         ins.on_policy_bound(policy_id, sum_insured, premium, &perils);
                         // Back-fill total_cat_exposure now that the insurer aggregate is updated.
@@ -350,10 +362,10 @@ impl Simulation {
                 }
             }
 
-            Event::InsuredLoss { policy_id, peril, ground_up_loss, .. } => {
-                // Apply policy terms → ClaimSettled.
+            Event::AssetDamage { insured_id, peril, ground_up_loss } => {
+                // Route to ClaimSettled only for covered insureds.
                 let events =
-                    self.market.on_insured_loss(day, policy_id, ground_up_loss, peril);
+                    self.market.on_asset_damage(day, insured_id, ground_up_loss, peril);
                 for (d, e) in events {
                     self.schedule(d, e);
                 }
@@ -674,18 +686,18 @@ mod tests {
     // ── Loss routing ─────────────────────────────────────────────────────────
 
     #[test]
-    fn insured_loss_appears_between_loss_event_and_claim_settled() {
+    fn asset_damage_appears_between_loss_event_and_claim_settled() {
         let mut config = minimal_config(1, 2);
         config.catastrophe.annual_frequency = 10.0;
         let sim = run_sim(config);
 
         let has_loss_event =
             sim.log.iter().any(|e| matches!(e.event, Event::LossEvent { .. }));
-        let has_insured_loss =
-            sim.log.iter().any(|e| matches!(e.event, Event::InsuredLoss { .. }));
+        let has_asset_damage =
+            sim.log.iter().any(|e| matches!(e.event, Event::AssetDamage { .. }));
 
         if has_loss_event {
-            assert!(has_insured_loss, "InsuredLoss must appear when LossEvent fires");
+            assert!(has_asset_damage, "AssetDamage must appear when LossEvent fires");
         }
     }
 
@@ -700,14 +712,14 @@ mod tests {
     }
 
     #[test]
-    fn attritional_insured_loss_appears_in_log() {
+    fn attritional_asset_damage_appears_in_log() {
         let mut config = minimal_config(1, 5);
         config.attritional.annual_rate = 10.0;
         let sim = run_sim(config);
         let has_att = sim.log.iter().any(|e| {
-            matches!(e.event, Event::InsuredLoss { peril: Peril::Attritional, .. })
+            matches!(e.event, Event::AssetDamage { peril: Peril::Attritional, .. })
         });
-        assert!(has_att, "expected attritional InsuredLoss events with high rate");
+        assert!(has_att, "expected attritional AssetDamage events with high rate");
     }
 
     // ── Capital ───────────────────────────────────────────────────────────────
@@ -727,7 +739,7 @@ mod tests {
     fn insurer_becomes_insolvent_under_stress() {
         // Under extreme cat frequency and small initial capital, at least one
         // insurer must become insolvent — verifying the full event chain
-        // LossEvent → InsuredLoss → ClaimSettled → insurer.on_claim_settled → InsurerInsolvent.
+        // LossEvent → AssetDamage → ClaimSettled → insurer.on_claim_settled → InsurerInsolvent.
         let mut config = minimal_config(2, 10);
         config.catastrophe.annual_frequency = 5.0;
         // Shrink capital so a single bad cat year wipes it out

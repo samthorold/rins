@@ -3,7 +3,7 @@ use rand_distr::{Distribution, LogNormal, Pareto, Poisson};
 
 use crate::config::{AttritionalConfig, CatConfig};
 use crate::events::{Event, Peril, Risk};
-use crate::types::{Day, InsuredId, PolicyId, Year};
+use crate::types::{Day, InsuredId, Year};
 
 /// A damage fraction model: `sample()` returns a value in `[0.0, 1.0]`
 /// representing the fraction of the insured asset's total value that is damaged.
@@ -63,15 +63,15 @@ pub fn schedule_loss_events(
         .collect()
 }
 
-/// Schedule attritional `InsuredLoss` events for a single bound policy.
+/// Schedule attritional `AssetDamage` events for a single insured.
 ///
-/// Called at `PolicyBound` time — policy_id is known and non-optional.
-/// `from_day` is the PolicyBound day; all losses are scheduled strictly after
-/// it so the DES log remains day-ordered (no event is scheduled in the past).
+/// Called at `CoverageRequested` time so all insureds accumulate attritional
+/// exposure for the year regardless of whether they ultimately bind a policy.
+/// `from_day` is the `CoverageRequested` day; all losses are scheduled strictly
+/// after it so the DES log remains day-ordered (no event is in the past).
 /// Draws a Poisson count from `config.annual_rate`, then for each occurrence
 /// draws a random day in `(from_day, year_end]` and a damage fraction.
-pub fn schedule_attritional_claims_for_policy(
-    policy_id: PolicyId,
+pub fn schedule_attritional_losses_for_insured(
     insured_id: InsuredId,
     risk: &Risk,
     from_day: Day,
@@ -99,7 +99,7 @@ pub fn schedule_attritional_claims_for_policy(
             }
             Some((
                 day,
-                Event::InsuredLoss { policy_id, insured_id, peril: Peril::Attritional, ground_up_loss },
+                Event::AssetDamage { insured_id, peril: Peril::Attritional, ground_up_loss },
             ))
         })
         .collect()
@@ -112,7 +112,7 @@ mod tests {
 
     use super::*;
     use crate::config::{AttritionalConfig, CatConfig, ASSET_VALUE};
-    use crate::types::{Day, InsuredId, PolicyId, Year};
+    use crate::types::{Day, InsuredId, Year};
 
     fn rng() -> ChaCha20Rng {
         ChaCha20Rng::seed_from_u64(42)
@@ -253,15 +253,14 @@ mod tests {
         }
     }
 
-    // ── schedule_attritional_claims_for_policy tests ──────────────────────────
+    // ── schedule_attritional_losses_for_insured tests ────────────────────────
 
-    /// Scheduler emits InsuredLoss events with ground_up_loss ≤ sum_insured.
+    /// Scheduler emits AssetDamage events with ground_up_loss ≤ sum_insured.
     #[test]
-    fn attritional_produces_bounded_insured_losses() {
+    fn attritional_produces_bounded_asset_damages() {
         let mut rng = rng();
         let risk = small_risk();
-        let events = schedule_attritional_claims_for_policy(
-            PolicyId(1),
+        let events = schedule_attritional_losses_for_insured(
             InsuredId(1),
             &risk,
             Day::year_start(Year(1)),
@@ -270,8 +269,8 @@ mod tests {
         );
         assert!(!events.is_empty(), "expected events with rate=10.0");
         for (_, e) in &events {
-            if let Event::InsuredLoss { policy_id, ground_up_loss, peril, .. } = e {
-                assert_eq!(*policy_id, PolicyId(1));
+            if let Event::AssetDamage { insured_id, ground_up_loss, peril } = e {
+                assert_eq!(*insured_id, InsuredId(1));
                 assert_eq!(*peril, Peril::Attritional);
                 assert!(
                     *ground_up_loss <= ASSET_VALUE,
@@ -290,8 +289,7 @@ mod tests {
             territory: "US-SE".to_string(),
             perils_covered: vec![Peril::WindstormAtlantic], // no Attritional
         };
-        let events = schedule_attritional_claims_for_policy(
-            PolicyId(1),
+        let events = schedule_attritional_losses_for_insured(
             InsuredId(1),
             &risk,
             Day::year_start(Year(1)),
@@ -301,12 +299,11 @@ mod tests {
         assert!(events.is_empty(), "must return no events when Attritional not covered");
     }
 
-    /// Scheduler emits only InsuredLoss events (never ClaimSettled).
+    /// Scheduler emits only AssetDamage events (never ClaimSettled).
     #[test]
-    fn attritional_emits_only_insured_loss() {
+    fn attritional_emits_only_asset_damage() {
         let mut rng = rng();
-        let events = schedule_attritional_claims_for_policy(
-            PolicyId(0),
+        let events = schedule_attritional_losses_for_insured(
             InsuredId(1),
             &small_risk(),
             Day::year_start(Year(1)),
@@ -316,8 +313,8 @@ mod tests {
         assert!(!events.is_empty());
         for (_, e) in &events {
             assert!(
-                matches!(e, Event::InsuredLoss { .. }),
-                "must only emit InsuredLoss, got {e:?}"
+                matches!(e, Event::AssetDamage { .. }),
+                "must only emit AssetDamage, got {e:?}"
             );
         }
     }
@@ -330,8 +327,7 @@ mod tests {
         let config = AttritionalConfig { annual_rate: 5.0, mu: 10.0, sigma: 0.01 };
         let mut rng = rng();
         let risk = small_risk();
-        let events = schedule_attritional_claims_for_policy(
-            PolicyId(0),
+        let events = schedule_attritional_losses_for_insured(
             InsuredId(1),
             &risk,
             Day::year_start(Year(1)),
@@ -340,7 +336,7 @@ mod tests {
         );
         assert!(!events.is_empty());
         for (_, e) in &events {
-            if let Event::InsuredLoss { ground_up_loss, .. } = e {
+            if let Event::AssetDamage { ground_up_loss, .. } = e {
                 assert_eq!(
                     *ground_up_loss, ASSET_VALUE,
                     "with damage_fraction=1.0, gul must equal sum_insured"

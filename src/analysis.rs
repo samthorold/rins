@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     events::{Event, Peril, SimEvent},
-    types::{InsurerId, PolicyId, SubmissionId},
+    types::{InsuredId, InsurerId, PolicyId, SubmissionId},
 };
 
 /// Per-year aggregate statistics derived from the event stream.
@@ -25,6 +25,8 @@ pub struct YearStats {
     pub insolvent_count: u32,
     /// Count of SubmissionDropped events in the year (all insurers declined).
     pub dropped_count: u32,
+    /// Sum of unique-insured sum_insured from CoverageRequested in the year (cents).
+    pub total_assets: u64,
 }
 
 impl YearStats {
@@ -39,6 +41,7 @@ impl YearStats {
             total_capital: 0,
             insolvent_count: 0,
             dropped_count: 0,
+            total_assets: 0,
         }
     }
 
@@ -87,15 +90,15 @@ impl YearStats {
 pub enum MechanicsViolation {
     /// PolicyBound did not arrive exactly 2 days after LeadQuoteRequested.
     DayOffsetChain { submission_id: u64, detail: String },
-    /// InsuredLoss arrived before the policy was bound (any peril).
-    LossBeforeBound { policy_id: u64, loss_day: u64, bound_day: u64 },
-    /// Attritional InsuredLoss arrived on the bound day or earlier (must be strictly after).
-    AttrNotStrictlyPostBound { policy_id: u64, loss_day: u64, bound_day: u64 },
+    /// AssetDamage arrived before the insured's first CoverageRequested (any peril).
+    LossBeforeBound { insured_id: u64, loss_day: u64, bound_day: u64 },
+    /// Attritional AssetDamage arrived on or before the insured's CoverageRequested day.
+    AttrNotStrictlyPostBound { insured_id: u64, loss_day: u64, bound_day: u64 },
     /// PolicyExpired did not fire at QuoteAccepted_day + 361.
     PolicyExpiredTiming { policy_id: u64, expected: u64, actual: u64 },
     /// ClaimSettled arrived after the policy had expired.
     ClaimAfterExpiry { policy_id: u64, claim_day: u64, expiry_day: u64 },
-    /// InsuredLoss ground_up_loss exceeds the policy sum_insured (damage fraction > 1.0).
+    /// AssetDamage ground_up_loss exceeds the insured sum_insured (damage fraction > 1.0).
     CatFractionInconsistent { peril: String, day: u64, detail: String },
 }
 
@@ -106,11 +109,11 @@ impl std::fmt::Display for MechanicsViolation {
             Self::DayOffsetChain { submission_id, detail } => {
                 write!(f, "DayOffsetChain sub={submission_id}: {detail}")
             }
-            Self::LossBeforeBound { policy_id, loss_day, bound_day } => {
-                write!(f, "LossBeforeBound policy={policy_id}: loss_day={loss_day} bound_day={bound_day}")
+            Self::LossBeforeBound { insured_id, loss_day, bound_day } => {
+                write!(f, "LossBeforeBound insured={insured_id}: loss_day={loss_day} bound_day={bound_day}")
             }
-            Self::AttrNotStrictlyPostBound { policy_id, loss_day, bound_day } => {
-                write!(f, "AttrNotStrictlyPostBound policy={policy_id}: loss_day={loss_day} bound_day={bound_day}")
+            Self::AttrNotStrictlyPostBound { insured_id, loss_day, bound_day } => {
+                write!(f, "AttrNotStrictlyPostBound insured={insured_id}: loss_day={loss_day} bound_day={bound_day}")
             }
             Self::PolicyExpiredTiming { policy_id, expected, actual } => {
                 write!(f, "PolicyExpiredTiming policy={policy_id}: expected={expected} actual={actual}")
@@ -151,6 +154,7 @@ pub fn analyse(
 
     let mut stats: HashMap<u32, YearStats> = HashMap::new();
     let mut last_capital: HashMap<InsurerId, u64> = initial_capitals.clone();
+    let mut assets_seen: HashMap<u32, HashSet<InsuredId>> = HashMap::new();
 
     for sim_event in events {
         let year = sim_event.day.year().0;
@@ -166,7 +170,7 @@ pub fn analyse(
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.claims += amount;
             }
-            Event::InsuredLoss { peril, ground_up_loss, .. } => {
+            Event::AssetDamage { peril, ground_up_loss, .. } => {
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 match peril {
                     Peril::Attritional => s.attr_gul += ground_up_loss,
@@ -180,6 +184,13 @@ pub fn analyse(
             Event::SubmissionDropped { .. } => {
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.dropped_count += 1;
+            }
+            Event::CoverageRequested { insured_id, risk } => {
+                let seen = assets_seen.entry(year).or_default();
+                if seen.insert(*insured_id) {
+                    let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
+                    s.total_assets += risk.sum_insured;
+                }
             }
             Event::YearEnd { year: y } => {
                 // Snapshot total capital at year boundary.
@@ -206,25 +217,30 @@ pub fn verify_mechanics(events: &[SimEvent]) -> Vec<MechanicsViolation> {
     let mut qa_day: HashMap<SubmissionId, u64> = HashMap::new();
 
     // Per-policy tracking.
-    let mut bound_day: HashMap<PolicyId, u64> = HashMap::new();
     let mut policy_from_sub: HashMap<SubmissionId, PolicyId> = HashMap::new();
     let mut expiry_day: HashMap<PolicyId, u64> = HashMap::new();
-    let mut sum_insured_by_policy: HashMap<PolicyId, u64> = HashMap::new();
 
-    // First pass: index LeadQuoteRequested, QuoteAccepted, PolicyBound, PolicyExpired.
+    // Per-insured tracking: first CoverageRequested day + sum_insured.
+    let mut insured_cr_day: HashMap<InsuredId, u64> = HashMap::new();
+    let mut insured_sum_insured: HashMap<InsuredId, u64> = HashMap::new();
+
+    // First pass: index LeadQuoteRequested, QuoteAccepted, PolicyBound, PolicyExpired,
+    // and CoverageRequested (for loss timing checks).
     for ev in events {
         let day = ev.day.0;
         match &ev.event {
+            Event::CoverageRequested { insured_id, risk } => {
+                insured_cr_day.entry(*insured_id).or_insert(day);
+                insured_sum_insured.entry(*insured_id).or_insert(risk.sum_insured);
+            }
             Event::LeadQuoteRequested { submission_id, .. } => {
                 lqr_day.entry(*submission_id).or_insert(day);
             }
             Event::QuoteAccepted { submission_id, .. } => {
                 qa_day.insert(*submission_id, day);
             }
-            Event::PolicyBound { policy_id, submission_id, sum_insured, .. } => {
-                bound_day.insert(*policy_id, day);
+            Event::PolicyBound { policy_id, submission_id, .. } => {
                 policy_from_sub.insert(*submission_id, *policy_id);
-                sum_insured_by_policy.insert(*policy_id, *sum_insured);
 
                 // Invariant 1 — DayOffsetChain: PolicyBound must be lqr_day + 2.
                 if let Some(&lqr) = lqr_day.get(submission_id) {
@@ -264,35 +280,37 @@ pub fn verify_mechanics(events: &[SimEvent]) -> Vec<MechanicsViolation> {
     for ev in events {
         let day = ev.day.0;
         match &ev.event {
-            Event::InsuredLoss { policy_id, peril, ground_up_loss, .. } => {
-                if let Some(&bd) = bound_day.get(policy_id) {
-                    // Invariant 2 — LossBeforeBound: loss_day must not be before bound_day.
-                    if day < bd {
+            Event::AssetDamage { insured_id, peril, ground_up_loss } => {
+                if let Some(&cr_day) = insured_cr_day.get(insured_id) {
+                    // Invariant 2 — LossBeforeBound: AssetDamage must not fire before the
+                    // insured's first CoverageRequested (losses are scheduled from that day).
+                    if day < cr_day {
                         violations.push(MechanicsViolation::LossBeforeBound {
-                            policy_id: policy_id.0,
+                            insured_id: insured_id.0,
                             loss_day: day,
-                            bound_day: bd,
+                            bound_day: cr_day,
                         });
                     }
-                    // Invariant 3 — AttrNotStrictlyPostBound: attritional loss must be strictly after bound.
-                    if matches!(peril, Peril::Attritional) && day <= bd {
+                    // Invariant 3 — AttrNotStrictlyPostBound: attritional loss must be strictly
+                    // after CoverageRequested day (scheduled in (from_day, year_end]).
+                    if matches!(peril, Peril::Attritional) && day <= cr_day {
                         violations.push(MechanicsViolation::AttrNotStrictlyPostBound {
-                            policy_id: policy_id.0,
+                            insured_id: insured_id.0,
                             loss_day: day,
-                            bound_day: bd,
+                            bound_day: cr_day,
                         });
                     }
                 }
                 // Invariant 6 — CatFractionInconsistent: ground_up_loss must not exceed sum_insured.
                 if matches!(peril, Peril::WindstormAtlantic) {
-                    if let Some(&si) = sum_insured_by_policy.get(policy_id) {
+                    if let Some(&si) = insured_sum_insured.get(insured_id) {
                         if *ground_up_loss > si {
                             violations.push(MechanicsViolation::CatFractionInconsistent {
                                 peril: "WindstormAtlantic".to_string(),
                                 day,
                                 detail: format!(
-                                    "policy {} gul {} > sum_insured {}",
-                                    policy_id.0, ground_up_loss, si
+                                    "insured {} gul {} > sum_insured {}",
+                                    insured_id.0, ground_up_loss, si
                                 ),
                             });
                         }
@@ -393,12 +411,14 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
     let mut max_day: u64 = 0;
     let mut policy_sum_insured: HashMap<PolicyId, u64> = HashMap::new();
     let mut policy_insurer: HashMap<PolicyId, InsurerId> = HashMap::new();
+    let mut policy_insured: HashMap<PolicyId, InsuredId> = HashMap::new();
+    let mut insured_sum_insured: HashMap<InsuredId, u64> = HashMap::new();
     let mut sub_insurer_quoted: HashMap<SubmissionId, InsurerId> = HashMap::new();
     let mut sub_accepted_day: HashMap<SubmissionId, u64> = HashMap::new();
     let mut sub_policy: HashMap<SubmissionId, PolicyId> = HashMap::new();
     let mut policy_bind_count: HashMap<PolicyId, u32> = HashMap::new();
     let mut bound_policies: HashSet<PolicyId> = HashSet::new();
-    let mut loss_keys: HashSet<(u64, PolicyId)> = HashSet::new();
+    let mut loss_keys: HashSet<(u64, InsuredId)> = HashSet::new();
     let mut claim_agg: HashMap<(PolicyId, u32), u64> = HashMap::new();
     let mut claim_settled_list: Vec<(u64, PolicyId, InsurerId, u64)> = Vec::new();
     // Quoting flow tracking for Inv 16–18.
@@ -412,6 +432,9 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
             max_day = day;
         }
         match &ev.event {
+            Event::CoverageRequested { insured_id, risk } => {
+                insured_sum_insured.entry(*insured_id).or_insert(risk.sum_insured);
+            }
             Event::QuoteAccepted { submission_id, insurer_id, .. } => {
                 sub_accepted_day.insert(*submission_id, day);
                 // Track the insurer whose quote was accepted — this is the correct reference for
@@ -420,15 +443,16 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
                 // selected insurer unambiguously.
                 sub_insurer_quoted.insert(*submission_id, *insurer_id);
             }
-            Event::PolicyBound { policy_id, submission_id, insurer_id, sum_insured, .. } => {
+            Event::PolicyBound { policy_id, submission_id, insurer_id, insured_id, sum_insured, .. } => {
                 policy_sum_insured.insert(*policy_id, *sum_insured);
                 policy_insurer.insert(*policy_id, *insurer_id);
+                policy_insured.insert(*policy_id, *insured_id);
                 sub_policy.insert(*submission_id, *policy_id);
                 *policy_bind_count.entry(*policy_id).or_insert(0) += 1;
                 bound_policies.insert(*policy_id);
             }
-            Event::InsuredLoss { policy_id, .. } => {
-                loss_keys.insert((day, *policy_id));
+            Event::AssetDamage { insured_id, .. } => {
+                loss_keys.insert((day, *insured_id));
             }
             Event::ClaimSettled { policy_id, insurer_id, amount, .. } => {
                 let year = ev.day.year().0;
@@ -460,11 +484,11 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
 
     // Check 1: GulExceedsSumInsured — gul must not exceed sum_insured for any peril.
     for ev in events {
-        if let Event::InsuredLoss { policy_id, peril, ground_up_loss, .. } = &ev.event {
-            if let Some(&si) = policy_sum_insured.get(policy_id) {
+        if let Event::AssetDamage { insured_id, peril, ground_up_loss } = &ev.event {
+            if let Some(&si) = insured_sum_insured.get(insured_id) {
                 if *ground_up_loss > si {
                     violations.push(IntegrityViolation::GulExceedsSumInsured {
-                        policy_id: policy_id.0,
+                        policy_id: insured_id.0, // field repurposed as insured_id for backwards compat
                         day: ev.day.0,
                         peril: format!("{peril:?}"),
                         gul: *ground_up_loss,
@@ -491,8 +515,13 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
 
     // Check 3 (Claims), 4 (Routing), 5 (Routing) — iterate ClaimSettled.
     for &(day, policy_id, insurer_id, amount) in &claim_settled_list {
-        // ClaimWithoutMatchingLoss: every ClaimSettled must have a matching InsuredLoss.
-        if !loss_keys.contains(&(day, policy_id)) {
+        // ClaimWithoutMatchingLoss: every ClaimSettled must have a matching AssetDamage.
+        // AssetDamage is keyed by (day, insured_id); look up insured_id via policy_insured.
+        let has_matching_loss = policy_insured
+            .get(&policy_id)
+            .map(|insured_id| loss_keys.contains(&(day, *insured_id)))
+            .unwrap_or(false);
+        if !has_matching_loss {
             violations.push(IntegrityViolation::ClaimWithoutMatchingLoss {
                 policy_id: policy_id.0,
                 day,
@@ -719,8 +748,7 @@ mod tests {
             sim_start(),
             sim_ev(
                 50,
-                Event::InsuredLoss {
-                    policy_id: PolicyId(1),
+                Event::AssetDamage {
                     insured_id: InsuredId(1),
                     peril: Peril::WindstormAtlantic,
                     ground_up_loss: 700,
@@ -728,8 +756,7 @@ mod tests {
             ),
             sim_ev(
                 50,
-                Event::InsuredLoss {
-                    policy_id: PolicyId(1),
+                Event::AssetDamage {
                     insured_id: InsuredId(1),
                     peril: Peril::Attritional,
                     ground_up_loss: 300,
@@ -747,8 +774,7 @@ mod tests {
             sim_start(),
             sim_ev(
                 50,
-                Event::InsuredLoss {
-                    policy_id: PolicyId(1),
+                Event::AssetDamage {
                     insured_id: InsuredId(1),
                     peril: Peril::Attritional,
                     ground_up_loss: 1_000,
@@ -767,8 +793,7 @@ mod tests {
             // cat = 450, attr = 550 → cat_pct = 45% → Mixed
             sim_ev(
                 50,
-                Event::InsuredLoss {
-                    policy_id: PolicyId(1),
+                Event::AssetDamage {
                     insured_id: InsuredId(1),
                     peril: Peril::WindstormAtlantic,
                     ground_up_loss: 450,
@@ -776,8 +801,7 @@ mod tests {
             ),
             sim_ev(
                 50,
-                Event::InsuredLoss {
-                    policy_id: PolicyId(1),
+                Event::AssetDamage {
                     insured_id: InsuredId(1),
                     peril: Peril::Attritional,
                     ground_up_loss: 550,
@@ -984,17 +1008,16 @@ mod tests {
 
     #[test]
     fn test_mechanics_loss_before_bound() {
-        // PolicyBound at day 3, InsuredLoss for that policy at day 2 (before bound).
-        let base_day = 0u64;
+        // CoverageRequested at day 5; AssetDamage at day 4 (before CoverageRequested).
+        let base_day = 5u64; // so days 0–4 are "before insured appears"
         let submission_id = SubmissionId(1);
         let policy_id = PolicyId(1);
 
         let mut events = valid_chain_events(submission_id, policy_id, base_day);
-        // Insert an InsuredLoss at day 2 (before PolicyBound at day 3).
+        // Insert an AssetDamage at day 4 (before CoverageRequested at day 5).
         events.push(sim_ev(
-            base_day + 2,
-            Event::InsuredLoss {
-                policy_id,
+            base_day - 1,
+            Event::AssetDamage {
                 insured_id: InsuredId(1),
                 peril: Peril::WindstormAtlantic,
                 ground_up_loss: 100,

@@ -118,15 +118,15 @@ fn main() {
                 MechanicsViolation::DayOffsetChain { submission_id, detail } => {
                     println!("    DayOffsetChain  sub={submission_id}  {detail}");
                 }
-                MechanicsViolation::LossBeforeBound { policy_id, loss_day, bound_day } => {
-                    println!("    LossBeforeBound  policy={policy_id}  loss_day={loss_day}  bound_day={bound_day}");
+                MechanicsViolation::LossBeforeBound { insured_id, loss_day, bound_day } => {
+                    println!("    LossBeforeBound  insured={insured_id}  loss_day={loss_day}  bound_day={bound_day}");
                 }
                 MechanicsViolation::AttrNotStrictlyPostBound {
-                    policy_id,
+                    insured_id,
                     loss_day,
                     bound_day,
                 } => {
-                    println!("    AttrNotStrictlyPostBound  policy={policy_id}  loss_day={loss_day}  bound_day={bound_day}");
+                    println!("    AttrNotStrictlyPostBound  insured={insured_id}  loss_day={loss_day}  bound_day={bound_day}");
                 }
                 MechanicsViolation::PolicyExpiredTiming { policy_id, expected, actual } => {
                     println!("    PolicyExpiredTiming  policy={policy_id}  expected={expected}  actual={actual}");
@@ -159,7 +159,7 @@ fn main() {
         status(ihas(|v| matches!(v, IntegrityViolation::AggregateClaimExceedsSumInsured { .. })))
     );
     println!(
-        "  [{}] Inv 9  — Every ClaimSettled has a matching InsuredLoss",
+        "  [{}] Inv 9  — Every ClaimSettled has a matching AssetDamage",
         status(ihas(|v| matches!(v, IntegrityViolation::ClaimWithoutMatchingLoss { .. })))
     );
     println!(
@@ -219,21 +219,31 @@ fn main() {
         return;
     }
 
+    const CENTS_PER_BUSD: f64 = 100_000_000_000.0; // cents per billion USD
+
     println!("=== Tier 2 — Year Character Table ===");
     println!(
-        "{:>4} | {:>8} | {:>8} | {:>7} | {:<16} | {:>11} | {:>10} | {:>8}",
-        "Year", "LossR%", "CombR%", "Rate%", "Dominant Peril", "TotalCap(B)", "Insolvent#", "Dropped#"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>7} | {:<16} | {:>11} | {:>10} | {:>8}",
+        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "Rate%", "Dominant Peril", "TotalCap(B)", "Insolvent#", "Dropped#"
     );
-    println!("{}", "-".repeat(4 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 18 + 3 + 13 + 3 + 12 + 3 + 10));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 18 + 3 + 13 + 3 + 12 + 3 + 10));
 
     for s in &stats {
         let lr_pct = s.loss_ratio() * 100.0;
         let cr_pct = s.combined_ratio(expense_ratio) * 100.0;
         let rol_pct = s.rate_on_line() * 100.0;
-        let cap_b = s.total_capital as f64 / 100.0 / 1e9; // cents → USD → billions
+        let cap_b = s.total_capital as f64 / CENTS_PER_BUSD;
+        let assets_b = s.total_assets as f64 / CENTS_PER_BUSD;
+        let gul_b = (s.attr_gul + s.cat_gul) as f64 / CENTS_PER_BUSD;
+        let cov_b = s.sum_insured as f64 / CENTS_PER_BUSD;
+        let claims_b = s.claims as f64 / CENTS_PER_BUSD;
         println!(
-            "{:>4} | {:>7.1}% | {:>7.1}% | {:>6.2}% | {:<16} | {:>11.2} | {:>10} | {:>8}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {:>6.2}% | {:<16} | {:>11.2} | {:>10} | {:>8}",
             s.year,
+            assets_b,
+            gul_b,
+            cov_b,
+            claims_b,
             lr_pct,
             cr_pct,
             rol_pct,
