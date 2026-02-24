@@ -96,9 +96,6 @@ pub enum MechanicsViolation {
     CatFractionInconsistent { peril: String, day: u64, detail: String },
 }
 
-fn day_to_year(day: u64) -> u32 {
-    (day / 360 + 1) as u32
-}
 
 /// Compute per-year statistics from a typed event slice.
 ///
@@ -128,8 +125,7 @@ pub fn analyse(
     let mut last_capital: HashMap<InsurerId, u64> = initial_capitals.clone();
 
     for sim_event in events {
-        let day = sim_event.day.0;
-        let year = day_to_year(day);
+        let year = sim_event.day.year().0;
 
         match &sim_event.event {
             Event::PolicyBound { premium, sum_insured, .. } => {

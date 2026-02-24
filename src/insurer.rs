@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::events::{DeclineReason, Event, Peril, Risk};
-use crate::types::{Day, InsuredId, InsurerId, PolicyId, SubmissionId};
+use crate::types::{Day, InsuredId, InsurerId, PolicyId, SubmissionId, YearAccumulator};
 
 /// A single insurer in the minimal property market.
 /// Writes 100% of each risk it quotes (lead-only, no follow market).
@@ -29,11 +29,8 @@ pub struct Insurer {
     expense_ratio: f64,
     /// Multiplicative loading above ATP: premium = ATP × (1 + profit_loading).
     profit_loading: f64,
-    /// YTD attritional claims (cents); accumulated by on_claim_settled (Attritional only);
-    /// reset at YearEnd. Used to update attritional_elf via EWMA. Cat claims are excluded.
-    year_attritional_claims: u64,
-    /// YTD written exposure (sum_insured, cents); accumulated by on_policy_bound; reset at YearEnd.
-    year_exposure: u64,
+    /// Year-to-date premium and claims accumulators; reset at each YearEnd.
+    ytd: YearAccumulator,
     /// Exposure management: live WindstormAtlantic aggregate sum_insured.
     pub cat_aggregate: u64,
     /// Fraction of current capital committable to a single risk net line (None = unlimited).
@@ -47,10 +44,6 @@ pub struct Insurer {
     /// How strongly the underwriter reacts to own prior-year loss ratio deviating from target.
     /// 0.0 = through-cycle (no reaction); 0.5 = cycle trader (aggressive repricing).
     cycle_sensitivity: f64,
-    /// Gross premium written this year (cents); accumulated by on_policy_bound; reset at YearEnd.
-    year_premium: u64,
-    /// Total claims paid this year (att + cat, cents); accumulated by on_claim_settled; reset at YearEnd.
-    year_total_claims: u64,
     /// Own loss ratio from the prior year: year_total_claims / year_premium.
     /// Initialised to target_loss_ratio so no cycle adjustment fires in year 1.
     prior_year_loss_ratio: f64,
@@ -81,16 +74,13 @@ impl Insurer {
             ewma_credibility,
             expense_ratio,
             profit_loading,
-            year_attritional_claims: 0,
-            year_exposure: 0,
+            ytd: YearAccumulator::default(),
             cat_aggregate: 0,
             net_line_capacity,
             solvency_capital_fraction,
             pml_damage_fraction_200,
             cat_policy_map: HashMap::new(),
             cycle_sensitivity,
-            year_premium: 0,
-            year_total_claims: 0,
             prior_year_loss_ratio: target_loss_ratio,
         }
     }
@@ -179,8 +169,8 @@ impl Insurer {
     ) {
         let net_premium = (premium as f64 * (1.0 - self.expense_ratio)).round() as i64;
         self.capital += net_premium;
-        self.year_exposure += sum_insured;
-        self.year_premium += premium;
+        self.ytd.exposure += sum_insured;
+        self.ytd.premium += premium;
         if perils.contains(&Peril::WindstormAtlantic) {
             self.cat_aggregate += sum_insured;
             self.cat_policy_map.insert(policy_id, sum_insured);
@@ -224,9 +214,9 @@ impl Insurer {
         let payable = amount.min(self.capital.max(0) as u64);
         self.capital -= payable as i64; // floors at 0 naturally
         if peril == Peril::Attritional {
-            self.year_attritional_claims += payable;
+            self.ytd.attritional_claims += payable;
         }
-        self.year_total_claims += payable;
+        self.ytd.total_claims += payable;
 
         if self.capital == 0 && !self.insolvent {
             self.insolvent = true;
@@ -239,20 +229,15 @@ impl Insurer {
     /// Update attritional_elf via EWMA from this year's realized attritional burning cost,
     /// then reset YTD accumulators. cat_elf is never updated. No-op if no exposure written.
     pub fn on_year_end(&mut self) {
-        if self.year_exposure > 0 {
-            let realized_att_lf =
-                self.year_attritional_claims as f64 / self.year_exposure as f64;
+        if self.ytd.exposure > 0 {
+            let realized_att_lf = self.ytd.attritional_loss_fraction();
             self.attritional_elf = self.ewma_credibility * realized_att_lf
                 + (1.0 - self.ewma_credibility) * self.attritional_elf;
         }
-        if self.year_premium > 0 {
-            self.prior_year_loss_ratio =
-                self.year_total_claims as f64 / self.year_premium as f64;
+        if self.ytd.premium > 0 {
+            self.prior_year_loss_ratio = self.ytd.loss_ratio();
         }
-        self.year_attritional_claims = 0;
-        self.year_exposure = 0;
-        self.year_total_claims = 0;
-        self.year_premium = 0;
+        self.ytd.reset();
     }
 }
 

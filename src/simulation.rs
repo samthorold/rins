@@ -61,7 +61,7 @@ impl Simulation {
                     c.profit_loading,
                     c.net_line_capacity,
                     c.solvency_capital_fraction,
-                    pml_200,
+                    c.pml_damage_fraction_override.unwrap_or(pml_200),
                     c.cycle_sensitivity,
                 )
             })
@@ -77,7 +77,12 @@ impl Simulation {
                 vec![Peril::WindstormAtlantic, Peril::Attritional],
             ));
         }
-        let broker = Broker::new(insureds, insurer_ids);
+        let qps = config
+            .quotes_per_submission
+            .unwrap_or(insurer_ids.len())
+            .min(insurer_ids.len())
+            .max(1);
+        let broker = Broker::new(insureds, insurer_ids, qps);
 
         let damage_models = HashMap::from([
             (
@@ -234,7 +239,7 @@ impl Simulation {
             }
 
             Event::QuoteAccepted { submission_id, insured_id, insurer_id, premium } => {
-                let year = Year((day.0 / Day::DAYS_PER_YEAR) as u32 + 1);
+                let year = day.year();
                 let risk = self
                     .broker
                     .insureds
@@ -427,8 +432,6 @@ impl Simulation {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
     use crate::config::{AttritionalConfig, CatConfig, InsurerConfig, SimulationConfig};
     use crate::events::Event;
@@ -450,6 +453,7 @@ mod tests {
                 net_line_capacity: None,
                 solvency_capital_fraction: None,
                 cycle_sensitivity: 0.0,
+                pml_damage_fraction_override: None,
             }],
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -458,6 +462,7 @@ mod tests {
                 pareto_scale: 0.05,
                 pareto_shape: 1.5,
             },
+            quotes_per_submission: None,
         }
     }
 
@@ -724,10 +729,12 @@ mod tests {
         );
     }
 
-    // ── Round-robin routing ───────────────────────────────────────────────────
+    // ── Competitive quoting ───────────────────────────────────────────────────
 
     #[test]
-    fn submissions_routed_across_multiple_insurers() {
+    fn all_insurers_solicited_per_submission() {
+        // 3 identical insurers, qps=None (all). Every submission solicits all 3.
+        // All 3 insurer IDs must appear in LeadQuoteIssued events.
         let mut config = minimal_config(1, 6);
         config.insurers = (1..=3)
             .map(|i| InsurerConfig {
@@ -742,20 +749,26 @@ mod tests {
                 net_line_capacity: None,
                 solvency_capital_fraction: None,
                 cycle_sensitivity: 0.0,
+                pml_damage_fraction_override: None,
             })
             .collect();
         let sim = run_sim(config);
 
-        let mut insurer_counts: HashMap<u64, usize> = HashMap::new();
-        for e in &sim.log {
-            if let Event::PolicyBound { insurer_id, .. } = &e.event {
-                *insurer_counts.entry(insurer_id.0).or_insert(0) += 1;
-            }
+        let insurer_ids_in_issued: std::collections::HashSet<u64> = sim
+            .log
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::LeadQuoteIssued { insurer_id, .. } => Some(insurer_id.0),
+                _ => None,
+            })
+            .collect();
+
+        for id in 1u64..=3 {
+            assert!(
+                insurer_ids_in_issued.contains(&id),
+                "insurer {id} must appear in LeadQuoteIssued events (all are solicited per submission)"
+            );
         }
-        assert!(
-            insurer_counts.len() >= 2,
-            "submissions should be distributed across multiple insurers, got: {insurer_counts:?}"
-        );
     }
 
     // ── Renewal ───────────────────────────────────────────────────────────────
@@ -956,6 +969,7 @@ mod tests {
                 net_line_capacity: None,
                 solvency_capital_fraction: Some(0.0), // 0 × capital / pml = 0 → always declines cat
                 cycle_sensitivity: 0.0,
+                pml_damage_fraction_override: None,
             },
             InsurerConfig {
                 id: InsurerId(2),
@@ -969,6 +983,7 @@ mod tests {
                 net_line_capacity: None,
                 solvency_capital_fraction: None,
                 cycle_sensitivity: 0.0,
+                pml_damage_fraction_override: None,
             },
         ];
 
@@ -998,5 +1013,86 @@ mod tests {
         );
 
         let _ = ASSET_VALUE; // suppress unused warning
+    }
+
+    #[test]
+    fn pml_damage_fraction_override_raises_effective_cat_limit() {
+        // Two configs identical except for pml_damage_fraction_override.
+        // The cat config produces pml_200 ≈ 0.252 (scale=0.05, shape=1.5, freq=0.5,
+        // return_period=200 → 0.05 × (200 × 0.5)^(1/1.5) ≈ 0.252).
+        //
+        // With capital=50_000_000_000 (500M USD) and SCF=0.30:
+        //   Standard (pml=0.252):  effective_cat = 0.30 × 50B / 0.252 ≈ 59.5B cents (~11.9 × SI)
+        //   Optimistic (pml=0.126): effective_cat = 0.30 × 50B / 0.126 ≈ 119B cents (~23.8 × SI)
+        //
+        // Load each insurer with 11 policies (cat_aggregate = 11 × 5B = 55B), then request a
+        // 12th quote. The standard insurer should decline (55B + 5B > 59.5B); the optimistic
+        // one should issue (55B + 5B ≪ 119B).
+        use crate::events::DeclineReason;
+        use crate::insurer::Insurer;
+        use crate::types::PolicyId;
+
+        let cat_cfg = CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5 };
+        let pml_200 = pml_damage_fraction(
+            cat_cfg.pareto_scale,
+            cat_cfg.pareto_shape,
+            cat_cfg.annual_frequency,
+            200.0,
+        );
+
+        let make_insurer = |pml_override: Option<f64>| -> Insurer {
+            let pml = pml_override.unwrap_or(pml_200);
+            Insurer::new(
+                InsurerId(1),
+                50_000_000_000, // 500M USD capital
+                0.239,
+                0.0,
+                0.70,
+                0.3,
+                0.0,
+                0.0,
+                None,           // no net_line_capacity check
+                Some(0.30),     // SCF = 0.30
+                pml,
+                0.0,
+            )
+        };
+
+        let sum_insured = 5_000_000_000u64; // 50M USD
+        let risk = Risk {
+            sum_insured,
+            territory: "US-SE".to_string(),
+            perils_covered: vec![crate::events::Peril::WindstormAtlantic],
+        };
+
+        // Helper to load insurer with `n` cat policies then attempt one more quote.
+        let try_12th_quote = |mut ins: Insurer| {
+            use crate::types::SubmissionId;
+            for pid in 0..11u64 {
+                ins.on_policy_bound(PolicyId(pid), sum_insured, 0, &[crate::events::Peril::WindstormAtlantic]);
+            }
+            let events = ins.on_lead_quote_requested(
+                Day(0),
+                SubmissionId(12),
+                InsuredId(1),
+                &risk,
+            );
+            events.into_iter().map(|(_, e)| e).next().unwrap()
+        };
+
+        let std_event = try_12th_quote(make_insurer(None));
+        let opt_event = try_12th_quote(make_insurer(Some(0.126)));
+
+        assert!(
+            matches!(
+                std_event,
+                Event::LeadQuoteDeclined { reason: DeclineReason::MaxCatAggregateBreached, .. }
+            ),
+            "standard insurer (pml=0.252) should decline 12th policy: {std_event:?}"
+        );
+        assert!(
+            matches!(opt_event, Event::LeadQuoteIssued { .. }),
+            "optimistic insurer (pml=0.126) should issue 12th policy: {opt_event:?}"
+        );
     }
 }

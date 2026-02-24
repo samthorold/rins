@@ -81,8 +81,7 @@ pub fn schedule_attritional_claims_for_policy(
     if !risk.perils_covered.contains(&Peril::Attritional) {
         return vec![];
     }
-    let year_num = from_day.0 / Day::DAYS_PER_YEAR + 1;
-    let year_end = Day::year_end(Year(year_num as u32));
+    let year_end = Day::year_end(from_day.year());
     if from_day >= year_end {
         return vec![];
     }

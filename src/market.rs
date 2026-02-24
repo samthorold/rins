@@ -181,7 +181,7 @@ impl Market {
         let insurer_id = policy.insurer_id;
         let sum_insured = policy.risk.sum_insured;
 
-        let year = Year((day.0 / Day::DAYS_PER_YEAR) as u32 + 1);
+        let year = day.year();
         let remaining = self
             .remaining_asset_value
             .entry((policy_id, year))

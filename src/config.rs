@@ -36,6 +36,11 @@ pub struct InsurerConfig {
     /// Cycle sensitivity: how aggressively the underwriter reprices after a bad own-CR year.
     /// 0.0 = through-cycle writer; 0.5 = cycle trader.
     pub cycle_sensitivity: f64,
+    /// Override the market-calibrated 1-in-200 damage fraction used to compute the effective cat
+    /// aggregate limit. `None` = use the market-wide value derived from the cat model parameters.
+    /// `Some(x)` = use x as the insurer's internal model assumption — a lower value inflates the
+    /// denominator and raises the effective cat limit, reflecting an optimistic internal model.
+    pub pml_damage_fraction_override: Option<f64>,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -74,6 +79,8 @@ pub struct SimulationConfig {
     pub n_insureds: usize,
     pub attritional: AttritionalConfig,
     pub catastrophe: CatConfig,
+    /// Number of insurers solicited per submission. None = all insurers.
+    pub quotes_per_submission: Option<usize>,
 }
 
 /// Insured asset value: 50M USD in cents.
@@ -85,23 +92,56 @@ impl SimulationConfig {
             seed: 42,
             years: 20,
             warmup_years: 2,
-            // 5 insurers, each endowed with 500M USD capital at construction; persists year-over-year.
-            insurers: (1..=5)
-                .map(|i| InsurerConfig {
-                    id: InsurerId(i),
-                    initial_capital: 50_000_000_000, // 500M USD in cents
-                    attritional_elf: 0.030, // annual_rate=2.0 × E[df]=1.5% → att_ELF=3.0%
-                    cat_elf: 0.033,         // frequency=0.5 × E[df]=6.7% → cat_ELF=3.3%; anchored
-                    target_loss_ratio: 0.80, // gross (pre-reinsurance) pricing; benign CR ≈ 70%
-                    ewma_credibility: 0.3,
-                    expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
-                    profit_loading: 0.05, // 5% markup above ATP; MS3 risk/capital charge
-                    net_line_capacity: Some(0.30),
-                    solvency_capital_fraction: Some(0.30),
-                    // 0.10 = through-cycle writer; 0.50 = cycle trader.
-                    cycle_sensitivity: [0.10, 0.20, 0.30, 0.40, 0.50][(i - 1) as usize],
-                })
-                .collect(),
+            // 5 established insurers (500M USD capital) + 3 aggressive small entrants (200M USD).
+            //
+            // Established (IDs 1–5): calibrated cat_elf=0.033, target_LR=0.80, profit_loading=0.05.
+            //   Premium ≈ 8.3% of SI. Cycle sensitivity varies 0.10–0.50.
+            //
+            // Aggressive (IDs 6–8): optimistic cat_elf=0.015 (ignoring tail risk), target_LR=0.90,
+            //   zero profit_loading. Premium ≈ 5.0% of SI — ~40% cheaper than established.
+            //   Capital=200M → max_line=60M (just clears 50M SI); cat_agg limit ≈ 238M (~4–5 policies).
+            //   Low cycle_sensitivity: they stubbornly maintain aggressive pricing post-cat.
+            insurers: {
+                let mut insurers: Vec<InsurerConfig> = (1..=5)
+                    .map(|i| InsurerConfig {
+                        id: InsurerId(i),
+                        initial_capital: 50_000_000_000, // 500M USD in cents
+                        attritional_elf: 0.030, // annual_rate=2.0 × E[df]=1.5% → att_ELF=3.0%
+                        cat_elf: 0.033,         // frequency=0.5 × E[df]=6.7% → cat_ELF=3.3%; anchored
+                        target_loss_ratio: 0.80, // gross (pre-reinsurance) pricing; benign CR ≈ 70%
+                        ewma_credibility: 0.3,
+                        expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
+                        profit_loading: 0.05, // 5% markup above ATP; MS3 risk/capital charge
+                        net_line_capacity: Some(0.30),
+                        solvency_capital_fraction: Some(0.30),
+                        // 0.10 = through-cycle writer; 0.50 = cycle trader.
+                        cycle_sensitivity: [0.10, 0.20, 0.30, 0.40, 0.50][(i - 1) as usize],
+                        pml_damage_fraction_override: None, // use market-calibrated pml_200 ≈ 0.252
+                    })
+                    .collect();
+                // Aggressive small entrants: undercut on price, undercapitalised relative to tail risk.
+                for (j, cs) in [0.05_f64, 0.10, 0.15].iter().enumerate() {
+                    insurers.push(InsurerConfig {
+                        id: InsurerId(6 + j as u64),
+                        initial_capital: 40_000_000_000, // 400M USD in cents
+                        attritional_elf: 0.030,           // same attritional assumption
+                        cat_elf: 0.015, // optimistic: ignores tail — 55% below calibrated anchor
+                        target_loss_ratio: 0.90, // thin margin; target CR ≈ 90% gross
+                        ewma_credibility: 0.3,
+                        expense_ratio: 0.344,
+                        profit_loading: 0.00, // no risk/capital loading — pure actuarial floor
+                        net_line_capacity: Some(0.30), // 0.30 × 200M = 60M > 50M SI ✓
+                        solvency_capital_fraction: Some(0.30),
+                        cycle_sensitivity: *cs, // stubbornly low — maintain cheap pricing post-cat
+                        // Optimistic internal model: assumes 1-in-200 damage fraction is half the
+                        // calibrated value (scale=0.02 vs true 0.04). This inflates the effective
+                        // cat limit to ~952M (~19 × 50M policies), allowing aggressive writers to
+                        // take far more exposure than their capital prudently supports.
+                        pml_damage_fraction_override: Some(0.126),
+                    });
+                }
+                insurers
+            },
             n_insureds: 100,
             attritional: AttritionalConfig {
                 annual_rate: 2.0,  // ~2 claims/yr per insured; freq × E[df] = ELF_att ≈ 3.0%
@@ -113,6 +153,7 @@ impl SimulationConfig {
                 pareto_scale: 0.04,     // minimum 4% damage fraction ($2M on $50M); gross book
                 pareto_shape: 2.5,      // E[df] = 0.04 × 2.5 / 1.5 = 6.7%; fatter tail than shape=3
             },
+            quotes_per_submission: None, // solicit all 8 insurers per submission
         }
     }
 }

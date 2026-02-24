@@ -36,4 +36,44 @@ impl Day {
     pub fn offset(self, days: u64) -> Self {
         Day(self.0 + days)
     }
+
+    /// Convert this day to the simulation year it falls in (1-indexed).
+    pub fn year(self) -> Year {
+        Year((self.0 / Self::DAYS_PER_YEAR) as u32 + 1)
+    }
+}
+
+/// Mutable per-year accumulator for premium and claims.
+/// Held by agents to track year-to-date financials; reset at each YearEnd.
+#[derive(Debug, Default, Clone)]
+pub struct YearAccumulator {
+    /// Gross premium written (cents).
+    pub premium: u64,
+    /// Total claims paid, all perils (cents).
+    pub total_claims: u64,
+    /// Attritional claims paid (cents).
+    pub attritional_claims: u64,
+    /// Sum insured written (cents). Used as EWMA denominator.
+    pub exposure: u64,
+}
+
+impl YearAccumulator {
+    /// Reset all counters to zero (call at YearEnd after deriving metrics).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Loss ratio: total_claims / premium. Returns 0.0 if no premium written.
+    pub fn loss_ratio(&self) -> f64 {
+        if self.premium == 0 { 0.0 } else { self.total_claims as f64 / self.premium as f64 }
+    }
+
+    /// Attritional loss fraction: attritional_claims / exposure. Returns 0.0 if no exposure.
+    pub fn attritional_loss_fraction(&self) -> f64 {
+        if self.exposure == 0 {
+            0.0
+        } else {
+            self.attritional_claims as f64 / self.exposure as f64
+        }
+    }
 }
