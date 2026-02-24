@@ -109,7 +109,8 @@ impl Market {
         }
     }
 
-    /// Insured rejected the quote — no-op in this model.
+    /// Insured rejected the quote. No market state changes required; renewal is
+    /// scheduled by the simulation dispatcher after this call returns.
     pub fn on_quote_rejected(&mut self, _submission_id: SubmissionId) {}
 
     /// Remove a policy when its PolicyExpired event fires.

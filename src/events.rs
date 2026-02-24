@@ -76,8 +76,12 @@ pub enum Event {
         insurer_id: InsurerId,
         premium: u64,
     },
-    /// Insured rejects the quote (no-op in this model; kept for completeness).
+    /// Insured rejects the quote (rate on line exceeds max_rate_on_line).
+    /// The simulation schedules a renewal CoverageRequested at the same annual offset.
     QuoteRejected { submission_id: SubmissionId, insured_id: InsuredId },
+    /// All insurers declined this submission (capacity constraint or insolvency).
+    /// The insured is uninsured for the year; the simulation schedules a retry at next renewal.
+    SubmissionDropped { submission_id: SubmissionId, insured_id: InsuredId },
     /// Policy is formally bound. Activates the policy for loss routing.
     PolicyBound {
         policy_id: PolicyId,

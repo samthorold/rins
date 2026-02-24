@@ -62,7 +62,6 @@ impl Simulation {
                     c.net_line_capacity,
                     c.solvency_capital_fraction,
                     c.pml_damage_fraction_override.unwrap_or(pml_200),
-                    c.cycle_sensitivity,
                 )
             })
             .collect();
@@ -75,6 +74,7 @@ impl Simulation {
                 InsuredId(i as u64 + 1),
                 "US-SE".to_string(),
                 vec![Peril::WindstormAtlantic, Peril::Attritional],
+                config.max_rate_on_line,
             ));
         }
         let qps = config
@@ -272,8 +272,23 @@ impl Simulation {
                 }
             }
 
-            Event::QuoteRejected { .. } => {
-                // No-op in this model.
+            Event::QuoteRejected { insured_id, .. } => {
+                // Schedule renewal: same annual offset as the QuoteAccepted path.
+                let renewal_day = day.offset(361 - QUOTING_CHAIN_DAYS);
+                if let Some(insured) = self.broker.insureds.iter().find(|i| i.id == insured_id) {
+                    let risk = insured.risk.clone();
+                    self.schedule(renewal_day, Event::CoverageRequested { insured_id, risk });
+                }
+            }
+
+            Event::SubmissionDropped { insured_id, .. } => {
+                // All insurers declined. Schedule the same annual-offset renewal so the
+                // insured retries next year rather than silently vanishing from the model.
+                let renewal_day = day.offset(361 - QUOTING_CHAIN_DAYS);
+                if let Some(insured) = self.broker.insureds.iter().find(|i| i.id == insured_id) {
+                    let risk = insured.risk.clone();
+                    self.schedule(renewal_day, Event::CoverageRequested { insured_id, risk });
+                }
             }
 
             Event::PolicyBound { policy_id, premium, .. } => {
@@ -452,7 +467,6 @@ mod tests {
                 profit_loading: 0.0,
                 net_line_capacity: None,
                 solvency_capital_fraction: None,
-                cycle_sensitivity: 0.0,
                 pml_damage_fraction_override: None,
             }],
             n_insureds,
@@ -463,6 +477,7 @@ mod tests {
                 pareto_shape: 1.5,
             },
             quotes_per_submission: None,
+            max_rate_on_line: 1.0, // unlimited — tests accept all quotes by default
         }
     }
 
@@ -748,7 +763,6 @@ mod tests {
                 profit_loading: 0.0,
                 net_line_capacity: None,
                 solvency_capital_fraction: None,
-                cycle_sensitivity: 0.0,
                 pml_damage_fraction_override: None,
             })
             .collect();
@@ -803,6 +817,74 @@ mod tests {
             "expected a CoverageRequested at day {}, got: {:?}",
             expected_renewal_day.0,
             renewal_cr_days.iter().map(|d| d.0).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn quote_rejected_schedules_renewal() {
+        // max_rate_on_line=0.0 rejects every quote (any positive premium > 0%).
+        // The simulation must schedule CoverageRequested at QuoteRejected.day + 358.
+        let mut config = minimal_config(2, 1);
+        config.max_rate_on_line = 0.0;
+        let sim = run_sim(config);
+
+        let qr_day = sim
+            .log
+            .iter()
+            .find(|e| matches!(e.event, Event::QuoteRejected { .. }))
+            .map(|e| e.day)
+            .expect("QuoteRejected missing");
+
+        let expected_renewal_day = qr_day.offset(361 - QUOTING_CHAIN_DAYS);
+
+        let has_renewal = sim
+            .log
+            .iter()
+            .any(|e| e.day == expected_renewal_day && matches!(e.event, Event::CoverageRequested { .. }));
+        assert!(
+            has_renewal,
+            "QuoteRejected must schedule CoverageRequested at day {}",
+            expected_renewal_day.0
+        );
+    }
+
+    #[test]
+    fn submission_dropped_schedules_renewal() {
+        // Single insurer with SCF=0 always declines cat risks → SubmissionDropped.
+        // The simulation must schedule CoverageRequested at SubmissionDropped.day + 358.
+        let mut config = minimal_config(2, 1);
+        config.insurers = vec![InsurerConfig {
+            id: InsurerId(1),
+            initial_capital: 100_000_000_000,
+            attritional_elf: 0.239,
+            cat_elf: 0.0,
+            target_loss_ratio: 0.70,
+            ewma_credibility: 0.3,
+            expense_ratio: 0.0,
+            profit_loading: 0.0,
+            net_line_capacity: None,
+            solvency_capital_fraction: Some(0.0), // 0 × capital / pml = 0 → always declines cat
+            pml_damage_fraction_override: None,
+        }];
+        let sim = run_sim(config);
+
+        let sd_day = sim
+            .log
+            .iter()
+            .find(|e| matches!(e.event, Event::SubmissionDropped { .. }))
+            .map(|e| e.day)
+            .expect("SubmissionDropped missing");
+
+        let expected_renewal_day = sd_day.offset(361 - QUOTING_CHAIN_DAYS);
+
+        let has_renewal = sim
+            .log
+            .iter()
+            .any(|e| e.day == expected_renewal_day && matches!(e.event, Event::CoverageRequested { .. }));
+        assert!(
+            has_renewal,
+            "SubmissionDropped must schedule CoverageRequested at day {}",
+            expected_renewal_day.0
         );
     }
 
@@ -968,7 +1050,6 @@ mod tests {
                 profit_loading: 0.0,
                 net_line_capacity: None,
                 solvency_capital_fraction: Some(0.0), // 0 × capital / pml = 0 → always declines cat
-                cycle_sensitivity: 0.0,
                 pml_damage_fraction_override: None,
             },
             InsurerConfig {
@@ -982,7 +1063,6 @@ mod tests {
                 profit_loading: 0.0,
                 net_line_capacity: None,
                 solvency_capital_fraction: None,
-                cycle_sensitivity: 0.0,
                 pml_damage_fraction_override: None,
             },
         ];
@@ -1054,7 +1134,6 @@ mod tests {
                 None,           // no net_line_capacity check
                 Some(0.30),     // SCF = 0.30
                 pml,
-                0.0,
             )
         };
 

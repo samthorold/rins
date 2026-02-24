@@ -41,12 +41,6 @@ pub struct Insurer {
     pml_damage_fraction_200: f64,
     /// Map from policy_id to its WindstormAtlantic sum_insured, for release on expiry.
     cat_policy_map: HashMap<PolicyId, u64>,
-    /// How strongly the underwriter reacts to own prior-year loss ratio deviating from target.
-    /// 0.0 = through-cycle (no reaction); 0.5 = cycle trader (aggressive repricing).
-    cycle_sensitivity: f64,
-    /// Own loss ratio from the prior year: year_total_claims / year_premium.
-    /// Initialised to target_loss_ratio so no cycle adjustment fires in year 1.
-    prior_year_loss_ratio: f64,
 }
 
 impl Insurer {
@@ -62,7 +56,6 @@ impl Insurer {
         net_line_capacity: Option<f64>,
         solvency_capital_fraction: Option<f64>,
         pml_damage_fraction_200: f64,
-        cycle_sensitivity: f64,
     ) -> Self {
         Insurer {
             id,
@@ -80,8 +73,6 @@ impl Insurer {
             solvency_capital_fraction,
             pml_damage_fraction_200,
             cat_policy_map: HashMap::new(),
-            cycle_sensitivity,
-            prior_year_loss_ratio: target_loss_ratio,
         }
     }
 
@@ -191,18 +182,11 @@ impl Insurer {
         (elf * risk.sum_insured as f64 / self.target_loss_ratio).round() as u64
     }
 
-    /// Underwriter channel: Step 1 — own-CR cycle adjustment above ATP floor.
-    /// cycle_adj = max(0, cycle_sensitivity × (prior_year_loss_ratio − target_loss_ratio))
-    /// uw_factor = profit_loading + cycle_adj
-    /// premium   = ATP × (1 + uw_factor)
-    /// The floor on cycle_adj enforces the MS3 minimum AvT invariant: premiums never fall
-    /// below ATP × (1 + profit_loading) regardless of prior-year loss ratio.
+    /// Underwriter channel: ATP × (1 + profit_loading).
+    /// Profit loading provides a structural positive gap above the actuarial floor.
     fn underwriter_premium(&self, risk: &Risk) -> u64 {
         let atp = self.actuarial_price(risk);
-        let cycle_adj = (self.cycle_sensitivity
-            * (self.prior_year_loss_ratio - self.target_loss_ratio))
-            .max(0.0);
-        let uw_factor = self.profit_loading + cycle_adj;
+        let uw_factor = self.profit_loading;
         (atp as f64 * (1.0 + uw_factor)).round() as u64
     }
 
@@ -234,9 +218,6 @@ impl Insurer {
             self.attritional_elf = self.ewma_credibility * realized_att_lf
                 + (1.0 - self.ewma_credibility) * self.attritional_elf;
         }
-        if self.ytd.premium > 0 {
-            self.prior_year_loss_ratio = self.ytd.loss_ratio();
-        }
         self.ytd.reset();
     }
 }
@@ -256,8 +237,8 @@ mod tests {
     }
 
     fn make_insurer(id: InsurerId, capital: i64) -> Insurer {
-        // attritional_elf=0.239, cat_elf=0.0, profit_loading=0.0, cycle_sensitivity=0.0 → premium = ATP (tests unchanged)
-        Insurer::new(id, capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0)
+        // attritional_elf=0.239, cat_elf=0.0, profit_loading=0.0 → premium = ATP (tests unchanged)
+        Insurer::new(id, capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252)
     }
 
     /// Helper: quote and return the ATP for a standard small_risk().
@@ -307,7 +288,7 @@ mod tests {
         let initial_capital = 1_000_000i64;
         let gross_premium = 200_000u64;
         // expense_ratio=0.0 → net premium = gross premium
-        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.55, 0.3, 0.0, 0.0, None, None, 0.252, 0.0);
+        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.55, 0.3, 0.0, 0.0, None, None, 0.252);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         ins.on_policy_bound(PolicyId(2), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         let total_net_premiums = (gross_premium * 2) as i64;
@@ -512,7 +493,7 @@ mod tests {
     #[test]
     fn max_line_size_exceeded_emits_declined() {
         // capital=0 → effective_line = 0.30 × 0 = 0 < ASSET_VALUE → declines MaxLineSizeExceeded.
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0);
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252);
         let risk = cat_risk(); // sum_insured = ASSET_VALUE > effective_line_limit (0)
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         assert!(
@@ -524,7 +505,7 @@ mod tests {
     #[test]
     fn max_cat_aggregate_breached_emits_declined() {
         // net_line_capacity=None skips the line check; capital=0 → effective_cat = 0 → declines MaxCatAggregateBreached.
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0);
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252);
         let risk = cat_risk(); // cat_aggregate(0) + sum_insured > effective_cat_limit(0)
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
         assert!(
@@ -536,7 +517,7 @@ mod tests {
     #[test]
     fn within_limits_after_partial_fill_emits_quote_issued() {
         // capital=200M USD; effective_cat = 0.30 × 20B / 0.252 ≈ 23.8B > 2×ASSET_VALUE=10B → room for second policy.
-        let mut ins = Insurer::new(InsurerId(1), 20_000_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0);
+        let mut ins = Insurer::new(InsurerId(1), 20_000_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
         // cat_aggregate = ASSET_VALUE; effective_cat ≈ 23.8B → still room for one more
         let risk = cat_risk();
@@ -628,7 +609,7 @@ mod tests {
     #[test]
     fn on_policy_bound_credits_net_premium_to_capital() {
         // expense_ratio=0.25 → net = 75% of gross premium.
-        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.55, 0.3, 0.25, 0.0, None, None, 0.252, 0.0);
+        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.55, 0.3, 0.25, 0.0, None, None, 0.252);
         let gross_premium = 400_000u64;
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         let expected_net = (gross_premium as f64 * 0.75).round() as i64;
@@ -639,75 +620,4 @@ mod tests {
         );
     }
 
-    // ── Underwriter cycle adjustment ──────────────────────────────────────────
-
-    /// Helper: get premium from a LeadQuoteIssued for a standard att-only risk.
-    fn quote_premium(ins: &Insurer) -> u64 {
-        let risk = Risk {
-            sum_insured: ASSET_VALUE,
-            territory: "US-SE".to_string(),
-            perils_covered: vec![Peril::Attritional],
-        };
-        let events = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
-        let (_, event) = events.into_iter().next().unwrap();
-        if let Event::LeadQuoteIssued { premium, .. } = event { premium } else { panic!("expected LeadQuoteIssued") }
-    }
-
-    #[test]
-    fn cycle_adj_raises_premium_after_bad_year() {
-        // Compare two identical insurers that differ only in cycle_sensitivity (0.0 vs 0.3)
-        // after the same bad year. The sensitive insurer must quote higher.
-        // Both see the same EWMA update so the difference is purely from cycle_adj.
-        let gross_premium = 500_000u64;
-
-        let mut sensitive = Insurer::new(InsurerId(1), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.252, 0.3);
-        let mut flat = Insurer::new(InsurerId(2), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.252, 0.0);
-
-        for ins in [&mut sensitive, &mut flat] {
-            ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
-            let _ = ins.on_claim_settled(Day(0), gross_premium * 2, Peril::Attritional);
-            ins.on_year_end(); // prior_year_LR = 2.0 > target 0.70
-        }
-
-        let p_sensitive = quote_premium(&sensitive);
-        let p_flat = quote_premium(&flat);
-        assert!(p_sensitive > p_flat, "insurer with cycle_sensitivity=0.3 must quote higher after bad year: {p_sensitive} vs {p_flat}");
-    }
-
-    #[test]
-    fn cycle_adj_floors_at_profit_loading_after_good_year() {
-        // A benign year (LR < target) must not push premium below ATP × (1 + profit_loading).
-        let mut ins = Insurer::new(InsurerId(1), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.252, 0.5);
-        // Simulate a benign year: bind one policy, no claims → LR = 0.
-        let gross_premium = 500_000u64;
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
-        // no claims
-        ins.on_year_end(); // prior_year_LR = 0.0 < target 0.70
-
-        let premium = quote_premium(&ins);
-        let atp = quote_atp(&ins);
-        let floor = (atp as f64 * 1.05).round() as u64;
-        assert_eq!(premium, floor, "premium must equal ATP × (1 + profit_loading) after a benign year; got {premium} vs floor {floor}");
-    }
-
-    #[test]
-    fn zero_cycle_sensitivity_is_unchanged_by_prior_year_lr() {
-        // With cycle_sensitivity=0.0, prior_year_LR has no effect regardless of its value.
-        let mut ins = Insurer::new(InsurerId(1), ASSET_VALUE as i64 * 10, 0.239, 0.0, 0.70, 0.3, 0.0, 0.05, None, None, 0.252, 0.0);
-        let baseline = quote_premium(&ins);
-
-        // Simulate a terrible year.
-        let gross_premium = 500_000u64;
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
-        let _ = ins.on_claim_settled(Day(0), gross_premium * 5, Peril::Attritional);
-        ins.on_year_end();
-
-        let after_bad_year = quote_premium(&ins);
-        // ATP may change via EWMA, but the cycle loading must not add anything extra.
-        // Verify premium == ATP × (1 + profit_loading) exactly.
-        let atp = quote_atp(&ins);
-        let expected = (atp as f64 * 1.05).round() as u64;
-        assert_eq!(after_bad_year, expected, "zero cycle_sensitivity must leave premium = ATP × (1 + profit_loading) after any year; got {after_bad_year} vs {expected}");
-        let _ = baseline; // used implicitly
-    }
 }

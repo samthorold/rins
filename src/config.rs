@@ -33,9 +33,6 @@ pub struct InsurerConfig {
     /// Effective cat aggregate limit = solvency_capital_fraction × capital / pml_damage_fraction_200.
     /// None = no limit (tests only; the canonical config always sets Some).
     pub solvency_capital_fraction: Option<f64>,
-    /// Cycle sensitivity: how aggressively the underwriter reprices after a bad own-CR year.
-    /// 0.0 = through-cycle writer; 0.5 = cycle trader.
-    pub cycle_sensitivity: f64,
     /// Override the market-calibrated 1-in-200 damage fraction used to compute the effective cat
     /// aggregate limit. `None` = use the market-wide value derived from the cat model parameters.
     /// `Some(x)` = use x as the insurer's internal model assumption — a lower value inflates the
@@ -81,6 +78,11 @@ pub struct SimulationConfig {
     pub catastrophe: CatConfig,
     /// Number of insurers solicited per submission. None = all insurers.
     pub quotes_per_submission: Option<usize>,
+    /// Maximum rate on line an insured will accept (premium / sum_insured).
+    /// Quotes above this threshold are rejected; the insured retries at next renewal.
+    /// Canonical: 0.15 — well above current 6–8% rate band; becomes binding once
+    /// capital-linked pricing raises rates post-cat.
+    pub max_rate_on_line: f64,
 }
 
 /// Insured asset value: 50M USD in cents.
@@ -95,12 +97,11 @@ impl SimulationConfig {
             // 5 established insurers (500M USD capital) + 3 aggressive small entrants (200M USD).
             //
             // Established (IDs 1–5): calibrated cat_elf=0.033, target_LR=0.80, profit_loading=0.05.
-            //   Premium ≈ 8.3% of SI. Cycle sensitivity varies 0.10–0.50.
+            //   Premium ≈ 8.3% of SI.
             //
             // Aggressive (IDs 6–8): optimistic cat_elf=0.015 (ignoring tail risk), target_LR=0.90,
             //   zero profit_loading. Premium ≈ 5.0% of SI — ~40% cheaper than established.
             //   Capital=200M → max_line=60M (just clears 50M SI); cat_agg limit ≈ 238M (~4–5 policies).
-            //   Low cycle_sensitivity: they stubbornly maintain aggressive pricing post-cat.
             insurers: {
                 let mut insurers: Vec<InsurerConfig> = (1..=5)
                     .map(|i| InsurerConfig {
@@ -114,13 +115,11 @@ impl SimulationConfig {
                         profit_loading: 0.05, // 5% markup above ATP; MS3 risk/capital charge
                         net_line_capacity: Some(0.30),
                         solvency_capital_fraction: Some(0.30),
-                        // 0.10 = through-cycle writer; 0.50 = cycle trader.
-                        cycle_sensitivity: [0.10, 0.20, 0.30, 0.40, 0.50][(i - 1) as usize],
                         pml_damage_fraction_override: None, // use market-calibrated pml_200 ≈ 0.252
                     })
                     .collect();
                 // Aggressive small entrants: undercut on price, undercapitalised relative to tail risk.
-                for (j, cs) in [0.05_f64, 0.10, 0.15].iter().enumerate() {
+                for j in 0..3 {
                     insurers.push(InsurerConfig {
                         id: InsurerId(6 + j as u64),
                         initial_capital: 40_000_000_000, // 400M USD in cents
@@ -132,7 +131,6 @@ impl SimulationConfig {
                         profit_loading: 0.00, // no risk/capital loading — pure actuarial floor
                         net_line_capacity: Some(0.30), // 0.30 × 200M = 60M > 50M SI ✓
                         solvency_capital_fraction: Some(0.30),
-                        cycle_sensitivity: *cs, // stubbornly low — maintain cheap pricing post-cat
                         // Optimistic internal model: assumes 1-in-200 damage fraction is half the
                         // calibrated value (scale=0.02 vs true 0.04). This inflates the effective
                         // cat limit to ~952M (~19 × 50M policies), allowing aggressive writers to
@@ -154,6 +152,7 @@ impl SimulationConfig {
                 pareto_shape: 2.5,      // E[df] = 0.04 × 2.5 / 1.5 = 6.7%; fatter tail than shape=3
             },
             quotes_per_submission: None, // solicit all 8 insurers per submission
+            max_rate_on_line: 0.15, // 15% RoL ceiling — above current band, binding post-hardening
         }
     }
 }

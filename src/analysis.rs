@@ -23,6 +23,8 @@ pub struct YearStats {
     pub total_capital: u64,
     /// Count of InsurerInsolvent events in the year.
     pub insolvent_count: u32,
+    /// Count of SubmissionDropped events in the year (all insurers declined).
+    pub dropped_count: u32,
 }
 
 impl YearStats {
@@ -36,6 +38,7 @@ impl YearStats {
             cat_gul: 0,
             total_capital: 0,
             insolvent_count: 0,
+            dropped_count: 0,
         }
     }
 
@@ -173,6 +176,10 @@ pub fn analyse(
             Event::InsurerInsolvent { .. } => {
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.insolvent_count += 1;
+            }
+            Event::SubmissionDropped { .. } => {
+                let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
+                s.dropped_count += 1;
             }
             Event::YearEnd { year: y } => {
                 // Snapshot total capital at year boundary.
@@ -953,7 +960,6 @@ mod tests {
                     expense_ratio: 0.344,
                     net_line_capacity: None,
                     solvency_capital_fraction: None,
-                    cycle_sensitivity: 0.0,
                     pml_damage_fraction_override: None,
                 })
                 .collect(),
@@ -965,6 +971,7 @@ mod tests {
                 pareto_shape: 2.5,
             },
             quotes_per_submission: None,
+            max_rate_on_line: 1.0,
         }
     }
 

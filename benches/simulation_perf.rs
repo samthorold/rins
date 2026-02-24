@@ -148,7 +148,7 @@ fn bench_insurer_lookup(c: &mut Criterion) {
             |b, &n| {
                 let insurers: Vec<rins::insurer::Insurer> = (1..=n)
                     .map(|i| {
-                        rins::insurer::Insurer::new(InsurerId(i as u64), 100_000_000_000, 0.239, 0.0, 0.70, 0.3, 0.344, 0.0, None, None, 0.252, 0.0)
+                        rins::insurer::Insurer::new(InsurerId(i as u64), 100_000_000_000, 0.239, 0.0, 0.70, 0.3, 0.344, 0.0, None, None, 0.252)
                     })
                     .collect();
                 let target = InsurerId(n as u64); // last element — worst case

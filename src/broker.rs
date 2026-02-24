@@ -149,7 +149,7 @@ impl Broker {
                     },
                 )]
             } else {
-                vec![]
+                vec![(day, Event::SubmissionDropped { submission_id, insured_id: pq.insured_id })]
             }
         } else {
             vec![]
@@ -168,6 +168,7 @@ mod tests {
             InsuredId(id),
             "US-SE".to_string(),
             vec![Peril::WindstormAtlantic, Peril::Attritional],
+            1.0, // accepts all quotes
         )
     }
 
@@ -447,15 +448,20 @@ mod tests {
 
     #[test]
     fn all_decline_drops_submission() {
-        // 2 insurers, both decline → submission dropped (no QuotePresented).
+        // 2 insurers, both decline → SubmissionDropped emitted (no QuotePresented).
         let mut broker = broker_with_insurers(1, vec![1, 2]);
         broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
 
         let ev1 = broker.on_lead_quote_declined(Day(1), SubmissionId(0));
-        assert!(ev1.is_empty());
+        assert!(ev1.is_empty(), "still 1 outstanding → must return empty");
 
         let ev2 = broker.on_lead_quote_declined(Day(1), SubmissionId(0));
-        assert!(ev2.is_empty(), "all declined → submission must be dropped");
+        assert_eq!(ev2.len(), 1, "all declined → SubmissionDropped must be emitted");
+        assert!(
+            matches!(ev2[0].1, Event::SubmissionDropped { insured_id: InsuredId(1), .. }),
+            "expected SubmissionDropped for insured 1, got {:?}",
+            ev2[0].1
+        );
     }
 
     // ── insured population ────────────────────────────────────────────────────

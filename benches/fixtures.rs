@@ -64,7 +64,6 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
                 profit_loading: 0.0,
                 net_line_capacity: Some(0.30),
                 solvency_capital_fraction: Some(0.30),
-                cycle_sensitivity: 0.0,
                 pml_damage_fraction_override: None,
             })
             .collect(),
@@ -72,6 +71,7 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
         attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
         catastrophe: CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5 },
         quotes_per_submission: None,
+        max_rate_on_line: 1.0,
     };
     let mut sim = Simulation::from_config(config);
     sim.start();

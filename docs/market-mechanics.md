@@ -24,7 +24,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
 | Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE — capital-linked fractions (net_line_capacity=0.30, solvency_capital_fraction=0.30, pml_200 derived from cat model) | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
 | Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
-| Underwriter channel / cycle adjustment | ACTIVE — Step 1: own-CR cycle adjustment above ATP floor | `src/insurer.rs::underwriter_premium` |
+| Underwriter channel / cycle adjustment | PARTIAL — profit loading above ATP floor; explicit cycle adjustment removed | `src/insurer.rs::underwriter_premium` |
 | Broker relationship scores | PLANNED | — |
 | Syndicate entry / exit | PLANNED | — |
 | Annual coordinator statistics | PLANNED | — |
@@ -121,7 +121,9 @@ All policies are **annual contracts** written for a 12-month period, reflecting 
 
 ### §3.1 Insureds `[ACTIVE]`
 
-Each Insured owns one or more Assets and seeks insurance coverage each year. Insureds are active agents: they accept or reject quotes and accumulate GUL history. State: `id`, `risk` (asset description), `accepted_quotes` (pending binding), `total_ground_up_loss_by_year`. Source: `src/insured.rs`.
+Each Insured owns one or more Assets and seeks insurance coverage each year. Insureds are active agents: they evaluate quotes against a **reservation price** and accumulate GUL history. State: `id`, `risk` (asset description), `max_rate_on_line`. Source: `src/insured.rs`.
+
+**Reservation price:** each insured has a maximum acceptable rate on line (`max_rate_on_line`). `Insured::on_quote_presented` computes `rate = premium / sum_insured`; if `rate > max_rate_on_line` it emits `QuoteRejected` instead of `QuoteAccepted`. A rejected insured is uninsured for the year but retries at the next annual renewal (same timing offset as an accepted quote — the renewal `CoverageRequested` fires `361 − 3 = 358` days after the rejection day). Canonical value: **0.15** (15% RoL — above the typical 6–8% rate band, so rarely binding at current pricing; lowers as capital-linked pricing is introduced).
 
 Canonical config: 100 uniform insureds (sum_insured = 50M USD each).
 
@@ -134,6 +136,8 @@ Canonical config: 5 insurers, 1B USD initial capital each.
 ### §3.3 Broker `[ACTIVE]`
 
 A single Broker intermediates between Insureds and Insurers. Routes `CoverageRequested` to insurers via round-robin, assembles panel (currently single-insurer), and manages submission state. Source: `src/broker.rs`.
+
+**All-declined path:** when every solicited insurer declines a submission (`quotes_outstanding` reaches zero with `best_quote = None`), the broker emits `SubmissionDropped { submission_id, insured_id }` instead of silently dropping the submission. The simulation dispatcher handles `SubmissionDropped` identically to `QuoteRejected`: it schedules a renewal `CoverageRequested` at day + 358, so the insured retries next year rather than permanently vanishing from the model.
 
 ---
 
@@ -256,25 +260,18 @@ What is not yet modelled:
 
 ---
 
-### §4.2 Underwriter channel `[ACTIVE]`
+### §4.2 Underwriter channel `[PARTIAL]`
 
 The underwriter channel reflects non-actuarial market intelligence: the current cycle position, relationship with the placing broker, and the observed lead quote (if any). It produces a multiplicative adjustment applied to the ATP: `premium = ATP × underwriter_factor`.
 
-**Step 1 — Own-CR cycle adjustment (current):**
+**Current implementation — profit loading only:**
 
-The underwriter observes its own prior-year loss ratio and shades its quote above the ATP floor when losses exceeded the target. The formula is:
+The explicit cycle adjustment (`cycle_sensitivity × (prior_year_loss_ratio − target_loss_ratio)`) has been removed. Premiums are now `ATP × (1 + profit_loading)` — a constant markup above the actuarial floor. The underwriting cycle (Phenomenon 1) must emerge from capital dynamics: post-cat capital depletion tightens capital-linked exposure limits, reducing market capacity. A capital-linked required return (RAROC-style) that rises as the capital ratio falls below target would add supply-side price hardening and is the planned next step.
 
 ```
-cycle_adj   = max(0, cycle_sensitivity × (prior_year_loss_ratio − target_loss_ratio))
-uw_factor   = profit_loading + cycle_adj
-premium     = ATP × (1 + uw_factor)
+uw_factor = profit_loading
+premium   = ATP × (1 + uw_factor)
 ```
-
-`prior_year_loss_ratio` is the insurer's own `year_total_claims / year_premium` from the previous year, initialised to `target_loss_ratio` in year 1 (neutral — no adjustment). The floor on `cycle_adj` enforces the MS3 minimum AvT invariant: premiums never fall below `ATP × (1 + profit_loading)`.
-
-`cycle_sensitivity` (canonical range 0.10–0.50) is the primary heterogeneity parameter. Insurers with low sensitivity are through-cycle writers; those with high sensitivity are cycle traders that reprice aggressively after bad years.
-
-The signal is deliberately insurer-local — each insurer reacts to its own combined ratio, not a market-wide aggregate. This prevents perfect cycle coordination and makes the market cycle emerge from independent agent reactions.
 
 **Inputs:**
 - Current market cycle indicator (coordinator-published annually; derived from aggregate premium movement — see §8).

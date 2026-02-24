@@ -209,10 +209,10 @@ fn main() {
 
     println!("=== Tier 2 — Year Character Table ===");
     println!(
-        "{:>4} | {:>8} | {:>8} | {:>7} | {:<16} | {:>11} | {:>10}",
-        "Year", "LossR%", "CombR%", "Rate%", "Dominant Peril", "TotalCap(B)", "Insolvent#"
+        "{:>4} | {:>8} | {:>8} | {:>7} | {:<16} | {:>11} | {:>10} | {:>8}",
+        "Year", "LossR%", "CombR%", "Rate%", "Dominant Peril", "TotalCap(B)", "Insolvent#", "Dropped#"
     );
-    println!("{}", "-".repeat(4 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 18 + 3 + 13 + 3 + 12));
+    println!("{}", "-".repeat(4 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 18 + 3 + 13 + 3 + 12 + 3 + 10));
 
     for s in &stats {
         let lr_pct = s.loss_ratio() * 100.0;
@@ -220,7 +220,7 @@ fn main() {
         let rol_pct = s.rate_on_line() * 100.0;
         let cap_b = s.total_capital as f64 / 100.0 / 1e9; // cents → USD → billions
         println!(
-            "{:>4} | {:>7.1}% | {:>7.1}% | {:>6.2}% | {:<16} | {:>11.2} | {:>10}",
+            "{:>4} | {:>7.1}% | {:>7.1}% | {:>6.2}% | {:<16} | {:>11.2} | {:>10} | {:>8}",
             s.year,
             lr_pct,
             cr_pct,
@@ -228,6 +228,7 @@ fn main() {
             s.dominant_peril(),
             cap_b,
             s.insolvent_count,
+            s.dropped_count,
         );
     }
     println!();

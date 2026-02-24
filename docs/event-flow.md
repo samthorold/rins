@@ -94,7 +94,8 @@ flowchart TD
 | 6b | `LeadQuoteDeclined { submission_id, insured_id, insurer_id, reason }` | `Insurer` | `Broker::on_lead_quote_declined` → emit `LeadQuoteRequested` to next insurer (or drop if all declined) | same day as `LeadQuoteRequested` | §4 Pricing, §5 Placement |
 | 7 | `QuotePresented { submission_id, insured_id, insurer_id, premium }` | `Broker` | `Insured::on_quote_presented` → emit `QuoteAccepted` | +1 from `LeadQuoteIssued` | §5 Placement |
 | 8 | `QuoteAccepted { submission_id, insured_id, insurer_id, premium }` | `Insured` | `Market::on_quote_accepted` → create `BoundPolicy` (pending), emit `PolicyBound` + `PolicyExpired` | same day as `QuotePresented` | §5 Placement, §2.2 Annual policy terms |
-| 9 | `QuoteRejected { submission_id, insured_id }` | `Insured` (not fired in this model) | `Market::on_quote_rejected` (no-op) | same day as `QuotePresented` | §5 Placement |
+| 9 | `QuoteRejected { submission_id, insured_id }` | `Insured` (when `premium / sum_insured > max_rate_on_line`) | `Market::on_quote_rejected` (no-op); simulation schedules renewal `CoverageRequested` at day + 358 | same day as `QuotePresented` | §3.1 Insureds, §5 Placement |
+| 9b | `SubmissionDropped { submission_id, insured_id }` | `Broker::on_lead_quote_declined` (when all insurers decline, no best quote) | `Simulation::dispatch` schedules renewal `CoverageRequested` at day + 358 | same day as final `LeadQuoteDeclined` | §3.3 Broker, §5 Placement |
 | 10 | `PolicyBound { policy_id, submission_id, insured_id, insurer_id, premium, sum_insured }` | `Market` | `Market::on_policy_bound` (activate policy) + `perils::schedule_attritional_claims_for_policy` + `Insurer::on_policy_bound` (cat aggregate tracking) | +1 from `QuoteAccepted` | §2.2 Annual policy terms, §1.3 Attritional occurrences |
 | 11 | `PolicyExpired { policy_id }` | `Market::on_quote_accepted` | `Insurer::on_policy_expired` (release cat aggregate) + `Market::on_policy_expired` (remove policy) | +361 from `QuoteAccepted` (= +360 from `PolicyBound`) | §2.2 Annual policy terms |
 | 12 | `LossEvent { event_id, peril }` | `perils::schedule_loss_events` at `YearStart` | `Market::on_loss_event` → emit `InsuredLoss` per active policy | Poisson-scheduled within year | §1.3 Occurrences, §1.2 Catastrophe peril class |
@@ -111,6 +112,7 @@ flowchart TD
 - `QuoteAccepted` → `PolicyBound`: **+1 day**
 - Total `CoverageRequested` → `PolicyBound`: **3 days**
 - `QuoteAccepted` → `PolicyExpired`: **+361 days** (= 360 days of coverage from `PolicyBound`)
+- `QuoteRejected` / `SubmissionDropped` → renewal `CoverageRequested`: **+358 days** (= 361 − 3 QUOTING_CHAIN_DAYS; new `PolicyBound` aligns with the original `PolicyExpired` would-have-been date)
 - `LossEvent` → `InsuredLoss` → `ClaimSettled`: **same day**
 - Attritional `InsuredLoss`: Poisson-scheduled strictly after `PolicyBound` day, within policy year
 
