@@ -53,6 +53,10 @@ pub struct Simulation {
     next_insurer_id: u64,
     /// Year in which the most recent entrant was spawned (cooldown guard).
     last_entry_year: Option<u32>,
+    /// AP/TP ratio published to all insurers; 1.0 = neutral.
+    /// Computed at YearEnd from trailing combined ratios + capacity pressure.
+    /// Mirrors the MS3 AvT (Actual vs Technical) signal.
+    market_ap_tp_factor: f64,
 }
 
 impl Simulation {
@@ -145,6 +149,7 @@ impl Simulation {
             pml_200,
             next_insurer_id,
             last_entry_year: None,
+            market_ap_tp_factor: 1.0,
         }
     }
 
@@ -246,10 +251,15 @@ impl Simulation {
             }
 
             Event::LeadQuoteRequested { submission_id, insured_id, insurer_id, risk } => {
+                let factor = self.market_ap_tp_factor;
                 if let Some(insurer) = self.insurers.iter().find(|i| i.id == insurer_id) {
-                    for (d, e) in
-                        insurer.on_lead_quote_requested(day, submission_id, insured_id, &risk)
-                    {
+                    for (d, e) in insurer.on_lead_quote_requested(
+                        day,
+                        submission_id,
+                        insured_id,
+                        &risk,
+                        factor,
+                    ) {
                         self.schedule(d, e);
                     }
                 }
@@ -502,6 +512,21 @@ impl Simulation {
         if self.recent_loss_ratios.len() > 3 {
             self.recent_loss_ratios.pop_front();
         }
+
+        // ── AP/TP market factor ────────────────────────────────────────────────
+        // Reflects where the market clears relative to the actuarial floor.
+        // < 1.0 = soft market (AP below TP); > 1.0 = hard market.
+        // Insufficient history (warmup) → neutral (1.0).
+        let n = self.recent_loss_ratios.len();
+        self.market_ap_tp_factor = if n < 2 {
+            1.0
+        } else {
+            let avg_lr = self.recent_loss_ratios.iter().sum::<f64>() / n as f64;
+            let avg_cr = avg_lr + expense_ratio;
+            let cr_signal = (avg_cr - 1.0_f64).clamp(-0.25, 0.40);
+            let capacity_uplift = if self.year_dropped_count > 10 { 0.05 } else { 0.0 };
+            (1.0 + cr_signal + capacity_uplift).clamp(0.90, 1.40)
+        };
 
         // Spawn when demand clearly exceeds supply (Dropped# > 5) and the market is not in a
         // genuine loss spiral (3yr avg CR < 0.95). The CR gate uses a wide window so a single
@@ -1317,6 +1342,7 @@ mod tests {
                 SubmissionId(12),
                 InsuredId(1),
                 &risk,
+                1.0,
             );
             events.into_iter().map(|(_, e)| e).next().unwrap()
         };

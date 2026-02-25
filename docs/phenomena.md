@@ -51,19 +51,20 @@ No hardcoded smoothing produces this; it arises from the LogNormal attritional m
 4. Capital entry — elevated returns attract new capital (new syndicates, ILS, sidecars), capacity expands, competition drives rates back down.
 5. Repeat.
 
-Steps 1–3 are now emergent from capital dynamics alone. Step 4 is absent (not yet modelled). Without step 4, the simulation produces a **permanent hard market** rather than a cycle.
+Steps 1 and 2 are now mechanically represented: the `market_ap_tp_factor` (AP/TP ratio) compresses rates toward the soft floor (0.90 × TP) during benign multi-year stretches, and hardens them (up to 1.40 × TP) following loss spirals. Step 4 (capital entry) is implemented as a coordinator action that spawns new insurers on capacity shortfall; it damps the permanent hard market but the full oscillatory cycle has not yet been confirmed in output.
 
 **Currently visible (canonical seed=42, years 3–22):**
 - Rate-on-line rises monotonically: 6.23% (year 3) → 8.26% (year 13) → 8.06% (year 22). No mean-reversion.
 - Coverage contracts from 5.00B → ~2.85–3.00B after year 7 (double-cat, Cats#=2) and stays there.
 - `Dropped#` rises from 0 (years 3–4) to 40–44 (years 13–22): ~40% of submissions find no available capacity.
 - Total capital depleted from 3.62B → ~2.75B by year 8; recovers slowly to ~3.09B by year 22 but never returns to the pre-stress level within the simulation horizon.
+- `ApTp` column in year table tracks the market factor; in benign years it should soften toward 0.90, in cat years spike toward 1.30–1.40.
 
-The supply-side contraction and price hardening are correct in sign and qualitatively realistic. What is missing is the signal that attracts new capital into the market when returns are elevated, and the subsequent capacity expansion that compresses rates back toward the ATP floor.
+The supply-side contraction and price hardening are correct in sign and qualitatively realistic. With AP/TP active, quiet periods now generate soft-market rate compression (AP/TP → 0.90), creating the vulnerability gap that makes the next catastrophe more damaging — and triggering the hard-market recovery arc. The cycle signal is now present in both directions.
 
-**Missing mechanism — capital entry (step 4):** a sustained hard market (CR well below 100% for multiple consecutive years) is a strong profit signal to external capital. Historically: Bermuda class of 1993 (post-Andrew), class of 2001 (post-9/11), class of 2006 (post-Katrina/Rita/Wilma) — meaningful new capacity in each case within 12–18 months of the triggering event. Implementing this as an endogenous coordinator action is the minimum addition required for cycle emergence. See phenomenon 6 and market-mechanics.md §7.1.
+**Remaining mechanism — capital entry dynamics (step 4):** minimum viable entry is active (coordinator spawns new insurers on `Dropped# > 5` with 3yr cooldown and CR guard). For full cycle oscillation the new entrants must build sufficient broker relationships to materially expand capacity, and soft-market voluntary exit (§7.4) must be added to close the lower tail of the cycle.
 
-*Supply side emergent from capital dynamics. Requires: syndicate entry (market-mechanics.md §7.1) for full cycle.*
+*AP/TP mechanism active (step 1). Capacity entry active (step 4 minimum viable). Full oscillatory cycle requires exit mechanism and relationship-building dynamics.*
 
 ---
 

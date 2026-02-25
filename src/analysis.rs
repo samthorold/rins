@@ -31,6 +31,9 @@ pub struct YearStats {
     pub cat_event_count: u32,
     /// Count of InsurerEntered events in the year.
     pub entrant_count: u32,
+    /// AP/TP ratio in effect at the start of this year (computed from prior-year trailing CRs).
+    /// 1.0 = neutral; < 1.0 = soft market; > 1.0 = hard market.
+    pub ap_tp_factor: f64,
 }
 
 impl YearStats {
@@ -48,6 +51,7 @@ impl YearStats {
             total_assets: 0,
             cat_event_count: 0,
             entrant_count: 0,
+            ap_tp_factor: 0.0,
         }
     }
 

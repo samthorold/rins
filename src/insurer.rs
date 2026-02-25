@@ -81,12 +81,14 @@ impl Insurer {
 
     /// Price and issue a lead quote for a risk, or decline if an exposure limit is breached.
     /// Returns a single `LeadQuoteIssued` or `LeadQuoteDeclined` event.
+    /// `market_ap_tp_factor`: coordinator-published AP/TP ratio; 1.0 = neutral.
     pub fn on_lead_quote_requested(
         &self,
         day: Day,
         submission_id: SubmissionId,
         insured_id: InsuredId,
         risk: &Risk,
+        market_ap_tp_factor: f64,
     ) -> Vec<(Day, Event)> {
         if self.insolvent {
             return vec![(
@@ -131,7 +133,7 @@ impl Insurer {
             }
         }
         let atp = self.actuarial_price(risk);
-        let premium = self.underwriter_premium(risk);
+        let premium = self.underwriter_premium(risk, market_ap_tp_factor);
         let cat_exposure_at_quote = if risk.perils_covered.contains(&Peril::WindstormAtlantic) {
             self.cat_aggregate
         } else {
@@ -182,12 +184,12 @@ impl Insurer {
         (elf * risk.sum_insured as f64 / self.target_loss_ratio).round() as u64
     }
 
-    /// Underwriter channel: ATP × (1 + profit_loading).
-    /// Profit loading provides a structural positive gap above the actuarial floor.
-    fn underwriter_premium(&self, risk: &Risk) -> u64 {
-        let atp = self.actuarial_price(risk);
-        let uw_factor = self.profit_loading;
-        (atp as f64 * (1.0 + uw_factor)).round() as u64
+    /// Underwriter channel: TP × market_ap_tp_factor.
+    /// TP = ATP × (1 + profit_loading) — the per-insurer Technical Premium.
+    /// AP = TP × market_ap_tp_factor — the market-clearing Actual Premium.
+    fn underwriter_premium(&self, risk: &Risk, market_ap_tp_factor: f64) -> u64 {
+        let tp = self.actuarial_price(risk) as f64 * (1.0 + self.profit_loading);
+        (tp * market_ap_tp_factor).round() as u64
     }
 
     /// Deduct a settled claim from capital (floored at zero).
@@ -263,7 +265,7 @@ mod tests {
             territory: "US-SE".to_string(),
             perils_covered: vec![Peril::Attritional],
         };
-        let events = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk);
+        let events = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0);
         let (_, event) = events.into_iter().next().unwrap();
         if let Event::LeadQuoteIssued { atp, .. } = event { atp } else { panic!("expected LeadQuoteIssued") }
     }
@@ -328,7 +330,7 @@ mod tests {
     fn on_lead_quote_requested_always_quotes() {
         let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
-        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         assert!(
             matches!(event, Event::LeadQuoteIssued { .. }),
             "insurer must always issue a lead quote, got {event:?}"
@@ -340,7 +342,7 @@ mod tests {
         // make_insurer uses profit_loading=0.0, so premium = ATP × 1.0 = ATP.
         let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
-        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         if let Event::LeadQuoteIssued { atp, premium, .. } = event {
             assert_eq!(premium, atp, "with profit_loading=0.0, premium must equal ATP");
         }
@@ -351,7 +353,7 @@ mod tests {
         let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
         let (_, event) =
-            first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(5), InsuredId(42), &risk));
+            first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(5), InsuredId(42), &risk, 1.0));
         if let Event::LeadQuoteIssued { insured_id, submission_id, insurer_id, .. } = event {
             assert_eq!(insured_id, InsuredId(42));
             assert_eq!(submission_id, SubmissionId(5));
@@ -375,9 +377,9 @@ mod tests {
             perils_covered: vec![Peril::Attritional],
         };
         let (_, e_small) =
-            first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &small));
+            first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &small, 1.0));
         let (_, e_large) =
-            first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &large));
+            first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &large, 1.0));
         let p_small =
             if let Event::LeadQuoteIssued { premium, .. } = e_small { premium } else { 0 };
         let p_large =
@@ -392,7 +394,7 @@ mod tests {
     fn quote_premium_is_positive_for_nonzero_risk() {
         let ins = make_insurer(InsurerId(1), 1_000_000_000);
         let risk = small_risk();
-        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         if let Event::LeadQuoteIssued { premium, .. } = event {
             assert!(premium > 0, "premium must be positive for a non-trivial risk");
         }
@@ -403,7 +405,7 @@ mod tests {
         let ins = make_insurer(InsurerId(1), 0);
         let risk = small_risk();
         let expected = (0.239 * ASSET_VALUE as f64 / 0.70).round() as u64;
-        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         if let Event::LeadQuoteIssued { atp, .. } = event {
             assert_eq!(atp, expected, "ATP must equal expected_loss_fraction × sum_insured / target_loss_ratio");
         } else {
@@ -418,7 +420,7 @@ mod tests {
         let ins = make_insurer(InsurerId(1), 0);
         let risk = small_risk();
         let expected = (0.239 * ASSET_VALUE as f64 / 0.70).round() as u64;
-        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         if let Event::LeadQuoteIssued { premium, .. } = event {
             assert_eq!(premium, expected, "premium must equal (attritional_elf + cat_elf) × sum_insured / target_loss_ratio × (1 + profit_loading)");
         } else {
@@ -475,7 +477,7 @@ mod tests {
 
         // Quote a second cat risk — exposure_at_quote should reflect the already-bound aggregate.
         let risk = cat_risk();
-        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk));
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk, 1.0));
         if let Event::LeadQuoteIssued { cat_exposure_at_quote, .. } = event {
             assert_eq!(
                 cat_exposure_at_quote, ASSET_VALUE,
@@ -492,7 +494,7 @@ mod tests {
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
 
         let risk = att_only_risk();
-        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk));
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk, 1.0));
         if let Event::LeadQuoteIssued { cat_exposure_at_quote, .. } = event {
             assert_eq!(
                 cat_exposure_at_quote, 0,
@@ -510,7 +512,7 @@ mod tests {
         // capital=0 → effective_line = 0.30 × 0 = 0 < ASSET_VALUE → declines MaxLineSizeExceeded.
         let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252);
         let risk = cat_risk(); // sum_insured = ASSET_VALUE > effective_line_limit (0)
-        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         assert!(
             matches!(event, Event::LeadQuoteDeclined { reason: DeclineReason::MaxLineSizeExceeded, .. }),
             "expected LeadQuoteDeclined(MaxLineSizeExceeded), got {event:?}"
@@ -522,7 +524,7 @@ mod tests {
         // net_line_capacity=None skips the line check; capital=0 → effective_cat = 0 → declines MaxCatAggregateBreached.
         let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252);
         let risk = cat_risk(); // cat_aggregate(0) + sum_insured > effective_cat_limit(0)
-        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk));
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         assert!(
             matches!(event, Event::LeadQuoteDeclined { reason: DeclineReason::MaxCatAggregateBreached, .. }),
             "expected LeadQuoteDeclined(MaxCatAggregateBreached), got {event:?}"
@@ -536,7 +538,7 @@ mod tests {
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
         // cat_aggregate = ASSET_VALUE; effective_cat ≈ 23.8B → still room for one more
         let risk = cat_risk();
-        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk));
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk, 1.0));
         assert!(
             matches!(event, Event::LeadQuoteIssued { .. }),
             "still within limit — must emit LeadQuoteIssued, got {event:?}"

@@ -24,7 +24,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
 | Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE — capital-linked fractions (net_line_capacity=0.30, solvency_capital_fraction=0.30, pml_200 derived from cat model) | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
 | Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
-| Underwriter channel / cycle adjustment | PARTIAL — profit loading above ATP floor; explicit cycle adjustment removed; RAROC-style capital-linked required return planned | `src/insurer.rs::underwriter_premium` |
+| Underwriter channel / AP/TP ratio (MS3 AvT) | ACTIVE — three-level pricing: ATP → TP (× profit loading) → AP (× market_ap_tp_factor); factor driven by trailing 3yr CR + capacity pressure | `src/insurer.rs::underwriter_premium`, `src/simulation.rs::handle_year_end` |
 | Supply / demand balance (insured reservation price) | ACTIVE — step-function demand curve; inelastic at current 6–8% rates; Dropped# is supply-constrained not demand-constrained | `src/insured.rs::on_quote_presented` |
 | Broker relationship scores | PLANNED | — |
 | Syndicate entry / exit (capital entry) | PLANNED — minimum viable: trailing CR threshold + new insurer spawn; critical for underwriting cycle emergence | — |
@@ -265,18 +265,29 @@ What is not yet modelled:
 
 ---
 
-### §4.2 Underwriter channel `[PARTIAL]`
+### §4.2 Underwriter channel `[ACTIVE]`
 
-The underwriter channel reflects non-actuarial market intelligence: the current cycle position, relationship with the placing broker, and the observed lead quote (if any). It produces a multiplicative adjustment applied to the ATP: `premium = ATP × underwriter_factor`.
+The underwriter channel reflects non-actuarial market intelligence: the current cycle position, relationship with the placing broker, and the observed lead quote (if any). It produces a multiplicative adjustment applied to the ATP: `premium = AP = TP × market_ap_tp_factor`.
 
-**Current implementation — profit loading only:**
-
-The explicit cycle adjustment (`cycle_sensitivity × (prior_year_loss_ratio − target_loss_ratio)`) has been removed. Premiums are now `ATP × (1 + profit_loading)` — a constant markup above the actuarial floor. The underwriting cycle (Phenomenon 1) must emerge from capital dynamics: post-cat capital depletion tightens capital-linked exposure limits, reducing market capacity. A capital-linked required return (RAROC-style) that rises as the capital ratio falls below target would add supply-side price hardening and is the planned next step.
+**Three-level pricing model (MS3 AvT framework):**
 
 ```
-uw_factor = profit_loading
-premium   = ATP × (1 + uw_factor)
+ATP  = (attritional_elf + cat_elf) × sum_insured / target_loss_ratio
+TP   = ATP × (1 + profit_loading)         — Technical Premium: long-run actuarial floor
+AP   = TP × market_ap_tp_factor           — Actual Premium: market-clearing price
 ```
+
+`market_ap_tp_factor` (the AP/TP ratio, equivalent to MS3's "AvT" — Actual vs Technical) is a coordinator field published annually. It is computed at each `YearEnd` from trailing combined ratios and capacity pressure:
+
+```
+cr_signal       = clamp(avg_3yr_CR − 1.0,  −0.25,  0.40)
+capacity_uplift = 0.05  if year_dropped_count > 10, else 0.0
+factor          = clamp(1.0 + cr_signal + capacity_uplift,  0.90,  1.40)
+```
+
+Factor semantics: 0.90 = soft floor (AP = 90% of TP); 1.00 = break-even; 1.40 = hard cap (AP = 140% of TP). Insufficient history (< 2 years) defaults to 1.0 (neutral, for warmup). MS3 tracks AvT as a regulatory signal: a persistent AvT < 1.0 indicates the market is pricing below technical and flags syndicate-level intervention risk.
+
+**Calibration note:** `cat_elf` is anchored — not updated from experience — so TP does not erode during quiet cat periods. The AP/TP mechanism therefore produces rate softening through the market factor, not through technical price drift. This mirrors the MS3 Technical Rate / Actual vs Technical (AvT) distinction.
 
 **Inputs:**
 - Current market cycle indicator (coordinator-published annually; derived from aggregate premium movement — see §8).
