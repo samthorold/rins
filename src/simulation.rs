@@ -43,6 +43,8 @@ pub struct Simulation {
     year_premium_written: u64,
     /// Claims settled this year (ClaimSettled.amount). Reset at YearStart.
     year_claims_settled: u64,
+    /// Count of SubmissionDropped events this year. Reset at YearStart.
+    year_dropped_count: u32,
     /// Rolling 2-year buffer of annual loss ratios (for trailing CR check).
     recent_loss_ratios: std::collections::VecDeque<f64>,
     /// 1-in-200 damage fraction computed at construction; used to size new standard entrants.
@@ -138,6 +140,7 @@ impl Simulation {
             attritional_scheduled: HashSet::new(),
             year_premium_written: 0,
             year_claims_settled: 0,
+            year_dropped_count: 0,
             recent_loss_ratios: std::collections::VecDeque::new(),
             pml_200,
             next_insurer_id,
@@ -324,6 +327,7 @@ impl Simulation {
             }
 
             Event::SubmissionDropped { insured_id, .. } => {
+                self.year_dropped_count += 1;
                 // All insurers declined. Schedule the same annual-offset renewal so the
                 // insured retries next year rather than silently vanishing from the model.
                 let renewal_day = day.offset(361 - QUOTING_CHAIN_DAYS);
@@ -430,6 +434,7 @@ impl Simulation {
         // Reset annual accumulators used for the entry-criterion loss ratio.
         self.year_premium_written = 0;
         self.year_claims_settled = 0;
+        self.year_dropped_count = 0;
 
         // Endow insurers with fresh capital each year.
         for insurer in &mut self.insurers {
@@ -494,11 +499,14 @@ impl Simulation {
             0.0
         };
         self.recent_loss_ratios.push_back(lr);
-        if self.recent_loss_ratios.len() > 2 {
+        if self.recent_loss_ratios.len() > 3 {
             self.recent_loss_ratios.pop_front();
         }
 
-        // Only fire during analysis years (not warmup) and respect 3-year cooldown.
+        // Spawn when demand clearly exceeds supply (Dropped# > 5) and the market is not in a
+        // genuine loss spiral (3yr avg CR < 0.95). The CR gate uses a wide window so a single
+        // bad cat year does not suppress entry through the entire following benign year.
+        const DROPPED_ENTRY_THRESHOLD: u32 = 5;
         if year.0 > self.config.warmup_years && self.recent_loss_ratios.len() >= 2 {
             let avg_lr = self.recent_loss_ratios.iter().sum::<f64>()
                 / self.recent_loss_ratios.len() as f64;
@@ -506,7 +514,7 @@ impl Simulation {
             let cooldown_ok = self.last_entry_year
                 .map(|y| year.0.saturating_sub(y) >= 3)
                 .unwrap_or(true);
-            if avg_cr < 0.85 && cooldown_ok {
+            if self.year_dropped_count > DROPPED_ENTRY_THRESHOLD && avg_cr < 0.95 && cooldown_ok {
                 self.spawn_new_insurer(day, year);
             }
         }
@@ -1220,23 +1228,33 @@ mod tests {
     }
 
     #[test]
-    fn syndicate_entry_fires_after_profitable_years() {
-        // minimal_config has expense_ratio=0.0 and att_ELF≈23.9% with target_LR=0.70.
-        // Realized LR ≈ 0.70, so avg_CR ≈ LR + 0.0 = 0.70 < 0.85 → entry criterion met.
-        // warmup_years=0 → entry criterion active from year 2 onward.
-        // 3-year cooldown → expect entries at approx years 2, 5, 8 over a 10-year run.
-        let config = minimal_config(10, 5);
+    fn syndicate_entry_fires_on_capacity_shortfall() {
+        // 1 insurer with net_line_capacity=0.01 → max_line = 0.01 × 100_000_000_000 = 1B cents = $10M.
+        // Policy SI = 5B cents = $50M → MaxLineSizeExceeded on every quote → all 7 insureds dropped.
+        // Dropped# = 7 > 5 every year; no bound policies so LR=0 → CR gate passes.
+        let mut config = minimal_config(10, 7);
+        config.insurers[0].net_line_capacity = Some(0.01);
         let sim = run_sim(config);
-
         let entered = sim
             .log
             .iter()
             .filter(|e| matches!(e.event, Event::InsurerEntered { .. }))
             .count();
-        assert!(
-            entered > 0,
-            "expected at least one InsurerEntered event over 10 quiet years (avg CR ≈ 0.70 < 0.85)"
-        );
+        assert!(entered > 0, "expected entry when Dropped# > 5 every year");
+    }
+
+    #[test]
+    fn syndicate_entry_not_triggered_without_capacity_shortfall() {
+        // minimal_config: unlimited capacity, all 5 insureds served, Dropped#=0.
+        // Under new logic, entry criterion never fires regardless of CR.
+        let config = minimal_config(10, 5);
+        let sim = run_sim(config);
+        let entered = sim
+            .log
+            .iter()
+            .filter(|e| matches!(e.event, Event::InsurerEntered { .. }))
+            .count();
+        assert_eq!(entered, 0, "entry must not fire when Dropped# stays at 0");
     }
 
     #[test]

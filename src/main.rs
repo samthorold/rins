@@ -202,20 +202,35 @@ fn print_analysis(
         warmup + 1
     );
     println!(
-        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>10} | {:>8} | {:>9}",
-        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "Rate%", "Cats#", "TotalCap(B)", "Insolvent#", "Dropped#", "Entrants#"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>10} | {:>8} | {:>9}",
+        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "AvgCR3%", "Rate%", "Cats#", "TotalCap(B)", "Insolvent#", "Dropped#", "Entrants#"
     );
-    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 12 + 3 + 10 + 3 + 11));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 12 + 3 + 10 + 3 + 11));
 
     const CENTS_PER_BUSD: f64 = 100_000_000_000.0; // cents per billion USD
+
+    let mut recent_lrs: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
 
     for s in &stats {
         let assets_b = s.total_assets as f64 / CENTS_PER_BUSD;
         let gul_b = (s.attr_gul + s.cat_gul) as f64 / CENTS_PER_BUSD;
         let cov_b = s.sum_insured as f64 / CENTS_PER_BUSD;
         let claims_b = s.claims as f64 / CENTS_PER_BUSD;
+        let lr = if s.bound_premium > 0 { s.claims as f64 / s.bound_premium as f64 } else { 0.0 };
+        recent_lrs.push_back(lr);
+        if recent_lrs.len() > 3 { recent_lrs.pop_front(); }
+        let avg_cr_pct: Option<f64> = if recent_lrs.len() >= 2 {
+            let avg_lr = recent_lrs.iter().sum::<f64>() / recent_lrs.len() as f64;
+            Some((avg_lr + expense_ratio) * 100.0)
+        } else {
+            None
+        };
+        let avg_cr_str = match avg_cr_pct {
+            Some(v) => format!("{:>7.1}%", v),
+            None => "   n/a  ".to_string(),
+        };
         println!(
-            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {:>6.2}% | {:>5} | {:>11.2} | {:>10} | {:>8} | {:>9}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>10} | {:>8} | {:>9}",
             s.year,
             assets_b,
             gul_b,
@@ -223,6 +238,7 @@ fn print_analysis(
             claims_b,
             s.loss_ratio() * 100.0,
             s.combined_ratio(expense_ratio) * 100.0,
+            avg_cr_str,
             s.rate_on_line() * 100.0,
             s.cat_event_count,
             s.total_capital as f64 / CENTS_PER_BUSD,
