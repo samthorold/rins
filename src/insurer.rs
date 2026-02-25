@@ -639,8 +639,8 @@ mod tests {
 
     #[test]
     fn zombie_insurer_marked_insolvent_at_year_end() {
-        // capital = 100M USD → max_line = 0.30 × 100M = 30M < ASSET_VALUE (50M) → zombie
-        let capital_cents = 10_000_000_000i64; // 100M USD
+        // capital = 80M USD → max_line = 0.30 × 80M = 24M < ASSET_VALUE (25M) → zombie
+        let capital_cents = 8_000_000_000i64; // 80M USD
         let mut ins = Insurer::new(
             InsurerId(1), capital_cents,
             0.239, 0.0, 0.70, 0.3, 0.0, 0.0,

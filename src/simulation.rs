@@ -547,9 +547,9 @@ impl Simulation {
                 (t.initial_capital, t.cat_elf, t.target_loss_ratio, t.profit_loading, pml)
             }).unwrap_or_else(|| {
                 if is_aggressive {
-                    (40_000_000_000i64, 0.015, 0.90, 0.00, 0.126)
+                    (15_000_000_000i64, 0.015, 0.90, 0.00, 0.126)
                 } else {
-                    (50_000_000_000i64, 0.033, 0.80, 0.05, pml_200)
+                    (15_000_000_000i64, 0.033, 0.80, 0.05, pml_200)
                 }
             })
         };

@@ -72,7 +72,7 @@ pub struct SimulationConfig {
     /// stabilise past the staggered year-1 partial-exposure artefact. Not reported.
     pub warmup_years: u32,
     pub insurers: Vec<InsurerConfig>,
-    /// Number of insureds. Asset value: 50M USD each.
+    /// Number of insureds. Asset value: 25M USD each.
     pub n_insureds: usize,
     pub attritional: AttritionalConfig,
     pub catastrophe: CatConfig,
@@ -85,8 +85,8 @@ pub struct SimulationConfig {
     pub max_rate_on_line: f64,
 }
 
-/// Insured asset value: 50M USD in cents.
-pub const ASSET_VALUE: u64 = 5_000_000_000;
+/// Insured asset value: 25M USD in cents.
+pub const ASSET_VALUE: u64 = 2_500_000_000;
 
 impl SimulationConfig {
     pub fn canonical() -> Self {
@@ -106,7 +106,7 @@ impl SimulationConfig {
                 let mut insurers: Vec<InsurerConfig> = (1..=5)
                     .map(|i| InsurerConfig {
                         id: InsurerId(i),
-                        initial_capital: 50_000_000_000, // 500M USD in cents
+                        initial_capital: 15_000_000_000, // 150M USD in cents
                         attritional_elf: 0.030, // annual_rate=2.0 × E[df]=1.5% → att_ELF=3.0%
                         cat_elf: 0.033,         // frequency=0.5 × E[df]=6.7% → cat_ELF=3.3%; anchored
                         target_loss_ratio: 0.80, // gross (pre-reinsurance) pricing; benign CR ≈ 70%
@@ -122,7 +122,7 @@ impl SimulationConfig {
                 for j in 0..3 {
                     insurers.push(InsurerConfig {
                         id: InsurerId(6 + j as u64),
-                        initial_capital: 40_000_000_000, // 400M USD in cents
+                        initial_capital: 15_000_000_000, // 150M USD in cents
                         attritional_elf: 0.030,           // same attritional assumption
                         cat_elf: 0.015, // optimistic: ignores tail — 55% below calibrated anchor
                         target_loss_ratio: 0.90, // thin margin; target CR ≈ 90% gross
