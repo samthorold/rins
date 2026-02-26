@@ -17,6 +17,7 @@ This is a living document. Phenomena are added as the literature review progress
 | 8 | Geographic and Peril Accumulation Risk | PARTIAL |
 | 9 | Experience Rating and Insured Risk Quality | PLANNED |
 | 10 | Layer-Position Premium Gradient | PLANNED |
+| 11 | Reinsurance Contagion Cascade | TBD |
 
 ---
 
@@ -189,6 +190,20 @@ The phenomenon itself is not yet measurable as an *emergent divergence* because 
 **Connection to other phenomena:** Layer-position dynamics are a refinement of phenomenon 4 (Specialist vs. Generalist Divergence) — layer-position specialism adds a vertical dimension to the existing line-of-business horizontal dimension. They also modulate phenomenon 1 (Underwriting Cycle): the full-market ROL index masks the divergent dynamics in each layer segment, which can produce apparent cycle dampening in aggregate that conceals structural stress in the working-layer segment.
 
 *Requires: programme structures (market-mechanics.md §9.2).*
+
+---
+
+## 11. Reinsurance Contagion Cascade `[TBD]`
+
+**What it is:** When a major reinsurer becomes insolvent following a catastrophic loss, multiple primary insurers that purchased reinsurance from it simultaneously lose their expected cession recovery. This creates a correlated secondary shock across the primary market — distinct from, and potentially worse than, the direct primary losses — as each affected primary insurer faces a larger-than-expected net retained loss. The cascade can trigger primary insolvencies even among firms whose gross exposure was well within tolerance.
+
+**Why it matters:** The primary market and the reinsurance market are coupled through counterparty exposure. A model that treats reinsurance as a parametric net-retention adjustment captures the normal-times capacity benefit of reinsurance but misses this tail-event feedback loop. Paulson & Staber (2021) identify it as the mechanism through which reinsurance is *simultaneously* stabilising (dampens individual-firm first-order cat losses) and destabilising (amplifies systemic failure when the reinsurer itself fails). The interaction between the two effects is non-monotone and empirically observed in events such as the near-failure of several Lloyd's Names syndicates following Katrina/Rita/Wilma (2005), where reinsurance recoveries from partially insolvent vehicles did not materialise at full face value.
+
+**Expected agent mechanism:** reinsurers are modelled as agents with their own capital. When a catastrophe event occurs, reinsurer agents receive aggregate cession recoveries from multiple primaries simultaneously. If total cessions exceed the reinsurer's capital, it becomes insolvent and settles at cents on the dollar. Each primary insurer that expected a full recovery instead receives a fractional settlement, booking the difference as an unexpected additional net loss. If that loss depletes a primary's capital, the primary becomes insolvent in turn. The cascade propagates through the bipartite primary-reinsurer network.
+
+**Conditions for emergence:** the cascade requires two structural elements: (a) reinsurers are not infinitely capitalised — they have finite balance sheets subject to the same cat event risk as primaries; (b) multiple primaries share a common reinsurer — concentration of cessions with a single reinsurer creates network fragility. Both are realistic: reinsurance markets are concentrated (Swiss Re, Munich Re, Hannover Re together hold a large fraction of industry capacity), and large catastrophes are the same events that deplete both primary and reinsurance capital simultaneously.
+
+*Requires: reinsurer agents (market-mechanics.md §10). Not yet designed; tracked here as a target phenomenon.*
 
 ---
 

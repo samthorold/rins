@@ -32,6 +32,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Quarterly renewal seasonality | PLANNED | — |
 | Programme structures / towers | PLANNED | — |
 | Experience rating (per-insured surcharge) | PLANNED | — |
+| Outward reinsurance | TBD | — |
 | Persistent capital (premiums accumulate, claims erode, no annual reset) | ACTIVE | `src/insurer.rs` |
 | Central Fund / managed runoff | TBD | — |
 
@@ -601,3 +602,36 @@ Typical ROL ranges (Lloyd's hard-market conditions, 2022–2024):
 ### §9.3 Experience rating `[PLANNED]`
 
 Per-insured surcharge mechanism: an insured with above-market loss history attracts a higher renewal premium from the actuarial channel. Closes the loss-experience feedback loop at the individual insured level rather than only at the portfolio level.
+
+---
+
+## 10. Outward Reinsurance `[TBD]`
+
+Reinsurance is the primary mechanism through which insurers manage tail risk. A syndicate cedes a tranche of its gross exposure to reinsurers; in return it pays a reinsurance premium and reduces its net retained loss in large cat years. The distinction between gross line (what the syndicate writes) and net line (what it retains after cessions) is fundamental to Lloyd's capacity accounting — regulatory constraints apply to net figures, so reinsurance directly expands gross underwriting capacity.
+
+**Current simplification:** there is no outward reinsurance in the model. Gross = net throughout. The regulatory exposure limits in §4.4 are therefore applied to gross figures, which is conservative (syndicates cannot expand gross capacity by ceding outward). This is noted in §4.4.
+
+### How other researchers treat reinsurance (literature review, 2026-02-26)
+
+Three distinct stances appear in the ABM literature:
+
+**1. Omit it** — the Lloyd's DES proof-of-concept closest to `rins` (Pearson et al., arXiv:2307.05581) explicitly omits reinsurance, relying on capital constraints and exposure limits as the sole capacity mechanism. They note it as a significant gap. This is the current stance in `rins`.
+
+**2. Parametric net retention** — model each insurer as retaining a fixed fraction of each gross loss; reinsurance is a balance-sheet multiplier, not an agent. No reinsurer agents, no counterparty exposure. Simple, keeps the cycle mechanism clean. Equivalent to dividing `pml_damage_fraction_200` by the reinsurance recovery rate — a one-parameter adjustment.
+
+**3. Reinsurers as agents** — Paulson & Staber (2021, *A simulation of the insurance industry: the problem of risk model homogeneity*, JEIC) model reinsurers as agents with their own capital and balance sheets:
+  - Excess-of-loss contracts, deductible drawn from Uniform[25%, 30%] of total risk held per peril-region.
+  - Cat bonds as fallback when reinsurance is unavailable for 5+ consecutive iterations.
+  - Modular design: replications run with and without reinsurance to isolate effects.
+  - **Key finding:** reinsurance creates a *second contagion channel* (counterparty exposure between primary insurer and reinsurer) while simultaneously dampening first-order individual-firm cat losses. The net effect on systemic risk is non-monotone: reinsurance is stabilising for moderate cat events but can accelerate cascade failure when a reinsurer becomes insolvent and multiple primaries lose their cession recovery simultaneously.
+  - Under risk-model homogeneity, reinsurance *partially* alleviates systemic fragility — but only because it diversifies exposure across balance sheets that remain correlated in pricing assumptions.
+
+**4. Exogenous reinsurance price index** — Meier & Outreville (2006) treat reinsurance as a time-series price signal feeding into primary loss ratios via AR(2) models. No reinsurer agents. Captures the *lagged* effect of reinsurance cycle on primary pricing without modelling the mechanism.
+
+### Design decision
+
+The parametric net retention option is the natural next step: it requires only an `outward_ri_retention: f64` parameter per insurer and a multiplicative adjustment to net loss in `on_claim_settled`. It would allow gross lines to exceed the current conservative caps and would correctly widen the capacity margin during benign years, then tighten it when cat events drive reinsurance costs up — without the complexity of reinsurer agents.
+
+Full reinsurer-agent modelling is the right choice if the simulation is intended to study reinsurance cycle coupling or contagion cascades. The Paulson/Staber contagion finding — that reinsurer insolvency triggers a correlated shock to multiple primaries — is a target phenomenon worth tracking (see `phenomena.md §11`).
+
+*[TBD: which stance to adopt; whether to add a `ReinsuranceRecovery` event to the event stream.]*
