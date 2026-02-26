@@ -18,7 +18,7 @@ The canonical run (seed=42, 8×150M insurers, 100 insureds, 25 analysis years) s
 
 ---
 
-## Phase 1 — Per-insurer capital-state pricing
+## Phase 1 — Per-insurer capital-state pricing `[DONE — 2026-02-26]`
 
 **Mechanism.** Replace the single coordinator-broadcast `market_ap_tp_factor` with a per-insurer factor that blends the insurer's own capital adequacy and own loss history with the market reference. A capital-depleted insurer prices harder than a well-capitalised new entrant writing the same risk.
 
@@ -42,6 +42,15 @@ where `credibility` rises with years of own experience (low in warmup, approachi
 - The 3-year rate-collapse pattern (8.05% → 6.23% in 3 years) extends to 5+ years.
 
 **Diagnostics.** Per-insurer `LeadQuoteIssued.premium` visible in `events.ndjson`. Compute the coefficient of variation of quoted premiums for the same sum_insured across insurers, by year. CV > 0.05 post-cat confirms price dispersion. Track which insurer wins business in post-cat years — new entrants should be overrepresented.
+
+**Results (seed=42, 8×150M insurers, 100 insureds, 25yr run).**
+
+Primary hypothesis — *partially confirmed.* The year-16 double-cat (LossR=146.9%) produced a hard market that held for approximately 4 years (rates: 7.65% → 6.65% → 7.17% → 6.67%), compared to the pre-Phase-1 3-year collapse. The target of 5+ years was not reached; capital accumulation remains monotonic (1.22B → 1.89B) and no insolvencies occurred. Gap 2 (voluntary exit) is required to close the soft-market floor.
+
+Secondary hypotheses:
+- Rate dispersion **confirmed**: CV of quoted premiums is 0.07–0.18 in every post-warmup year (Year 1 = 0.00 as expected — new entrants, no experience). Dispersion is persistent, not just post-cat.
+- New-entrant market share — *not yet measurable* from the year table; requires per-insurer bound-policy counts (Phase 4 diagnostic).
+- 5+ year hard-market duration — *not yet reached*; extended from 3 to ~4 years; Phase 2 (voluntary exit) needed for full confirmation.
 
 **Does not fix.** Demand inelasticity (Gap 3) and supply ratchet (Gap 2). The rate erosion mechanism shifts from administrative to competitive, but there is still no demand-side resistance and no voluntary exit to close the soft-market floor.
 
