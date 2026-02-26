@@ -528,18 +528,17 @@ impl Simulation {
             (1.0 + cr_signal + capacity_uplift).clamp(0.90, 1.40)
         };
 
-        // Spawn when demand clearly exceeds supply (Dropped# > 5) and the market is not in a
-        // genuine loss spiral (3yr avg CR < 0.95). The CR gate uses a wide window so a single
-        // bad cat year does not suppress entry through the entire following benign year.
-        const DROPPED_ENTRY_THRESHOLD: u32 = 5;
-        if year.0 > self.config.warmup_years && self.recent_loss_ratios.len() >= 2 {
-            let avg_lr = self.recent_loss_ratios.iter().sum::<f64>()
-                / self.recent_loss_ratios.len() as f64;
-            let avg_cr = avg_lr + expense_ratio;
+        // Entry fires when market prices above technical (AP/TP > threshold).
+        // Capital enters when expected returns exceed the cost of capital — the
+        // empirically observed mechanism (Bermuda classes 1993, 2001, 2006).
+        // No separate CR guard: a factor > threshold already implies expected profitability.
+        // Cooldown of 1 year reflects Lloyd's regulatory formation timeline (12–18 months).
+        const AP_TP_ENTRY_THRESHOLD: f64 = 1.10;
+        if year.0 > self.config.warmup_years {
             let cooldown_ok = self.last_entry_year
-                .map(|y| year.0.saturating_sub(y) >= 3)
+                .map(|y| year.0.saturating_sub(y) >= 1)
                 .unwrap_or(true);
-            if self.year_dropped_count > DROPPED_ENTRY_THRESHOLD && avg_cr < 0.95 && cooldown_ok {
+            if self.market_ap_tp_factor > AP_TP_ENTRY_THRESHOLD && cooldown_ok {
                 self.spawn_new_insurer(day, year);
             }
         }
@@ -1253,33 +1252,34 @@ mod tests {
     }
 
     #[test]
-    fn syndicate_entry_fires_on_capacity_shortfall() {
-        // 1 insurer with net_line_capacity=0.01 → max_line = 0.01 × 100_000_000_000 = 1B cents = $10M.
-        // Policy SI = 5B cents = $50M → MaxLineSizeExceeded on every quote → all 7 insureds dropped.
-        // Dropped# = 7 > 5 every year; no bound policies so LR=0 → CR gate passes.
+    fn syndicate_entry_fires_on_profitability_signal() {
+        // High attritional loss rate (annual_rate=10) with attritional_elf=0.239, target_LR=0.70:
+        // E[LR] ≈ 10 × exp(-3+0.5) × SI / (0.239/0.70 × SI) ≈ 2.4× → avg_cr >> 1.10
+        // → market_ap_tp_factor = 1.40 (hard cap) from year 3 onward → entry fires.
         let mut config = minimal_config(10, 7);
-        config.insurers[0].net_line_capacity = Some(0.01);
+        config.attritional.annual_rate = 10.0;
         let sim = run_sim(config);
         let entered = sim
             .log
             .iter()
             .filter(|e| matches!(e.event, Event::InsurerEntered { .. }))
             .count();
-        assert!(entered > 0, "expected entry when Dropped# > 5 every year");
+        assert!(entered > 0, "expected entry when AP/TP > 1.10 (high-loss scenario)");
     }
 
     #[test]
-    fn syndicate_entry_not_triggered_without_capacity_shortfall() {
-        // minimal_config: unlimited capacity, all 5 insureds served, Dropped#=0.
-        // Under new logic, entry criterion never fires regardless of CR.
-        let config = minimal_config(10, 5);
+    fn syndicate_entry_not_triggered_without_profitability_signal() {
+        // No catastrophe events → deterministically low attritional LR ≈ 0.48 → avg_cr ≈ 0.48
+        // → market_ap_tp_factor = 0.90 (floor) < 1.10 → entry never fires.
+        let mut config = minimal_config(10, 5);
+        config.catastrophe.annual_frequency = 0.0;
         let sim = run_sim(config);
         let entered = sim
             .log
             .iter()
             .filter(|e| matches!(e.event, Event::InsurerEntered { .. }))
             .count();
-        assert_eq!(entered, 0, "entry must not fire when Dropped# stays at 0");
+        assert_eq!(entered, 0, "entry must not fire when AP/TP stays below threshold");
     }
 
     #[test]

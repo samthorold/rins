@@ -27,7 +27,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Underwriter channel / AP/TP ratio (MS3 AvT) | ACTIVE — three-level pricing: ATP → TP (× profit loading) → AP (× market_ap_tp_factor); factor driven by trailing 3yr CR + capacity pressure | `src/insurer.rs::underwriter_premium`, `src/simulation.rs::handle_year_end` |
 | Supply / demand balance (insured reservation price) | ACTIVE — step-function demand curve; inelastic at current 6–8% rates; Dropped# is supply-constrained not demand-constrained | `src/insured.rs::on_quote_presented` |
 | Broker relationship scores | PLANNED | — |
-| Syndicate entry / exit (capital entry) | PLANNED — minimum viable: trailing CR threshold + new insurer spawn; critical for underwriting cycle emergence | — |
+| Syndicate entry / exit (capital entry) | ACTIVE — AP/TP > 1.10 trigger + new insurer spawn; 1-year cooldown; critical for underwriting cycle emergence | `src/simulation.rs::handle_year_end` |
 | Annual coordinator statistics | PLANNED | — |
 | Quarterly renewal seasonality | PLANNED | — |
 | Programme structures / towers | PLANNED | — |
@@ -471,19 +471,23 @@ current single-territory model; the cat aggregate limit is the operative constra
 
 Source: `src/insurer.rs`, `src/config.rs`.
 
-### §7.1 Syndicate entry `[PLANNED]`
+### §7.1 Syndicate entry `[ACTIVE]`
 
-After each annual review, the coordinator checks whether the industry combined ratio and current market premium rate index cross an entry-attractiveness threshold. If so, it creates one or more new Syndicate agents with parameters drawn from a calibrated distribution (risk appetite, specialism, initial capital). New syndicates receive low initial relationship scores with all brokers.
+After each annual review (`handle_year_end`), the coordinator checks whether the market AP/TP ratio crosses an entry-attractiveness threshold. If so, it creates a new Insurer agent with parameters drawn from the config template. New insurers enter the broker's round-robin immediately.
 
-**Entry trigger:** canonical threshold design — fire a new entrant when the trailing 2-year average industry CR falls below ~80% (indicating sustained profitability above cost of capital). A single good year is insufficient; a sustained signal avoids false positives from the random benign years that occur even in balanced markets.
+**Entry trigger:** `market_ap_tp_factor > 1.10` — market pricing more than 10% above technical premium. The AP/TP factor already encodes the full loss-history signal (trailing 3yr combined ratio) and capacity pressure; no separate CR guard is needed. A factor above threshold implies expected profitability exceeds cost of capital, which is the empirically observed mechanism for capital formation.
 
-**Capital sources in practice:** new Lloyd's capacity enters via Names capital top-up, corporate member capital injection, PE-backed managing agency formation, or ILS/sidecar structures collateralised against a specific underwriting year. The simulation can represent all of these as a single `NewInsurerCapital` event that creates an insurer agent with initial capital drawn from a calibrated size distribution.
+**Cooldown:** 1 year — reflects Lloyd's regulatory formation and approval timeline (12–18 months). `last_entry_year` is updated at each spawn; subsequent years check `year − last_entry_year ≥ 1`.
 
-**Timing lag:** historical pattern (Bermuda class of 1993 post-Andrew; class of 2001 post-9/11; class of 2006 post-Katrina) — meaningful new capacity emerged 12–18 months after the triggering event. This is the statutory formation and regulatory approval lag. In the simulation, the coordinator fires entry at the *following* `YearStart` after the threshold is crossed — a minimum 1-year lag.
+**Warmup guard:** entry is suppressed during warmup years (`year.0 ≤ warmup_years`), when `market_ap_tp_factor = 1.0` (neutral, insufficient history).
 
-**Relationship-building lag:** a new entrant starts with low broker relationship scores and must win business (often at competitive prices) to build placement share. This second lag means new capacity contributes little to the market in its first year and reaches full participation only after 2–3 years of active placement. The combination of the two lags — formation + relationship-building — sustains elevated rates for several years after the shock, which is the empirically observed hard-market duration.
+**Capital sources in practice:** new Lloyd's capacity enters via Names capital top-up, corporate member capital injection, PE-backed managing agency formation, or ILS/sidecar structures collateralised against a specific underwriting year. The simulation represents all of these as a single `InsurerEntered` event that creates an insurer agent with initial capital from the config template.
 
-**Minimum viable implementation for cycle emergence:** (1) trailing CR check at each `YearStart`; (2) spawn new insurer if threshold crossed; (3) insurer starts with low relationship scores and round-robin weight. This alone should convert the permanent hard market into a cycle. Voluntary exit during soft markets (§7.4) would close the other tail of the cycle.
+**Timing lag:** historical pattern (Bermuda class of 1993 post-Andrew; class of 2001 post-9/11; class of 2006 post-Katrina) — meaningful new capacity emerged 12–18 months after the triggering event. The 1-year cooldown approximates this formation lag.
+
+**Relationship-building lag:** a new entrant starts with no broker relationship scores and enters the round-robin at the back. This second lag means new capacity contributes incrementally and reaches full participation only after 2–3 years of active placement. The combination of the two lags — formation + relationship-building — sustains elevated rates for several years after the shock, which is the empirically observed hard-market duration.
+
+**Implementation:** `src/simulation.rs::handle_year_end` → `spawn_new_insurer`. 1-in-3 new entrants are aggressive (optimistic internal cat model; `pml_damage_fraction_override = Some(0.126)`). `InsurerEntered { insurer_id, initial_capital, is_aggressive }` is logged directly. Voluntary exit during soft markets (§7.4) would close the lower tail of the cycle.
 
 ### §7.2 Exit via insolvency `[ACTIVE (PARTIAL)]`
 

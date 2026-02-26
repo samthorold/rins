@@ -51,7 +51,7 @@ No hardcoded smoothing produces this; it arises from the LogNormal attritional m
 4. Capital entry — elevated returns attract new capital (new syndicates, ILS, sidecars), capacity expands, competition drives rates back down.
 5. Repeat.
 
-Steps 1 and 2 are now mechanically represented: the `market_ap_tp_factor` (AP/TP ratio) compresses rates toward the soft floor (0.90 × TP) during benign multi-year stretches, and hardens them (up to 1.40 × TP) following loss spirals. Step 4 (capital entry) is implemented as a coordinator action that spawns new insurers on capacity shortfall; it damps the permanent hard market but the full oscillatory cycle has not yet been confirmed in output.
+Steps 1 and 2 are now mechanically represented: the `market_ap_tp_factor` (AP/TP ratio) compresses rates toward the soft floor (0.90 × TP) during benign multi-year stretches, and hardens them (up to 1.40 × TP) following loss spirals. Step 4 (capital entry) is implemented as a coordinator action that spawns new insurers when `market_ap_tp_factor > 1.10` with a 1-year cooldown; it is expected to damp the permanent hard market and introduce cyclical capacity expansion, but the full oscillatory cycle has not yet been confirmed in output.
 
 **Currently visible (canonical seed=42, years 3–22):**
 - Rate-on-line rises monotonically: 6.23% (year 3) → 8.26% (year 13) → 8.06% (year 22). No mean-reversion.
@@ -62,9 +62,9 @@ Steps 1 and 2 are now mechanically represented: the `market_ap_tp_factor` (AP/TP
 
 The supply-side contraction and price hardening are correct in sign and qualitatively realistic. With AP/TP active, quiet periods now generate soft-market rate compression (AP/TP → 0.90), creating the vulnerability gap that makes the next catastrophe more damaging — and triggering the hard-market recovery arc. The cycle signal is now present in both directions.
 
-**Remaining mechanism — capital entry dynamics (step 4):** minimum viable entry is active (coordinator spawns new insurers on `Dropped# > 5` with 3yr cooldown and CR guard). For full cycle oscillation the new entrants must build sufficient broker relationships to materially expand capacity, and soft-market voluntary exit (§7.4) must be added to close the lower tail of the cycle.
+**Remaining mechanism — capital entry dynamics (step 4):** entry is now AP/TP-driven (`market_ap_tp_factor > 1.10`, 1-year cooldown) — the profit-signal mechanism that empirically drives Bermuda class formation. For full cycle oscillation the new entrants must build sufficient broker relationships to materially expand capacity (relationship-building lag not yet implemented), and soft-market voluntary exit (§7.4) must be added to close the lower tail of the cycle.
 
-*AP/TP mechanism active (step 1). Capacity entry active (step 4 minimum viable). Full oscillatory cycle requires exit mechanism and relationship-building dynamics.*
+*AP/TP mechanism active (step 1). Capacity entry active — AP/TP-driven (step 4). Full oscillatory cycle requires soft-market exit mechanism and broker relationship-building dynamics.*
 
 ---
 
