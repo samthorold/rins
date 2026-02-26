@@ -68,10 +68,16 @@ impl Simulation {
             config.catastrophe.annual_frequency,
             200.0,
         );
+        // Each cat event strikes one territory; max per-event portfolio impact = pml_200 ÷ n_territories.
+        // Applying territory_factor to the pml denominator of the cat aggregate limit scales the limit
+        // upward to correctly reflect that geographic diversification reduces peak portfolio loss.
+        let n_territories = config.catastrophe.territories.len().max(1);
+        let territory_factor = 1.0 / n_territories as f64;
         let insurers: Vec<Insurer> = config
             .insurers
             .iter()
             .map(|c| {
+                let pml = c.pml_damage_fraction_override.unwrap_or(pml_200) * territory_factor;
                 Insurer::new(
                     c.id,
                     c.initial_capital,
@@ -83,7 +89,7 @@ impl Simulation {
                     c.profit_loading,
                     c.net_line_capacity,
                     c.solvency_capital_fraction,
-                    c.pml_damage_fraction_override.unwrap_or(pml_200),
+                    pml,
                 )
             })
             .collect();
@@ -568,6 +574,8 @@ impl Simulation {
 
         // Extract template params from config before any mutable borrows.
         let pml_200 = self.pml_200;
+        let n_territories = self.config.catastrophe.territories.len().max(1);
+        let territory_factor = 1.0 / n_territories as f64;
         let (initial_capital, cat_elf, target_loss_ratio, profit_loading, pml_frac) = {
             let template = if is_aggressive {
                 self.config.insurers.iter().find(|ic| ic.pml_damage_fraction_override.is_some())
@@ -575,13 +583,13 @@ impl Simulation {
                 self.config.insurers.iter().find(|ic| ic.pml_damage_fraction_override.is_none())
             };
             template.map(|t| {
-                let pml = t.pml_damage_fraction_override.unwrap_or(pml_200);
+                let pml = t.pml_damage_fraction_override.unwrap_or(pml_200) * territory_factor;
                 (t.initial_capital, t.cat_elf, t.target_loss_ratio, t.profit_loading, pml)
             }).unwrap_or_else(|| {
                 if is_aggressive {
-                    (15_000_000_000i64, 0.015, 0.90, 0.00, 0.126)
+                    (15_000_000_000i64, 0.005, 0.70, 0.00, 0.126 * territory_factor)
                 } else {
-                    (15_000_000_000i64, 0.033, 0.80, 0.05, pml_200)
+                    (15_000_000_000i64, 0.011, 0.62, 0.05, pml_200 * territory_factor)
                 }
             })
         };

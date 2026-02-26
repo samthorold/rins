@@ -106,22 +106,26 @@ impl SimulationConfig {
             seed: 42,
             years: 20,
             warmup_years: 5,
-            // 5 established insurers (500M USD capital) + 3 aggressive small entrants (200M USD).
+            // 5 established insurers + 3 aggressive small entrants, each 150M USD capital.
             //
-            // Established (IDs 1–5): calibrated cat_elf=0.033, target_LR=0.80, profit_loading=0.05.
-            //   Premium ≈ 8.3% of SI.
+            // Cat ELF is territory-adjusted: freq=0.5 × E[df]=6.7% ÷ 3 territories = 1.1%.
+            // target_loss_ratio is set so ATP × (1+loading) / target_LR maintains ~7% rate-on-line.
             //
-            // Aggressive (IDs 6–8): optimistic cat_elf=0.015 (ignoring tail risk), target_LR=0.90,
-            //   zero profit_loading. Premium ≈ 5.0% of SI — ~40% cheaper than established.
-            //   Capital=200M → max_line=60M (just clears 50M SI); cat_agg limit ≈ 238M (~4–5 policies).
+            // Established (IDs 1–5): cat_elf=0.011, target_LR=0.62, profit_loading=0.05.
+            //   ATP = (0.030+0.011)/0.62 = 6.6%; premium ≈ 6.9% of SI.
+            //
+            // Aggressive (IDs 6–8): optimistic cat_elf=0.005 (half territory-adjusted anchor),
+            //   target_LR=0.70, zero profit_loading. Premium ≈ 5.0% of SI — ~27% cheaper.
+            //   pml_override=0.126 (raw per-event; territory_factor applied in from_config() → 0.042
+            //   effective), doubling the cat aggregate limit vs established.
             insurers: {
                 let mut insurers: Vec<InsurerConfig> = (1..=5)
                     .map(|i| InsurerConfig {
                         id: InsurerId(i),
                         initial_capital: 15_000_000_000, // 150M USD in cents
                         attritional_elf: 0.030, // annual_rate=2.0 × E[df]=1.5% → att_ELF=3.0%
-                        cat_elf: 0.033,         // frequency=0.5 × E[df]=6.7% → cat_ELF=3.3%; anchored
-                        target_loss_ratio: 0.95, // gross (pre-reinsurance) pricing; benign CR ≈ 85%
+                        cat_elf: 0.011, // freq=0.5 × E[df]=6.7% ÷ 3 territories → cat_ELF=1.1%
+                        target_loss_ratio: 0.62, // (att+cat ELF)/rate = 0.041/0.066 ≈ 0.62
                         ewma_credibility: 0.3,
                         expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
                         profit_loading: 0.05, // 5% markup above ATP; MS3 risk/capital charge
@@ -136,17 +140,18 @@ impl SimulationConfig {
                         id: InsurerId(6 + j as u64),
                         initial_capital: 15_000_000_000, // 150M USD in cents
                         attritional_elf: 0.030,           // same attritional assumption
-                        cat_elf: 0.015, // optimistic: ignores tail — 55% below calibrated anchor
-                        target_loss_ratio: 0.90, // thin margin; target CR ≈ 90% gross
+                        cat_elf: 0.005, // optimistic: half the territory-adjusted anchor (0.011)
+                        target_loss_ratio: 0.70, // (0.030+0.005)/0.050 = 0.70; no profit loading
                         ewma_credibility: 0.3,
                         expense_ratio: 0.344,
                         profit_loading: 0.00, // no risk/capital loading — pure actuarial floor
-                        net_line_capacity: Some(0.30), // 0.30 × 200M = 60M > 50M SI ✓
+                        net_line_capacity: Some(0.30),
                         solvency_capital_fraction: Some(0.30),
-                        // Optimistic internal model: assumes 1-in-200 damage fraction is half the
-                        // calibrated value (scale=0.02 vs true 0.04). This inflates the effective
-                        // cat limit to ~952M (~19 × 50M policies), allowing aggressive writers to
-                        // take far more exposure than their capital prudently supports.
+                        // Optimistic internal model: raw per-event pml override = 0.126.
+                        // from_config() applies territory_factor (÷3) → effective pml = 0.042,
+                        // half the established effective pml (0.084). Doubles cat agg limit
+                        // vs established, allowing aggressive writers to accumulate far more
+                        // exposure than their capital prudently supports.
                         pml_damage_fraction_override: Some(0.126),
                     });
                 }
