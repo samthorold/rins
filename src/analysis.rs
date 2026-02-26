@@ -1161,6 +1161,7 @@ mod tests {
             },
             quotes_per_submission: None,
             max_rate_on_line: 1.0,
+            disable_cats: false,
         }
     }
 

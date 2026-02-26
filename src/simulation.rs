@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use rand::{RngCore, SeedableRng};
+use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 /// Days from CoverageRequested to PolicyBound (the quoting chain length).
@@ -486,14 +486,16 @@ impl Simulation {
         }
 
         // Schedule catastrophe loss events (Poisson draw for the year).
-        let loss_events = perils::schedule_loss_events(
-            &self.config.catastrophe,
-            year,
-            &mut self.rng,
-            &mut self.next_event_id,
-        );
-        for (d, e) in loss_events {
-            self.schedule(d, e);
+        if !self.config.disable_cats {
+            let loss_events = perils::schedule_loss_events(
+                &self.config.catastrophe,
+                year,
+                &mut self.rng,
+                &mut self.next_event_id,
+            );
+            for (d, e) in loss_events {
+                self.schedule(d, e);
+            }
         }
 
         // Schedule YearEnd.
@@ -566,38 +568,24 @@ impl Simulation {
     }
 
     fn spawn_new_insurer(&mut self, day: Day, year: Year) {
-        // 1-in-3 chance of an aggressive entrant (optimistic cat model).
-        let is_aggressive = (self.rng.next_u32() % 3) == 0;
-
         let id = InsurerId(self.next_insurer_id);
         self.next_insurer_id += 1;
 
-        // Extract template params from config before any mutable borrows.
+        // Clone params from the first (representative) insurer config.
         let pml_200 = self.pml_200;
         let n_territories = self.config.catastrophe.territories.len().max(1);
         let territory_factor = 1.0 / n_territories as f64;
-        let (initial_capital, cat_elf, target_loss_ratio, profit_loading, pml_frac) = {
-            let template = if is_aggressive {
-                self.config.insurers.iter().find(|ic| ic.pml_damage_fraction_override.is_some())
-            } else {
-                self.config.insurers.iter().find(|ic| ic.pml_damage_fraction_override.is_none())
-            };
-            template.map(|t| {
-                let pml = t.pml_damage_fraction_override.unwrap_or(pml_200) * territory_factor;
-                (t.initial_capital, t.cat_elf, t.target_loss_ratio, t.profit_loading, pml)
-            }).unwrap_or_else(|| {
-                if is_aggressive {
-                    (15_000_000_000i64, 0.005, 0.70, 0.00, 0.126 * territory_factor)
-                } else {
-                    (15_000_000_000i64, 0.011, 0.62, 0.05, pml_200 * territory_factor)
-                }
-            })
-        };
-        let (attritional_elf, ewma_credibility, expense_ratio, net_line_capacity, scf) =
+        let (initial_capital, cat_elf, target_loss_ratio, profit_loading, pml_frac,
+             attritional_elf, ewma_credibility, expense_ratio, net_line_capacity, scf) =
             self.config.insurers.first()
-                .map(|ic| (ic.attritional_elf, ic.ewma_credibility, ic.expense_ratio,
-                           ic.net_line_capacity, ic.solvency_capital_fraction))
-                .unwrap_or((0.030, 0.3, 0.344, Some(0.30), Some(0.30)));
+                .map(|t| {
+                    let pml = t.pml_damage_fraction_override.unwrap_or(pml_200) * territory_factor;
+                    (t.initial_capital, t.cat_elf, t.target_loss_ratio, t.profit_loading, pml,
+                     t.attritional_elf, t.ewma_credibility, t.expense_ratio,
+                     t.net_line_capacity, t.solvency_capital_fraction)
+                })
+                .unwrap_or((15_000_000_000i64, 0.011, 0.62, 0.05, pml_200 * territory_factor,
+                            0.030, 0.3, 0.344, Some(0.30), Some(0.30)));
 
         let insurer = Insurer::new(
             id, initial_capital, attritional_elf, cat_elf, target_loss_ratio,
@@ -611,9 +599,8 @@ impl Simulation {
 
         self.log.push(SimEvent {
             day,
-            event: Event::InsurerEntered { insurer_id: id, initial_capital: initial_capital_u64, is_aggressive },
+            event: Event::InsurerEntered { insurer_id: id, initial_capital: initial_capital_u64 },
         });
-
     }
 }
 
@@ -652,6 +639,7 @@ mod tests {
             },
             quotes_per_submission: None,
             max_rate_on_line: 1.0, // unlimited — tests accept all quotes by default
+            disable_cats: false,
         }
     }
 

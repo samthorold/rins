@@ -126,7 +126,6 @@ pub enum Event {
     InsurerEntered {
         insurer_id: InsurerId,
         initial_capital: u64,
-        is_aggressive: bool,
     },
 }
 

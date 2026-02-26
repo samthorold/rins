@@ -72,6 +72,7 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
         catastrophe: CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5, max_damage_fraction: 1.0, territories: vec!["US-SE".to_string()] },
         quotes_per_submission: None,
         max_rate_on_line: 1.0,
+        disable_cats: false,
     };
     let mut sim = Simulation::from_config(config);
     sim.start();

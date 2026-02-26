@@ -14,6 +14,7 @@ fn main() {
     let mut years_override: Option<u32> = None;
     let mut output_path = "events.ndjson".to_string();
     let mut quiet = false;
+    let mut no_cats = false; // set by --no-cats flag
     let mut runs: Option<u64> = None;
     let mut output_dir_opt: Option<String> = None;
     let mut csv_path_opt: Option<String> = None;
@@ -34,6 +35,7 @@ fn main() {
                 output_path = args[i].clone();
             }
             "--quiet" => quiet = true,
+            "--no-cats" => no_cats = true,
             "--runs" => {
                 i += 1;
                 runs = Some(args[i].parse().expect("--runs requires a positive integer"));
@@ -55,6 +57,9 @@ fn main() {
     let start_seed = seed_override.unwrap_or(base_config.seed);
     if let Some(y) = years_override {
         base_config.years = y;
+    }
+    if no_cats {
+        base_config.disable_cats = true;
     }
 
     // Extract analysis inputs before base_config is (potentially) moved.
