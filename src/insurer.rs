@@ -671,4 +671,102 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    // ── Heterogeneous experience divergence ───────────────────────────────────
+
+    #[test]
+    fn two_insurers_diverge_in_atp_after_asymmetric_attritional_loss() {
+        // Both start identical. ins_a incurs a 100% attritional loss; ins_b has a benign year.
+        // After on_year_end the EWMA update must push ins_a's ATP above ins_b's.
+        let capital = ASSET_VALUE as i64 * 10;
+        let mut ins_a = make_insurer(InsurerId(1), capital);
+        let mut ins_b = make_insurer(InsurerId(2), capital);
+
+        ins_a.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
+        ins_b.on_policy_bound(PolicyId(2), ASSET_VALUE, 0, &[Peril::Attritional]);
+
+        // ins_a: 100% loss; ins_b: no claims
+        let _ = ins_a.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
+
+        let _ = ins_a.on_year_end(Day(360), ASSET_VALUE);
+        let _ = ins_b.on_year_end(Day(360), ASSET_VALUE);
+
+        let atp_a = quote_atp(&ins_a);
+        let atp_b = quote_atp(&ins_b);
+        assert!(
+            atp_a > atp_b,
+            "ins_a (100% loss year) must have higher ATP than ins_b (benign year): {atp_a} vs {atp_b}"
+        );
+    }
+
+    #[test]
+    fn two_insurers_diverge_in_capacity_after_asymmetric_cat_loss() {
+        // Both start at 15M USD capital with net_line_capacity=0.30.
+        // ins_a is drained to ~5M USD → max_line = 0.30 × 5M = 1.5M < 25M sum_insured → declines.
+        // ins_b is untouched → max_line = 0.30 × 15M = 4.5M < 25M → also declined?
+        // Use larger capital so ins_b can still write the risk.
+        // ins_b capital = 100M USD → max_line = 30M > ASSET_VALUE ✓
+        // ins_a drained to 5M USD → max_line = 1.5M < ASSET_VALUE → MaxLineSizeExceeded
+        let capital_b = 10_000_000_000i64; // 100M USD in cents
+        let capital_a = 10_000_000_000i64;
+
+        let mut ins_a = Insurer::new(InsurerId(1), capital_a, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252);
+        let ins_b = Insurer::new(InsurerId(2), capital_b, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252);
+
+        ins_a.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
+
+        // Drain ins_a to ~5M USD (500_000_000 cents) via cat claims
+        let drain = capital_a - 500_000_000;
+        let _ = ins_a.on_claim_settled(Day(10), drain as u64, Peril::WindstormAtlantic);
+        assert!(ins_a.capital < 600_000_000, "ins_a must be nearly depleted: {}", ins_a.capital);
+
+        // Submit identical 25M USD cat risk to both
+        let risk = cat_risk();
+        let (_, event_a) = first_event(ins_a.on_lead_quote_requested(Day(20), SubmissionId(1), InsuredId(1), &risk, 1.0));
+        let (_, event_b) = first_event(ins_b.on_lead_quote_requested(Day(20), SubmissionId(2), InsuredId(2), &risk, 1.0));
+
+        assert!(
+            matches!(event_a, Event::LeadQuoteDeclined { reason: DeclineReason::MaxLineSizeExceeded, .. }),
+            "depleted ins_a must decline with MaxLineSizeExceeded, got {event_a:?}"
+        );
+        assert!(
+            matches!(event_b, Event::LeadQuoteIssued { .. }),
+            "well-capitalised ins_b must issue a quote, got {event_b:?}"
+        );
+    }
+
+    #[test]
+    fn atp_divergence_grows_over_multiple_years() {
+        // ins_a incurs 100% attritional loss each year; ins_b has benign years.
+        // The ATP gap must widen year-over-year as EWMA credibility accumulates.
+        let capital = ASSET_VALUE as i64 * 10;
+        let mut ins_a = make_insurer(InsurerId(1), capital);
+        let mut ins_b = make_insurer(InsurerId(2), capital);
+
+        let mut gap_yr1 = 0i64;
+
+        for year in 0..3u64 {
+            let pid_a = PolicyId(year * 2 + 1);
+            let pid_b = PolicyId(year * 2 + 2);
+
+            ins_a.on_policy_bound(pid_a, ASSET_VALUE, 0, &[Peril::Attritional]);
+            ins_b.on_policy_bound(pid_b, ASSET_VALUE, 0, &[Peril::Attritional]);
+
+            let _ = ins_a.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
+            // ins_b: no claims
+
+            let _ = ins_a.on_year_end(Day(360), ASSET_VALUE);
+            let _ = ins_b.on_year_end(Day(360), ASSET_VALUE);
+
+            let gap = quote_atp(&ins_a) as i64 - quote_atp(&ins_b) as i64;
+            if year == 0 {
+                gap_yr1 = gap;
+            } else if year == 2 {
+                assert!(
+                    gap > gap_yr1,
+                    "ATP gap after 3 years ({gap}) must exceed gap after year 1 ({gap_yr1}) — divergence compounds"
+                );
+            }
+        }
+    }
+
 }
