@@ -230,6 +230,46 @@ fn main() {
 
     let mut recent_lrs: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
 
+    // ── Tier 3: premium dispersion ────────────────────────────────────────────
+    // Group LeadQuoteIssued.premium by year, compute mean and population CV.
+    // CV > 0.05 in a year confirms that insurers are pricing differently from
+    // one another (capital depletion / own CR history active); CV ≈ 0 means
+    // all insurers are quoting identically (new, no experience).
+    {
+        let mut by_year: std::collections::BTreeMap<u32, Vec<u64>> =
+            std::collections::BTreeMap::new();
+        for ev in &events {
+            if let rins::events::Event::LeadQuoteIssued { premium, .. } = &ev.event {
+                let year = (ev.day.0 / 360 + 1) as u32;
+                by_year.entry(year).or_default().push(*premium);
+            }
+        }
+
+        println!("=== Tier 3 — Premium Dispersion (CV of LeadQuoteIssued.premium per year) ===");
+        println!(
+            "{:>4} | {:>6} | {:>14} | {:>8}",
+            "Year", "n", "AvgPrem(USD)", "CV"
+        );
+        println!("{}", "-".repeat(4 + 3 + 6 + 3 + 14 + 3 + 8));
+        for (year, premiums) in &by_year {
+            if premiums.len() < 2 {
+                continue;
+            }
+            let n = premiums.len() as f64;
+            let mean = premiums.iter().sum::<u64>() as f64 / n;
+            let var = premiums.iter().map(|&p| (p as f64 - mean).powi(2)).sum::<f64>() / n;
+            let cv = var.sqrt() / mean;
+            println!(
+                "{:>4} | {:>6} | {:>14.0} | {:>8.4}",
+                year,
+                premiums.len(),
+                mean / 100.0, // cents → USD
+                cv,
+            );
+        }
+        println!();
+    }
+
     for s in &stats {
         let lr_pct = s.loss_ratio() * 100.0;
         let cr_pct = s.combined_ratio(expense_ratio) * 100.0;
