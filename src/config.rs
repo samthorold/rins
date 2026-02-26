@@ -38,6 +38,11 @@ pub struct InsurerConfig {
     /// `Some(x)` = use x as the insurer's internal model assumption — a lower value inflates the
     /// denominator and raises the effective cat limit, reflecting an optimistic internal model.
     pub pml_damage_fraction_override: Option<f64>,
+    /// Sensitivity of the capital-depletion pricing adjustment.
+    /// cap_depletion_adj = clamp(depletion_ratio × depletion_sensitivity, 0.0, 0.30).
+    /// Canonical: 1.0 — a fully depleted insurer adds the maximum 0.30 loading.
+    /// Set to 0.0 in tests to disable the effect and preserve prior behaviour.
+    pub depletion_sensitivity: f64,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -126,6 +131,7 @@ impl SimulationConfig {
                     net_line_capacity: Some(0.30),
                     solvency_capital_fraction: Some(0.30),
                     pml_damage_fraction_override: None,
+                    depletion_sensitivity: 1.0,
                 })
                 .collect(),
             n_insureds: 100,

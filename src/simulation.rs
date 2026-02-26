@@ -90,6 +90,7 @@ impl Simulation {
                     c.net_line_capacity,
                     c.solvency_capital_fraction,
                     pml,
+                    c.depletion_sensitivity,
                 )
             })
             .collect();
@@ -576,20 +577,22 @@ impl Simulation {
         let n_territories = self.config.catastrophe.territories.len().max(1);
         let territory_factor = 1.0 / n_territories as f64;
         let (initial_capital, cat_elf, target_loss_ratio, profit_loading, pml_frac,
-             attritional_elf, ewma_credibility, expense_ratio, net_line_capacity, scf) =
+             attritional_elf, ewma_credibility, expense_ratio, net_line_capacity, scf,
+             depletion_sensitivity) =
             self.config.insurers.first()
                 .map(|t| {
                     let pml = t.pml_damage_fraction_override.unwrap_or(pml_200) * territory_factor;
                     (t.initial_capital, t.cat_elf, t.target_loss_ratio, t.profit_loading, pml,
                      t.attritional_elf, t.ewma_credibility, t.expense_ratio,
-                     t.net_line_capacity, t.solvency_capital_fraction)
+                     t.net_line_capacity, t.solvency_capital_fraction, t.depletion_sensitivity)
                 })
                 .unwrap_or((15_000_000_000i64, 0.011, 0.62, 0.05, pml_200 * territory_factor,
-                            0.030, 0.3, 0.344, Some(0.30), Some(0.30)));
+                            0.030, 0.3, 0.344, Some(0.30), Some(0.30), 1.0));
 
         let insurer = Insurer::new(
             id, initial_capital, attritional_elf, cat_elf, target_loss_ratio,
             ewma_credibility, expense_ratio, profit_loading, net_line_capacity, scf, pml_frac,
+            depletion_sensitivity,
         );
         let initial_capital_u64 = initial_capital.max(0) as u64;
 
@@ -627,6 +630,7 @@ mod tests {
                 net_line_capacity: None,
                 solvency_capital_fraction: None,
                 pml_damage_fraction_override: None,
+                depletion_sensitivity: 0.0,
             }],
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -926,6 +930,7 @@ mod tests {
                 net_line_capacity: None,
                 solvency_capital_fraction: None,
                 pml_damage_fraction_override: None,
+                depletion_sensitivity: 0.0,
             })
             .collect();
         let sim = run_sim(config);
@@ -1027,6 +1032,7 @@ mod tests {
             net_line_capacity: None,
             solvency_capital_fraction: Some(0.0), // 0 × capital / pml = 0 → always declines cat
             pml_damage_fraction_override: None,
+            depletion_sensitivity: 0.0,
         }];
         let sim = run_sim(config);
 
@@ -1213,6 +1219,7 @@ mod tests {
                 net_line_capacity: None,
                 solvency_capital_fraction: Some(0.0), // 0 × capital / pml = 0 → always declines cat
                 pml_damage_fraction_override: None,
+                depletion_sensitivity: 0.0,
             },
             InsurerConfig {
                 id: InsurerId(2),
@@ -1226,6 +1233,7 @@ mod tests {
                 net_line_capacity: None,
                 solvency_capital_fraction: None,
                 pml_damage_fraction_override: None,
+                depletion_sensitivity: 0.0,
             },
         ];
 
@@ -1327,6 +1335,7 @@ mod tests {
                 None,           // no net_line_capacity check
                 Some(0.30),     // SCF = 0.30
                 pml,
+                0.0,            // depletion_sensitivity=0 (not tested here)
             )
         };
 

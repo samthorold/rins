@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::events::{DeclineReason, Event, Peril, Risk};
 use crate::types::{Day, InsuredId, InsurerId, PolicyId, SubmissionId, YearAccumulator};
@@ -41,6 +41,14 @@ pub struct Insurer {
     pml_damage_fraction_200: f64,
     /// Map from policy_id to its WindstormAtlantic sum_insured, for release on expiry.
     cat_policy_map: HashMap<PolicyId, u64>,
+    /// Capital at construction — used to compute depletion ratio.
+    initial_capital: i64,
+    /// Sensitivity of capital-depletion adjustment: cap_depletion_adj = depletion × sensitivity.
+    depletion_sensitivity: f64,
+    /// Rolling per-insurer annual loss ratios (max 3 years) for own CR computation.
+    own_loss_ratios: VecDeque<f64>,
+    /// Number of years of own experience accumulated; drives credibility weight.
+    own_years: u32,
 }
 
 impl Insurer {
@@ -56,6 +64,7 @@ impl Insurer {
         net_line_capacity: Option<f64>,
         solvency_capital_fraction: Option<f64>,
         pml_damage_fraction_200: f64,
+        depletion_sensitivity: f64,
     ) -> Self {
         Insurer {
             id,
@@ -73,6 +82,10 @@ impl Insurer {
             solvency_capital_fraction,
             pml_damage_fraction_200,
             cat_policy_map: HashMap::new(),
+            initial_capital,
+            depletion_sensitivity,
+            own_loss_ratios: VecDeque::new(),
+            own_years: 0,
         }
     }
 
@@ -184,12 +197,35 @@ impl Insurer {
         (elf * risk.sum_insured as f64 / self.target_loss_ratio).round() as u64
     }
 
-    /// Underwriter channel: TP × market_ap_tp_factor.
+    /// Blend market factor with per-insurer capital state and loss history.
+    /// credibility = min(own_years / 5.0, 1.0); new entrant follows market exactly.
+    fn own_ap_tp_factor(&self, market_factor: f64) -> f64 {
+        let credibility = (self.own_years as f64 / 5.0).min(1.0);
+
+        let depletion = if self.initial_capital > 0 {
+            (1.0 - self.capital as f64 / self.initial_capital as f64).max(0.0)
+        } else {
+            0.0
+        };
+        let cap_depletion_adj = (depletion * self.depletion_sensitivity).clamp(0.0, 0.30);
+
+        let own_cr_signal = if self.own_loss_ratios.is_empty() {
+            0.0
+        } else {
+            let avg_lr = self.own_loss_ratios.iter().sum::<f64>() / self.own_loss_ratios.len() as f64;
+            let avg_cr = avg_lr + self.expense_ratio;
+            (avg_cr - 1.0).clamp(-0.25, 0.40)
+        };
+
+        let own_factor = (1.0 + own_cr_signal + cap_depletion_adj).clamp(0.90, 1.40);
+        credibility * own_factor + (1.0 - credibility) * market_factor
+    }
+
+    /// Underwriter channel: TP × own_ap_tp_factor (blend of market signal and own state).
     /// TP = ATP × (1 + profit_loading) — the per-insurer Technical Premium.
-    /// AP = TP × market_ap_tp_factor — the market-clearing Actual Premium.
     fn underwriter_premium(&self, risk: &Risk, market_ap_tp_factor: f64) -> u64 {
         let tp = self.actuarial_price(risk) as f64 * (1.0 + self.profit_loading);
-        (tp * market_ap_tp_factor).round() as u64
+        (tp * self.own_ap_tp_factor(market_ap_tp_factor)).round() as u64
     }
 
     /// Deduct a settled claim from capital (floored at zero).
@@ -222,6 +258,15 @@ impl Insurer {
             self.attritional_elf = self.ewma_credibility * realized_att_lf
                 + (1.0 - self.ewma_credibility) * self.attritional_elf;
         }
+        // Accumulate per-insurer loss ratio for own CR pricing signal.
+        if self.ytd.premium > 0 {
+            let own_lr = self.ytd.total_claims as f64 / self.ytd.premium as f64;
+            self.own_loss_ratios.push_back(own_lr);
+            if self.own_loss_ratios.len() > 3 {
+                self.own_loss_ratios.pop_front();
+            }
+        }
+        self.own_years += 1;
         self.ytd.reset();
 
         // Zombie check: capital > 0 but max_line < min writeable policy size.
@@ -254,8 +299,9 @@ mod tests {
     }
 
     fn make_insurer(id: InsurerId, capital: i64) -> Insurer {
-        // attritional_elf=0.239, cat_elf=0.0, profit_loading=0.0 → premium = ATP (tests unchanged)
-        Insurer::new(id, capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252)
+        // attritional_elf=0.239, cat_elf=0.0, profit_loading=0.0, depletion_sensitivity=0.0
+        // depletion_sensitivity=0.0 → no depletion effect; preserves all existing test behaviour.
+        Insurer::new(id, capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0)
     }
 
     /// Helper: quote and return the ATP for a standard small_risk().
@@ -305,7 +351,7 @@ mod tests {
         let initial_capital = 1_000_000i64;
         let gross_premium = 200_000u64;
         // expense_ratio=0.0 → net premium = gross premium
-        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.55, 0.3, 0.0, 0.0, None, None, 0.252);
+        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.55, 0.3, 0.0, 0.0, None, None, 0.252, 0.0);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         ins.on_policy_bound(PolicyId(2), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         let total_net_premiums = (gross_premium * 2) as i64;
@@ -510,7 +556,7 @@ mod tests {
     #[test]
     fn max_line_size_exceeded_emits_declined() {
         // capital=0 → effective_line = 0.30 × 0 = 0 < ASSET_VALUE → declines MaxLineSizeExceeded.
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252);
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0);
         let risk = cat_risk(); // sum_insured = ASSET_VALUE > effective_line_limit (0)
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         assert!(
@@ -522,7 +568,7 @@ mod tests {
     #[test]
     fn max_cat_aggregate_breached_emits_declined() {
         // net_line_capacity=None skips the line check; capital=0 → effective_cat = 0 → declines MaxCatAggregateBreached.
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252);
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0);
         let risk = cat_risk(); // cat_aggregate(0) + sum_insured > effective_cat_limit(0)
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         assert!(
@@ -534,7 +580,7 @@ mod tests {
     #[test]
     fn within_limits_after_partial_fill_emits_quote_issued() {
         // capital=200M USD; effective_cat = 0.30 × 20B / 0.252 ≈ 23.8B > 2×ASSET_VALUE=10B → room for second policy.
-        let mut ins = Insurer::new(InsurerId(1), 20_000_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252);
+        let mut ins = Insurer::new(InsurerId(1), 20_000_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
         // cat_aggregate = ASSET_VALUE; effective_cat ≈ 23.8B → still room for one more
         let risk = cat_risk();
@@ -626,7 +672,7 @@ mod tests {
     #[test]
     fn on_policy_bound_credits_net_premium_to_capital() {
         // expense_ratio=0.25 → net = 75% of gross premium.
-        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.55, 0.3, 0.25, 0.0, None, None, 0.252);
+        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.55, 0.3, 0.25, 0.0, None, None, 0.252, 0.0);
         let gross_premium = 400_000u64;
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         let expected_net = (gross_premium as f64 * 0.75).round() as i64;
@@ -646,7 +692,7 @@ mod tests {
         let mut ins = Insurer::new(
             InsurerId(1), capital_cents,
             0.239, 0.0, 0.70, 0.3, 0.0, 0.0,
-            Some(0.30), None, 0.252,
+            Some(0.30), None, 0.252, 0.0,
         );
         let events = ins.on_year_end(Day(360), ASSET_VALUE);
         assert!(ins.insolvent, "zombie insurer must be marked insolvent");
@@ -664,7 +710,7 @@ mod tests {
         let mut ins = Insurer::new(
             InsurerId(1), capital_cents,
             0.239, 0.0, 0.70, 0.3, 0.0, 0.0,
-            Some(0.30), None, 0.252,
+            Some(0.30), None, 0.252, 0.0,
         );
         let events = ins.on_year_end(Day(360), ASSET_VALUE);
         assert!(!ins.insolvent, "insurer at threshold must not be marked insolvent");
@@ -709,8 +755,8 @@ mod tests {
         let capital_b = 10_000_000_000i64; // 100M USD in cents
         let capital_a = 10_000_000_000i64;
 
-        let mut ins_a = Insurer::new(InsurerId(1), capital_a, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252);
-        let ins_b = Insurer::new(InsurerId(2), capital_b, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252);
+        let mut ins_a = Insurer::new(InsurerId(1), capital_a, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0);
+        let ins_b = Insurer::new(InsurerId(2), capital_b, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0);
 
         ins_a.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
 
@@ -767,6 +813,142 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Per-insurer capital-state pricing ─────────────────────────────────────
+
+    /// Helper: quote and return the premium (not ATP) for a standard attritional risk.
+    fn quote_premium(ins: &Insurer, market_factor: f64) -> u64 {
+        let risk = Risk {
+            sum_insured: ASSET_VALUE,
+            territory: "US-SE".to_string(),
+            perils_covered: vec![Peril::Attritional],
+        };
+        let events = ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, market_factor);
+        let (_, event) = events.into_iter().next().unwrap();
+        if let Event::LeadQuoteIssued { premium, .. } = event {
+            premium
+        } else {
+            panic!("expected LeadQuoteIssued, got {event:?}")
+        }
+    }
+
+    #[test]
+    fn new_insurer_uses_market_factor_when_no_experience() {
+        // own_years=0 → credibility=0 → insurer_ap_tp = market_factor exactly.
+        // depletion_sensitivity=1.0; capital=initial → no depletion adj.
+        let ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
+        let market_factor = 1.20;
+        let premium = quote_premium(&ins, market_factor);
+
+        // TP = ATP × (1 + profit_loading=0) = ATP; expected = ATP × 1.20
+        let atp = (0.239 * ASSET_VALUE as f64 / 0.70).round() as u64;
+        let expected = (atp as f64 * market_factor).round() as u64;
+        assert_eq!(premium, expected,
+            "new entrant (own_years=0) must follow market factor exactly: got {premium}, expected {expected}");
+    }
+
+    #[test]
+    fn depleted_insurer_quotes_above_market_with_full_credibility() {
+        // 30% depletion, own_years=5 (credibility=1.0), no loss history → own_cr_signal=0.0
+        // cap_depletion_adj = clamp(0.30 × 1.0, 0, 0.30) = 0.30
+        // own_factor = clamp(1.0 + 0.0 + 0.30, 0.90, 1.40) = 1.30
+        // insurer_ap_tp = 1.0 × 1.30 + 0.0 × market_factor = 1.30
+        let initial_capital = 1_000_000i64;
+        let current_capital = 700_000i64; // 30% depletion
+        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
+        ins.capital = current_capital;
+        ins.own_years = 5; // full credibility
+
+        let premium = quote_premium(&ins, 1.0);
+        let atp = (0.239 * ASSET_VALUE as f64 / 0.70).round() as u64;
+        let expected = (atp as f64 * 1.30).round() as u64;
+        assert_eq!(premium, expected,
+            "depleted insurer with full credibility must quote at own_factor=1.30: got {premium}, expected {expected}");
+    }
+
+    #[test]
+    fn own_cr_signal_elevated_after_loss_year_raises_own_factor() {
+        // No capital depletion (capital=initial); credibility=1.0 (own_years=5).
+        // Bind one policy, settle 200% claim relative to premium → LR=2.0.
+        // own_cr_signal = clamp((2.0 + 0.0) − 1.0, −0.25, 0.40) = 0.40 (expense_ratio=0.0)
+        // own_factor = clamp(1.0 + 0.40 + 0.0, 0.90, 1.40) = 1.40
+        // insurer_ap_tp = 1.0 × 1.40 = 1.40 > neutral market_factor=1.0
+        let capital = 100_000_000i64;
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
+        ins.own_years = 5;
+
+        // Record a very high-loss year: premium=P, claims=2P → LR=2.0
+        let premium = 1_000_000u64;
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, premium, &[Peril::Attritional]);
+        let _ = ins.on_claim_settled(Day(10), premium * 2, Peril::Attritional);
+        let _ = ins.on_year_end(Day(360), ASSET_VALUE);
+
+        // TP is computed from the *current* (post-EWMA) ATP. own_factor=1.40 > 1.0,
+        // so premium = current_ATP × 1.40 > current_ATP × 1.0 = TP.
+        let current_atp = quote_atp(&ins);
+        let premium_quoted = quote_premium(&ins, 1.0);
+        assert!(
+            premium_quoted > current_atp,
+            "elevated own CR signal must push premium above TP×1.0 (neutral): got {premium_quoted}, TP={current_atp}"
+        );
+    }
+
+    #[test]
+    fn on_year_end_increments_own_years_and_pushes_lr() {
+        // After one YearEnd with premium written, own_years goes from 0 to 1.
+        // A new insurer with own_years=0 follows market exactly;
+        // after YearEnd (own_years=1, credibility=0.2), the blend shifts toward own_factor.
+        let capital = 100_000_000i64;
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
+
+        // Before YearEnd: own_years=0
+        assert_eq!(ins.own_years, 0);
+
+        // Bind and push a high-loss year so own_factor will differ from market
+        let premium = 1_000_000u64;
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, premium, &[Peril::Attritional]);
+        let _ = ins.on_claim_settled(Day(10), premium * 4, Peril::Attritional);
+        let _ = ins.on_year_end(Day(360), ASSET_VALUE);
+
+        assert_eq!(ins.own_years, 1, "own_years must increment to 1 after one YearEnd");
+        assert_eq!(ins.own_loss_ratios.len(), 1, "one LR must be recorded");
+
+        // With own_years=1 credibility=0.2; own_factor elevated (high LR).
+        // At market_factor=0.90 (soft), premium must still be > market's pure TP × 0.90
+        // because own experience is bad. With market=1.40 (hard), premium could be ≤ own factor.
+        // Just assert own_years was incremented and LR was recorded (structural test).
+    }
+
+    #[test]
+    fn partial_credibility_blends_own_and_market_factors() {
+        // own_years=2 → credibility=0.4
+        // Record LR=2.0 (claims=2×premium, expense_ratio=0.0 → CR=2.0)
+        // own_cr_signal = clamp(2.0 − 1.0, −0.25, 0.40) = 0.40 (capped)
+        // own_factor = clamp(1.0 + 0.40 + 0.0, 0.90, 1.40) = 1.40 (capped)
+        // market_factor = 0.90
+        // insurer_ap_tp = 0.4 × 1.40 + 0.6 × 0.90 = 0.56 + 0.54 = 1.10
+        let capital = 100_000_000i64;
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
+        ins.own_years = 2;
+
+        // Record one high-loss year: LR=2.0
+        let premium = 1_000_000u64;
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, premium, &[Peril::Attritional]);
+        let _ = ins.on_claim_settled(Day(10), premium * 2, Peril::Attritional);
+        // Manually push LR into buffer without triggering another on_year_end increment
+        // Use on_year_end which also increments own_years; compensate by pre-setting own_years=1
+        ins.own_years = 1; // will become 2 after on_year_end
+        let _ = ins.on_year_end(Day(360), ASSET_VALUE);
+        assert_eq!(ins.own_years, 2, "own_years should be 2 after one more YearEnd");
+
+        // Use post-EWMA ATP for the expected value; EWMA updated attritional_elf during on_year_end.
+        // The blend factor should be 0.4×1.40 + 0.6×0.90 = 1.10 regardless of the ATP level.
+        let current_atp = quote_atp(&ins);
+        let expected = (current_atp as f64 * 1.10).round() as u64;
+        let premium_quoted = quote_premium(&ins, 0.90);
+        assert_eq!(premium_quoted, expected,
+            "partial credibility blend: 0.4×1.40 + 0.6×0.90 = 1.10; got {premium_quoted}, expected {expected}");
     }
 
 }
