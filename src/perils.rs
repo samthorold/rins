@@ -13,8 +13,13 @@ pub enum DamageFractionModel {
     /// E[X] = exp(mu + sigma²/2), clipped to 1.0.
     LogNormal { mu: f64, sigma: f64 },
     /// Pareto damage fraction: `scale` = minimum value (< 1.0), `shape` = tail index α.
-    /// E[X] = scale * shape / (shape − 1)  (requires shape > 1), clipped to 1.0.
-    Pareto { scale: f64, shape: f64 },
+    /// E[X] = scale * shape / (shape − 1)  (requires shape > 1), clipped to `cap`.
+    /// `cap` truncates the upper tail; canonical value is 0.50, representing the maximum
+    /// plausible net per-occurrence loss fraction for a diversified book written without
+    /// reinsurance. Absent an explicit RI treaty this is the appropriate proxy for the
+    /// maximum retained severity; a hurricane cannot destroy more than ~50% of a
+    /// geographically spread portfolio.
+    Pareto { scale: f64, shape: f64, cap: f64 },
 }
 
 impl DamageFractionModel {
@@ -25,9 +30,9 @@ impl DamageFractionModel {
                 let dist = LogNormal::new(*mu, *sigma).expect("invalid LogNormal params");
                 dist.sample(rng).min(1.0_f64)
             }
-            DamageFractionModel::Pareto { scale, shape } => {
+            DamageFractionModel::Pareto { scale, shape, cap } => {
                 let dist = Pareto::new(*scale, *shape).expect("invalid Pareto params");
-                dist.sample(rng).min(1.0_f64)
+                dist.sample(rng).min(*cap)
             }
         }
     }
@@ -47,7 +52,7 @@ pub fn schedule_loss_events(
     rng: &mut impl Rng,
     next_id: &mut u64,
 ) -> Vec<(Day, Event)> {
-    if cat.annual_frequency <= 0.0 {
+    if cat.annual_frequency <= 0.0 || cat.territories.is_empty() {
         return vec![];
     }
     let year_start = Day::year_start(year);
@@ -58,7 +63,9 @@ pub fn schedule_loss_events(
             let offset = rng.random_range(1_u64..360);
             let event_id = *next_id;
             *next_id += 1;
-            (year_start.offset(offset), Event::LossEvent { event_id, peril: Peril::WindstormAtlantic })
+            let territory_idx = rng.random_range(0..cat.territories.len());
+            let territory = cat.territories[territory_idx].clone();
+            (year_start.offset(offset), Event::LossEvent { event_id, peril: Peril::WindstormAtlantic, territory })
         })
         .collect()
 }
@@ -123,7 +130,7 @@ mod tests {
     }
 
     fn cat_config() -> CatConfig {
-        CatConfig { annual_frequency: 2.0, pareto_scale: 0.05, pareto_shape: 1.5 }
+        CatConfig { annual_frequency: 2.0, pareto_scale: 0.05, pareto_shape: 1.5, max_damage_fraction: 1.0, territories: vec!["US-SE".to_string()] }
     }
 
     fn small_risk() -> Risk {
@@ -205,7 +212,7 @@ mod tests {
     /// With λ=2.0 over 100 years, mean annual count must lie in [1.5, 2.5].
     #[test]
     fn poisson_count_is_reasonable() {
-        let cfg = CatConfig { annual_frequency: 2.0, pareto_scale: 0.05, pareto_shape: 1.5 };
+        let cfg = CatConfig { annual_frequency: 2.0, pareto_scale: 0.05, pareto_shape: 1.5, max_damage_fraction: 1.0, territories: vec!["US-SE".to_string()] };
         let mut rng = rng();
         let years = 100u32;
         let mut total = 0usize;
@@ -238,7 +245,7 @@ mod tests {
     /// All scheduled days must lie within [year_start+1, year_start+359].
     #[test]
     fn scheduled_days_within_year() {
-        let cfg = CatConfig { annual_frequency: 10.0, pareto_scale: 0.05, pareto_shape: 1.5 };
+        let cfg = CatConfig { annual_frequency: 10.0, pareto_scale: 0.05, pareto_shape: 1.5, max_damage_fraction: 1.0, territories: vec!["US-SE".to_string()] };
         let mut rng = rng();
         let mut next_id = 0u64;
         let year = Year(3);

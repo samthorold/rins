@@ -16,7 +16,7 @@ use fixtures::{LARGE, MEDIUM, SMALL, build_simulation, prepopulate_policies};
 
 fn default_damage_models() -> HashMap<Peril, DamageFractionModel> {
     HashMap::from([
-        (Peril::WindstormAtlantic, DamageFractionModel::Pareto { scale: 0.05, shape: 1.5 }),
+        (Peril::WindstormAtlantic, DamageFractionModel::Pareto { scale: 0.05, shape: 1.5, cap: 1.0 }),
         (Peril::Attritional, DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 }),
     ])
 }
@@ -43,6 +43,7 @@ fn bench_loss_distribution(c: &mut Criterion) {
                         market.on_loss_event(
                             Day(180),
                             Peril::WindstormAtlantic,
+                            "US-SE",
                             &damage_models,
                             &mut rng,
                         )

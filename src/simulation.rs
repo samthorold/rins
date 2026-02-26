@@ -90,11 +90,17 @@ impl Simulation {
 
         let insurer_ids: Vec<InsurerId> = insurers.iter().map(|i| i.id).collect();
 
+        let territories = &config.catastrophe.territories;
         let mut insureds = Vec::new();
         for i in 0..config.n_insureds {
+            let territory = if territories.is_empty() {
+                "US-SE".to_string()
+            } else {
+                territories[i % territories.len()].clone()
+            };
             insureds.push(Insured::new(
                 InsuredId(i as u64 + 1),
-                "US-SE".to_string(),
+                territory,
                 vec![Peril::WindstormAtlantic, Peril::Attritional],
                 config.max_rate_on_line,
             ));
@@ -112,6 +118,7 @@ impl Simulation {
                 DamageFractionModel::Pareto {
                     scale: config.catastrophe.pareto_scale,
                     shape: config.catastrophe.pareto_shape,
+                    cap: config.catastrophe.max_damage_fraction,
                 },
             ),
             (
@@ -229,7 +236,7 @@ impl Simulation {
 
             Event::CoverageRequested { insured_id, risk } => {
                 // Register insured in market (idempotent — first call wins).
-                self.market.register_insured(insured_id, risk.sum_insured);
+                self.market.register_insured(insured_id, &risk.territory, risk.sum_insured);
 
                 // Schedule attritional losses once per (insured, year) so that
                 // retries (QuoteRejected / SubmissionDropped renewals) don't
@@ -387,10 +394,11 @@ impl Simulation {
                 self.market.on_policy_expired(policy_id);
             }
 
-            Event::LossEvent { peril, .. } => {
+            Event::LossEvent { peril, territory, .. } => {
                 let events = self.market.on_loss_event(
                     day,
                     peril,
+                    &territory,
                     &self.damage_models,
                     &mut self.rng,
                 );
@@ -631,6 +639,8 @@ mod tests {
                 annual_frequency: 0.5,
                 pareto_scale: 0.05,
                 pareto_shape: 1.5,
+                max_damage_fraction: 1.0, // no truncation in tests
+                territories: vec!["US-SE".to_string()], // single territory: all insureds hit
             },
             quotes_per_submission: None,
             max_rate_on_line: 1.0, // unlimited — tests accept all quotes by default
@@ -1299,7 +1309,7 @@ mod tests {
         use crate::insurer::Insurer;
         use crate::types::PolicyId;
 
-        let cat_cfg = CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5 };
+        let cat_cfg = CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5, max_damage_fraction: 1.0, territories: vec!["US-SE".to_string()] };
         let pml_200 = pml_damage_fraction(
             cat_cfg.pareto_scale,
             cat_cfg.pareto_shape,

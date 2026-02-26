@@ -893,8 +893,8 @@ mod tests {
         // Attritional AssetDamage must not increment cat_event_count.
         let events = vec![
             sim_start(),
-            sim_ev(50, Event::LossEvent { event_id: 1, peril: Peril::WindstormAtlantic }),
-            sim_ev(80, Event::LossEvent { event_id: 2, peril: Peril::WindstormAtlantic }),
+            sim_ev(50, Event::LossEvent { event_id: 1, peril: Peril::WindstormAtlantic, territory: "US-SE".to_string() }),
+            sim_ev(80, Event::LossEvent { event_id: 2, peril: Peril::WindstormAtlantic, territory: "US-SE".to_string() }),
             sim_ev(
                 80,
                 Event::AssetDamage {
@@ -1156,6 +1156,8 @@ mod tests {
                 annual_frequency: 0.5,
                 pareto_scale: 0.04,
                 pareto_shape: 2.5,
+                max_damage_fraction: 1.0, // no truncation in tests
+                territories: vec!["US-SE".to_string()],
             },
             quotes_per_submission: None,
             max_rate_on_line: 1.0,

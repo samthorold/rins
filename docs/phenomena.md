@@ -34,6 +34,8 @@ Attritional and catastrophe losses behave structurally differently under pooling
 - Cat individual GUL (10 cat-year observations): CV **0.52**. Market-average cat GUL per insured: CV **0.52**. CV ratio **1.00×** — pooling within a single territory provides zero diversification for correlated losses.
 - Both predictions confirmed without hardcoding: the attritional compression arises from the independent per-policy LogNormal draws; the cat non-compression arises from the shared-occurrence model where all active policies are struck by the same LossEvent.
 
+With multi-territory routing now active, the cat CV ratio will no longer be 1.00× at the whole-market level; events hitting different territories produce partial-portfolio shocks (~33% of insureds exposed per event). Within a single territory the CV ratio remains 1.00× (full correlation for exposed insureds). Re-measure once territories are stable.
+
 No hardcoded smoothing produces this; it arises from the LogNormal attritional model (independent per-policy draws) and the shared-occurrence cat model.
 
 ---
@@ -159,7 +161,7 @@ The supply-side contraction and price hardening are correct in sign and qualitat
 
 **Insurer-side accumulation management is now active:** `Insurer` tracks live `cat_aggregate` (WindstormAtlantic sum_insured across in-force policies) and enforces `max_cat_aggregate` at quote time — emitting `LeadQuoteDeclined` when the limit would be breached. This is the capital-management defence that creates selection pressure described in the agent mechanism above. Canonical limit: 750M USD per insurer (15 × ASSET_VALUE, ~15 policies before saturation).
 
-The phenomenon itself is not yet measurable as an *emergent divergence* because all insureds are in the same territory and all insurers have identical parameters. Cross-territory accumulation contrast and specialist vs. generalist divergence require multi-territory specialism (market-mechanics.md §5) before they can be measured.
+Geographic routing is now active: each cat event targets one territory, and ~33% of the insured population is exposed per event. Specialist vs. generalist *divergence* (syndicates concentrating exposure in one territory vs. spreading across all three) requires broker specialism routing (market-mechanics.md §5) before it can emerge as a measurable phenomenon; the structural prerequisite (multi-territory distribution) is now satisfied.
 
 ---
 

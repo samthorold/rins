@@ -10,7 +10,7 @@ flowchart TD
     SS["**SimulationStart**\n{year_start, warmup_years, analysis_years}"]
     YS["**YearStart**\n{year}"]
     YE["**YearEnd**\n{year}"]
-    LE["**LossEvent**\n{event_id, peril}"]
+    LE["**LossEvent**\n{event_id, peril, territory}"]
 
     SS -->|"schedule YearStart(year_start)"| YS
     YS -->|"per insured, spread 0–179 days"| CR
@@ -67,7 +67,7 @@ flowchart TD
     %% ── Loss cascade ─────────────────────────────────────────────────────────
 
     CR -->|"schedule_attritional_losses_for_insured\nonce per (insured, year)"| AD
-    LE -->|"on_loss_event\nsamples damage_fraction × sum_insured\nper registered insured"| AD
+    LE -->|"on_loss_event\nsamples damage_fraction × sum_insured\nper registered insured in matching territory"| AD
     AD --> INS_H
     AD -->|"on_asset_damage\nroutes to ClaimSettled only\nfor covered insureds"| CS
     CS --> CS_I
@@ -99,7 +99,7 @@ flowchart TD
 | 9b | `SubmissionDropped { submission_id, insured_id }` | `Broker::on_lead_quote_declined` (when all insurers decline, no best quote) | `Simulation::dispatch` schedules renewal `CoverageRequested` at day + 358 | same day as final `LeadQuoteDeclined` | §3.3 Broker, §5 Placement |
 | 10 | `PolicyBound { policy_id, submission_id, insured_id, insurer_id, premium, sum_insured }` | `Market` | `Market::on_policy_bound` (activate policy) + `Insurer::on_policy_bound` (cat aggregate tracking). Attritional losses are scheduled at `CoverageRequested` time, not here. | +1 from `QuoteAccepted` | §2.2 Annual policy terms |
 | 11 | `PolicyExpired { policy_id }` | `Market::on_quote_accepted` | `Insurer::on_policy_expired` (release cat aggregate) + `Market::on_policy_expired` (remove policy) | +361 from `QuoteAccepted` (= +360 from `PolicyBound`) | §2.2 Annual policy terms |
-| 12 | `LossEvent { event_id, peril }` | `perils::schedule_loss_events` at `YearStart` | `Market::on_loss_event` → emit `InsuredLoss` per active policy | Poisson-scheduled within year | §1.3 Occurrences, §1.2 Catastrophe peril class |
+| 12 | `LossEvent { event_id, peril, territory }` | `perils::schedule_loss_events` at `YearStart`; `territory` drawn uniformly from `CatConfig.territories` per event | `Market::on_loss_event` → emit `AssetDamage` for all registered insureds **in the matching territory** | Poisson-scheduled within year | §1.3 Occurrences, §1.2 Catastrophe peril class |
 | 13 | `AssetDamage { insured_id, peril, ground_up_loss }` | `Market::on_loss_event` (cat, fired for all registered insureds) / `perils::schedule_attritional_losses_for_insured` (attritional, fired at `CoverageRequested` time) | `Market::on_asset_damage` → emit `ClaimSettled` only for covered insureds; uninsured insureds log GUL but generate no claim | same day as trigger | §1.3 GUL, §2.1 Policy terms, §6 Loss Settlement |
 | 14 | `ClaimSettled { policy_id, insurer_id, amount, peril }` | `Market` | `Insurer::on_claim_settled` (capital deduction, floored at 0; emits `InsurerInsolvent` on first zero-crossing) | same day as `InsuredLoss` | §6 Loss Settlement, §7.2 Insolvency |
 | 15 | `InsurerInsolvent { insurer_id }` | `Insurer::on_claim_settled` | `Simulation::dispatch` (no-op — logged); insurer's `insolvent` flag set; future `LeadQuoteRequested` returns `LeadQuoteDeclined { reason: Insolvent }` | same day as triggering `ClaimSettled` | §7.2 Insolvency |
@@ -121,11 +121,12 @@ flowchart TD
 ## Damage fraction model
 
 `LossEvent` carries no severity field. When a `LossEvent` fires, `Market::on_loss_event`
-samples a **damage fraction** from `DamageFractionModel` for each registered insured:
+samples a **damage fraction** from `DamageFractionModel` and emits `AssetDamage` for all
+registered insureds **in the matching territory**:
 
 ```
 ground_up_loss = damage_fraction × sum_insured   (naturally ≤ sum_insured)
-→ AssetDamage(insured_id, peril, ground_up_loss)   fired for ALL registered insureds
+→ AssetDamage(insured_id, peril, ground_up_loss)   fired for all registered insureds in matching territory
 ```
 
 The damage fraction is drawn from per-peril `DamageFractionModel` distributions

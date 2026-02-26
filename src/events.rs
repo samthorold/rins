@@ -101,6 +101,10 @@ pub enum Event {
     LossEvent {
         event_id: u64,
         peril: Peril,
+        /// Geographic territory struck by this event. Drawn uniformly from
+        /// `CatConfig.territories` at scheduling time; `on_loss_event` filters
+        /// `insured_registry` to only emit `AssetDamage` for matching insureds.
+        territory: String,
     },
     /// A peril has damaged an insured's assets. Fired for every registered insured
     /// regardless of whether they hold an active policy. The market handler
@@ -279,7 +283,7 @@ mod tests {
             },
             SimEvent {
                 day: Day(180),
-                event: Event::LossEvent { event_id: 1, peril: Peril::WindstormAtlantic },
+                event: Event::LossEvent { event_id: 1, peril: Peril::WindstormAtlantic, territory: "US-SE".to_string() },
             },
         ];
 

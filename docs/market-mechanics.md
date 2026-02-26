@@ -52,7 +52,7 @@ An **Asset** is a unit of economic value owned by an Insured. It is characterise
 
 An Insured may own multiple Assets (different territories, different perils). Multiple Perils may affect the same Asset simultaneously if they share territory.
 
-**Current simplification:** each Insured owns exactly one risk with a single `sum_insured`, one territory (`AtlanticCoast`), and the full canonical peril set.
+Canonical config distributes 100 insureds uniformly across 3 territories (`US-NE`, `US-SE`, `US-Gulf`) — cyclic assignment in `SimulationConfig::from_config()`. Each insured owns exactly one risk with a single `sum_insured` and the full canonical peril set.
 
 ### §1.2 Perils `[ACTIVE]`
 
@@ -74,7 +74,9 @@ GUL = damage_fraction × sum_insured
 
 `GUL ≤ sum_insured` is a hard invariant: an occurrence cannot destroy more value than exists. The GUL is a real-world fact, independent of any insurance contract.
 
-**Catastrophe occurrence mechanics** (`src/market.rs::on_loss_event`): when a `LossEvent` fires, the coordinator draws **one** damage fraction from the peril's `DamageFractionModel` (Pareto, clipped to [0, 1]). This single draw is shared across every affected policy — it represents the event's physical intensity field, which is identical for all assets in the same territory. The coordinator fans out to all active policies in the matching (territory, peril) index; every affected policy receives `GUL = shared_fraction × sum_insured`.
+**Catastrophe occurrence mechanics** (`src/market.rs::on_loss_event`): when a `LossEvent` fires, the coordinator draws **one** damage fraction from the peril's `DamageFractionModel` (Pareto, clipped to `[0, max_damage_fraction]`). This single draw is shared across every affected insured — it represents the event's physical intensity field, which is identical for all assets in the struck territory. Each `LossEvent` carries a `territory` drawn uniformly from `CatConfig.territories` at scheduling time (`perils::schedule_loss_events`). `on_loss_event` filters `insured_registry` by that territory before fanning out: only insureds registered in the struck territory receive `AssetDamage`. With the canonical 3-territory split, ~33 of the 100 insureds are exposed per event. Every affected insured receives `GUL = shared_fraction × sum_insured`.
+
+**Upper truncation of the Pareto tail** (`CatConfig::max_damage_fraction`, canonical 0.50): the raw Pareto draw is capped at this value before being applied. This acts as a proxy for the maximum net per-occurrence retained loss fraction in the absence of explicit reinsurance modelling. Physical justification: a single cat event cannot destroy more than roughly 50% of a geographically diversified portfolio. In a fully modelled system this cap would be replaced by a per-occurrence excess-of-loss (XL) reinsurance treaty with a defined attachment and limit; for now the truncation serves the same purpose without the additional contract machinery.
 
 **Why a shared fraction:** physical damage at a given location is determined by the event's intensity field. Two neighbouring assets exposed to the same windstorm experience the same wind speed. Modelling this as a single shared draw captures the dominant correlation correctly. Residual asset-level variation (construction quality, micro-siting) is second-order and not included in the base model.
 

@@ -32,9 +32,9 @@ pub struct Market {
     /// Per-(policy, year) remaining insurable asset value.
     /// Initialized to sum_insured on first hit; decremented to prevent aggregate GUL > sum_insured.
     remaining_asset_value: HashMap<(PolicyId, Year), u64>,
-    /// insured_id → sum_insured. Populated via register_insured() at CoverageRequested time.
-    /// Used by on_loss_event to emit AssetDamage for every insured regardless of policy status.
-    pub insured_registry: HashMap<InsuredId, u64>,
+    /// insured_id → (territory, sum_insured). Populated via register_insured() at CoverageRequested time.
+    /// Used by on_loss_event to emit AssetDamage only for insureds in the struck territory.
+    pub insured_registry: HashMap<InsuredId, (String, u64)>,
 }
 
 impl Default for Market {
@@ -57,8 +57,8 @@ impl Market {
 
     /// Register an insured in the market registry. Called at `CoverageRequested` time.
     /// Idempotent — only the first call for each `insured_id` takes effect.
-    pub fn register_insured(&mut self, insured_id: InsuredId, sum_insured: u64) {
-        self.insured_registry.entry(insured_id).or_insert(sum_insured);
+    pub fn register_insured(&mut self, insured_id: InsuredId, territory: &str, sum_insured: u64) {
+        self.insured_registry.entry(insured_id).or_insert((territory.to_string(), sum_insured));
     }
 
     /// Insured has accepted a quote. Create the policy record (not yet loss-eligible) and
@@ -132,16 +132,17 @@ impl Market {
     }
 
     /// A catastrophe loss event has fired. Emit `AssetDamage` for every registered
-    /// insured regardless of policy status.
+    /// insured **in the matching territory**.
     ///
     /// A single damage fraction is drawn once for the entire event and applied to every
-    /// insured. This reflects the physical reality: a cat event's intensity field
+    /// affected insured. This reflects the physical reality: a cat event's intensity field
     /// (wind speed, ground motion) is a property of the occurrence, not of individual assets.
     /// Routing to `ClaimSettled` happens downstream in `on_asset_damage`.
     pub fn on_loss_event(
         &self,
         day: Day,
         peril: Peril,
+        territory: &str,
         damage_models: &HashMap<Peril, DamageFractionModel>,
         rng: &mut impl Rng,
     ) -> Vec<(Day, Event)> {
@@ -151,7 +152,8 @@ impl Market {
         let df = model.sample(rng);
         self.insured_registry
             .iter()
-            .filter_map(|(&insured_id, &sum_insured)| {
+            .filter(|(_, (t, _))| t.as_str() == territory)
+            .filter_map(|(&insured_id, &(_, sum_insured))| {
                 let gul = (df * sum_insured as f64) as u64;
                 if gul == 0 {
                     return None;
@@ -239,7 +241,7 @@ mod tests {
 
     fn full_damage_models() -> HashMap<Peril, DamageFractionModel> {
         // Pareto(scale=1.0, shape=2.0) always produces values ≥ 1.0, clipped to 1.0.
-        [(Peril::WindstormAtlantic, DamageFractionModel::Pareto { scale: 1.0, shape: 2.0 })]
+        [(Peril::WindstormAtlantic, DamageFractionModel::Pareto { scale: 1.0, shape: 2.0, cap: 1.0 })]
             .into_iter()
             .collect()
     }
@@ -250,7 +252,7 @@ mod tests {
         let iid = InsuredId(insured_id);
         let insurer_id = InsurerId(1);
         // Register insured so on_loss_event emits AssetDamage for them.
-        market.register_insured(iid, ASSET_VALUE);
+        market.register_insured(iid, "US-SE", ASSET_VALUE);
         let events = market.on_quote_accepted(
             Day(0),
             sid,
@@ -415,7 +417,7 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, &models, &mut rng());
+        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", &models, &mut rng());
         assert_eq!(events.len(), 2);
         let guls: Vec<u64> = events
             .iter()
@@ -437,7 +439,7 @@ mod tests {
         bind_policy(&mut market, 2, 2);
 
         let events =
-            market.on_loss_event(Day(100), Peril::WindstormAtlantic, &full_damage_models(), &mut rng());
+            market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", &full_damage_models(), &mut rng());
         assert_eq!(events.len(), 2, "one AssetDamage per registered insured");
         for (_, e) in &events {
             assert!(matches!(e, Event::AssetDamage { peril: Peril::WindstormAtlantic, .. }));
@@ -452,7 +454,7 @@ mod tests {
         bind_policy(&mut market, 1, 1);
         // Loss on expiry day: on_loss_event still emits AssetDamage (expiry is checked later).
         let events =
-            market.on_loss_event(Day(361), Peril::WindstormAtlantic, &full_damage_models(), &mut rng());
+            market.on_loss_event(Day(361), Peril::WindstormAtlantic, "US-SE", &full_damage_models(), &mut rng());
         assert_eq!(events.len(), 1, "on_loss_event emits AssetDamage even on expiry day");
     }
 
@@ -489,6 +491,7 @@ mod tests {
         let events = market.on_loss_event(
             Day(100),
             Peril::WindstormAtlantic,
+            "US-SE",
             &full_damage_models(),
             &mut rng(),
         );
@@ -500,7 +503,7 @@ mod tests {
         let mut market = Market::new();
         bind_policy(&mut market, 1, 1);
         let models: HashMap<Peril, DamageFractionModel> = HashMap::new();
-        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, &models, &mut rng());
+        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", &models, &mut rng());
         assert!(events.is_empty(), "no events when damage model is missing");
     }
 
@@ -509,7 +512,7 @@ mod tests {
         let mut market = Market::new();
         bind_policy(&mut market, 1, 1);
         let events =
-            market.on_loss_event(Day(100), Peril::WindstormAtlantic, &full_damage_models(), &mut rng());
+            market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", &full_damage_models(), &mut rng());
         for (_, e) in &events {
             if let Event::AssetDamage { ground_up_loss, .. } = e {
                 assert!(
@@ -517,6 +520,32 @@ mod tests {
                     "gul {ground_up_loss} > sum_insured {ASSET_VALUE}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn on_loss_event_only_hits_insureds_in_matching_territory() {
+        // Insured A in US-SE; insured B in US-NE.
+        // A LossEvent striking US-SE must only emit AssetDamage for insured A.
+        let mut market = Market::new();
+        let iid_a = InsuredId(10);
+        let iid_b = InsuredId(11);
+        market.register_insured(iid_a, "US-SE", ASSET_VALUE);
+        market.register_insured(iid_b, "US-NE", ASSET_VALUE);
+
+        let events = market.on_loss_event(
+            Day(100),
+            Peril::WindstormAtlantic,
+            "US-SE",
+            &full_damage_models(),
+            &mut rng(),
+        );
+
+        assert_eq!(events.len(), 1, "only insured A (US-SE) should be hit");
+        if let (_, Event::AssetDamage { insured_id, .. }) = &events[0] {
+            assert_eq!(*insured_id, iid_a, "AssetDamage must target insured A");
+        } else {
+            panic!("expected AssetDamage event");
         }
     }
 
@@ -561,7 +590,7 @@ mod tests {
     fn on_asset_damage_uninsured_returns_empty() {
         // Insured is registered but has no active policy (SubmissionDropped / unbound).
         let mut market = Market::new();
-        market.register_insured(InsuredId(1), ASSET_VALUE);
+        market.register_insured(InsuredId(1), "US-SE", ASSET_VALUE);
         let events = market.on_asset_damage(Day(10), InsuredId(1), 100_000, Peril::WindstormAtlantic);
         assert!(events.is_empty(), "uninsured insured must not generate a ClaimSettled");
     }
@@ -571,7 +600,7 @@ mod tests {
         // Policy covers only WindstormAtlantic; Attritional damage must not generate a claim.
         let mut market = Market::new();
         let iid = InsuredId(1);
-        market.register_insured(iid, ASSET_VALUE);
+        market.register_insured(iid, "US-SE", ASSET_VALUE);
         let cat_only_risk = Risk {
             sum_insured: ASSET_VALUE,
             territory: "US-SE".to_string(),

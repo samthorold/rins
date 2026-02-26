@@ -60,6 +60,18 @@ pub struct CatConfig {
     pub pareto_scale: f64,
     /// Pareto shape: tail index α (> 1 for finite mean).
     pub pareto_shape: f64,
+    /// Upper truncation point for the Pareto damage fraction draw ∈ (0, 1].
+    /// Acts as a proxy for the maximum net per-occurrence retained loss fraction in the
+    /// absence of explicit reinsurance modelling. Physical justification: a single cat
+    /// event cannot destroy more than ~50% of a geographically diversified portfolio.
+    /// Canonical: 0.50. Set to 1.0 to disable truncation.
+    pub max_damage_fraction: f64,
+    /// Geographic territories this peril can strike. Each `LossEvent` targets one
+    /// territory drawn uniformly at random from this list. Insureds are distributed
+    /// across these territories cyclically at construction time.
+    /// Canonical: 3 territories → ~33% of insureds hit per event.
+    /// Use a single-element list (`["US-SE"]`) in tests to preserve full-portfolio exposure.
+    pub territories: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -109,7 +121,7 @@ impl SimulationConfig {
                         initial_capital: 15_000_000_000, // 150M USD in cents
                         attritional_elf: 0.030, // annual_rate=2.0 × E[df]=1.5% → att_ELF=3.0%
                         cat_elf: 0.033,         // frequency=0.5 × E[df]=6.7% → cat_ELF=3.3%; anchored
-                        target_loss_ratio: 0.80, // gross (pre-reinsurance) pricing; benign CR ≈ 70%
+                        target_loss_ratio: 0.95, // gross (pre-reinsurance) pricing; benign CR ≈ 85%
                         ewma_credibility: 0.3,
                         expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
                         profit_loading: 0.05, // 5% markup above ATP; MS3 risk/capital charge
@@ -147,9 +159,17 @@ impl SimulationConfig {
                 sigma: 1.0,
             },
             catastrophe: CatConfig {
-                annual_frequency: 0.5,  // one cat event every 2 years on average
-                pareto_scale: 0.04,     // minimum 4% damage fraction ($2M on $50M); gross book
-                pareto_shape: 2.5,      // E[df] = 0.04 × 2.5 / 1.5 = 6.7%; fatter tail than shape=3
+                annual_frequency: 0.5,    // one cat event every 2 years on average
+                pareto_scale: 0.04,       // minimum 4% damage fraction ($2M on $50M); gross book
+                pareto_shape: 2.5,        // E[df] = 0.04 × 2.5 / 1.5 = 6.7%; fatter tail than shape=3
+                max_damage_fraction: 0.50, // cap upper tail — proxy for max net per-occurrence
+                                           // retention absent explicit RI; a single hurricane
+                                           // cannot destroy >50% of a spread portfolio
+                territories: vec![
+                    "US-NE".to_string(),
+                    "US-SE".to_string(),
+                    "US-Gulf".to_string(),
+                ],
             },
             quotes_per_submission: None, // solicit all 8 insurers per submission
             max_rate_on_line: 0.15, // 15% RoL ceiling — above current band, binding post-hardening
