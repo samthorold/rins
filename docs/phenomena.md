@@ -29,12 +29,10 @@ Attritional and catastrophe losses behave structurally differently under pooling
 
 **Why it matters:** Validates that the loss architecture produces correct individual-to-aggregate variance compression for attritional losses while correctly failing to compress cat losses. The distinction is not cosmetic: it is why catastrophe-exposed books remain volatile regardless of their size, and why cat loading in premium is structurally different from attritional loading.
 
-**Already measurable:** Canonical run (seed=42, 100 insureds, 55 active policies in steady state, 20 analysis years):
-- Attritional individual insured GUL: CV **1.07**. Market-average attritional GUL per insured: CV **0.12**. CV ratio **9.1×** — closely tracks the LLN prediction of √55 = 7×. Pooling operates correctly for independent losses.
-- Cat individual GUL (10 cat-year observations): CV **0.52**. Market-average cat GUL per insured: CV **0.52**. CV ratio **1.00×** — pooling within a single territory provides zero diversification for correlated losses.
-- Both predictions confirmed without hardcoding: the attritional compression arises from the independent per-policy LogNormal draws; the cat non-compression arises from the shared-occurrence model where all active policies are struck by the same LossEvent.
-
-With multi-territory routing now active, the cat CV ratio will no longer be 1.00× at the whole-market level; events hitting different territories produce partial-portfolio shocks (~33% of insureds exposed per event). Within a single territory the CV ratio remains 1.00× (full correlation for exposed insureds). Re-measure once territories are stable.
+**Already measurable:** Canonical run (seed=42, 100 insureds, 3 territories, 20 analysis years + 5yr warmup):
+- Attritional individual insured GUL: CV **1.19**. Market-average attritional GUL per insured: CV **0.11**. CV ratio **10.6×** — matches the LLN prediction of √100 = 10× almost exactly. Pooling operates correctly for independent losses.
+- Cat individual GUL (14 cat-year observations): CV **1.32**. Market-average cat GUL per insured: CV **0.53**. CV ratio **2.5×** — partial-portfolio shocks (~33% of insureds per event) reduce but do not eliminate cat volatility. Within a single territory the CV ratio would be ~1.0× (full correlation for exposed insureds); the territory routing lifts it to 2.5× at the market level, confirming that geographic diversification compresses cat variance as theory predicts — but incompletely relative to attritional pooling (10.6×).
+- Both predictions confirmed without hardcoding: the attritional compression arises from independent per-policy LogNormal draws; the partial cat compression arises from territory routing that limits each event to ~33% of the portfolio rather than the full correlated book.
 
 No hardcoded smoothing produces this; it arises from the LogNormal attritional model (independent per-policy draws) and the shared-occurrence cat model.
 
@@ -56,18 +54,24 @@ No hardcoded smoothing produces this; it arises from the LogNormal attritional m
 
 Steps 1 and 2 are now mechanically represented: the `market_ap_tp_factor` (AP/TP ratio) compresses rates toward the soft floor (0.90 × TP) during benign multi-year stretches, and hardens them (up to 1.40 × TP) following loss spirals. Step 4 (capital entry) is implemented as a coordinator action that spawns new insurers when `market_ap_tp_factor > 1.10` with a 1-year cooldown; it is expected to damp the permanent hard market and introduce cyclical capacity expansion, but the full oscillatory cycle has not yet been confirmed in output.
 
-**Currently visible (canonical seed=42, years 3–22):**
-- Rate-on-line rises monotonically: 6.23% (year 3) → 8.26% (year 13) → 8.06% (year 22). No mean-reversion.
-- Coverage contracts from 5.00B → ~2.85–3.00B after year 7 (double-cat, Cats#=2) and stays there.
-- `Dropped#` rises from 0 (years 3–4) to 40–44 (years 13–22): ~40% of submissions find no available capacity.
-- Total capital depleted from 3.62B → ~2.75B by year 8; recovers slowly to ~3.09B by year 22 but never returns to the pre-stress level within the simulation horizon.
-- `ApTp` column in year table tracks the market factor; in benign years it should soften toward 0.90, in cat years spike toward 1.30–1.40.
+**Currently visible (canonical seed=42, years 6–25):**
+- Rate-on-line oscillates around the ATP floor: 6.01% (yr7) → 5.80% (yr8–10, soft floor binding) → 8.05% (yr17, post-catastrophe hard market) → 6.23% (yr20) → 7.83% (yr25). Both directions of rate movement are present.
+- `ApTp` factor tracks the cycle: floor-bound at 0.90 for five consecutive benign years (yrs 9, 11–15), spiking to 1.16–1.25 post-catastrophe double-cat years (yrs 16, 18, 24).
+- Total capital accumulates: 1.20B initial → 1.80B by year 25, confirming premiums outpace long-run claims at current pricing. Capital dips of −0.13B (yr16) and −0.07B (yr24) confirm catastrophe-driven erosion. No insolvencies.
+- Capital entry fires correctly: entrants in years 16, 17, 18, 24, 25 track the hard market signal.
 
-The supply-side contraction and price hardening are correct in sign and qualitatively realistic. With AP/TP active, quiet periods now generate soft-market rate compression (AP/TP → 0.90), creating the vulnerability gap that makes the next catastrophe more damaging — and triggering the hard-market recovery arc. The cycle signal is now present in both directions.
+**Hard market collapse — structural gaps:** the rate spike following year 16 (8.05% in yr17) collapses back to 6.23% by year 20 — a 1.82pp softening in 3 years — despite year 18 producing an 85% LossR. Two structural gaps drive this premature collapse:
 
-**Remaining mechanism — capital entry dynamics (step 4):** entry is now AP/TP-driven (`market_ap_tp_factor > 1.10`, 1-year cooldown) — the profit-signal mechanism that empirically drives Bermuda class formation. For full cycle oscillation the new entrants must build sufficient broker relationships to materially expand capacity (relationship-building lag not yet implemented), and soft-market voluntary exit (§7.4) must be added to close the lower tail of the cycle.
+1. **Demand inelasticity.** All insureds have a fixed reservation price and buy fixed SI. In the real market, buyers re-enter after quiet periods, expand limits when rates are fair, and self-insure or reduce coverage when rates spike — creating demand-side pressure that absorbs or resists the capacity movement. With flat demand, new capital has nowhere to go except to lower rates: there is no additional premium volume to absorb the entrants.
 
-*AP/TP mechanism active (step 1). Capacity entry active — AP/TP-driven (step 4). Full oscillatory cycle requires soft-market exit mechanism and broker relationship-building dynamics.*
+2. **Coordinator-broadcast pricing.** All insurers apply the same `market_ap_tp_factor` from the coordinator. Price discovery is not competitive — no insurer can hold rates while others soften, and no insurer can undercut to gain share. In the real market, syndicates set individual prices; the hard market sustains longer because individual syndicates rationally hold their rates until their own capital is restored.
+
+**Remaining mechanisms for full cycle oscillation:**
+- Soft-market voluntary exit (market-mechanics.md §7.4) — without exit, supply never contracts in benign periods; the lower phase of the cycle is missing.
+- Demand elasticity — buyers must be able to adjust coverage quantity (limit, deductible, self-insurance) so demand responds to price and amplifies both the hard and soft phases.
+- Competitive individual pricing — distributed price-setting rather than a single coordinator signal would allow rate differentials between capital-rich and capital-poor insurers, sustaining the hard market while capital recovers.
+
+*AP/TP mechanism active (step 1). Capital entry active (step 4). Cycle signal present in both directions. Full oscillatory cycle requires demand elasticity, soft-market exit, and competitive individual pricing. Phased implementation plan with falsifiable hypotheses per phase: `docs/roadmap.md`.*
 
 ---
 
@@ -81,7 +85,7 @@ The supply-side contraction and price hardening are correct in sign and qualitat
 
 **Correlation mechanism note:** within a single catastrophe event, damage fractions across policies are sampled independently. The correlation across syndicates arises entirely from the *shared occurrence*: every syndicate writing US-SE property risks is struck by the same windstorm year. Per-policy severity remains independent; diversification *within* a single territory therefore does not reduce cat exposure materially. Only diversification *across* perils and territories reduces a syndicate's probability of being hit hard in a given year. This distinction is important: a syndicate writing 500 US-SE property risks is not more protected than one writing 50 — only one writing across US-SE, EU, and JP is.
 
-*Capital losses land correctly and insolvency processing is active: `InsurerInsolvent` is emitted on first zero-crossing and insolvent insurers decline future quotes. Year 7 (double-cat, Cats#=2) drove a $480M+ market-wide capital drop from 3.52B → 2.75B (−22%) — the shared-occurrence criterion is met. No insolvencies have occurred in canonical runs because 500M USD/insurer absorbs even a double-cat year. The capital-crisis cascade requires either more severe draws, tighter capital ratios, or an accumulation of multiple bad years without intervening capital entry.*
+*Capital losses land correctly and insolvency processing is active: `InsurerInsolvent` is emitted on first zero-crossing and insolvent insurers decline future quotes. Year 16 (double-cat, Cats#=2, LossR 151.2%) drove a market-wide capital drop from 1.40B → 1.27B (−9.3%); year 24 (double-cat, LossR 113.2%) drove a further drop from 1.73B → 1.66B (−4%). The shared-occurrence criterion is met: all 8 homogeneous insurers are struck simultaneously, confirming cross-syndicate correlation arises from the shared occurrence rather than a hardcoded parameter. No insolvencies have occurred because 150M USD/insurer at 8×150M = 1.20B total capital provides sufficient headroom — the worst single year produced ~0.23B total market claims, well below the 1.27B capital floor. The capital-crisis cascade requiring insolvencies needs either more severe draws, tighter capital-to-premium ratios, or a sustained sequence of bad years that depletes capital below the critical threshold before it can recover.*
 
 ---
 

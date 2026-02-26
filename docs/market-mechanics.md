@@ -25,7 +25,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE — capital-linked fractions (net_line_capacity=0.30, solvency_capital_fraction=0.30, pml_200 derived from cat model) | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
 | Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
 | Underwriter channel / AP/TP ratio (MS3 AvT) | ACTIVE — three-level pricing: ATP → TP (× profit loading) → AP (× market_ap_tp_factor); factor driven by trailing 3yr CR + capacity pressure | `src/insurer.rs::underwriter_premium`, `src/simulation.rs::handle_year_end` |
-| Supply / demand balance (insured reservation price) | ACTIVE — step-function demand curve; inelastic at current 6–8% rates; Dropped# is supply-constrained not demand-constrained | `src/insured.rs::on_quote_presented` |
+| Supply / demand balance (insured reservation price) | PARTIAL — step-function demand curve implemented; quantity adjustment (variable limits, deductibles, self-insurance) and demand response to loss experience not modelled; consequence: demand cannot amplify or resist rate movements, weakening cycle amplitude | `src/insured.rs::on_quote_presented` |
 | Broker relationship scores | PLANNED | — |
 | Syndicate entry / exit (capital entry) | ACTIVE — AP/TP > 1.10 trigger + new insurer spawn; 1-year cooldown; critical for underwriting cycle emergence | `src/simulation.rs::handle_year_end` |
 | Annual coordinator statistics | PLANNED | — |
@@ -132,6 +132,16 @@ Each Insured owns one or more Assets and seeks insurance coverage each year. Ins
 **Demand curve structure:** the reservation price creates a step-function demand curve — inelastic until the price ceiling is hit, then vertically zero. At canonical rates of 6–8%, demand is near-fully inelastic: every insured that can find a willing insurer will buy. The `Dropped#` column in the year table therefore measures supply-side capacity exhaustion, not demand-side price sensitivity — insureds are willing buyers shut out by capital-constrained insurers.
 
 This is a reasonable first-order model for Lloyd's *primary* commercial lines (marine, property, energy), which are largely mandatory or balance-sheet driven and for which demand is genuinely inelastic across the historical rate range. It is less appropriate for upper excess-of-loss layers, where buyers make explicit cost-benefit decisions about each additional layer and will drop remote layers when ROLs spike — a demand-side behaviour that would reduce the pressure on `Dropped#` in hard markets. Heterogeneous reservation prices by layer position would capture this, and is a future extension aligned with phenomenon 10 (Layer-Position Premium Gradient).
+
+**Structural demand gaps `[PARTIAL]`:** three demand-side mechanisms present in the real market are not yet modelled:
+
+1. *No quantity adjustment.* Each insured buys exactly one contract at full `sum_insured` with zero attachment. Real buyers adjust their programme structure in response to price — raising deductibles, reducing limits, dropping remote excess layers, or self-insuring tranches when rates spike. Without this, demand is constant regardless of price level; the market cannot price-clear through demand reduction.
+
+2. *No demand response to loss experience.* Real buyers with repeated large losses restructure their coverage (higher limits, lower attachments, multi-year contracts) or seek alternative risk transfer. Buyers with low loss histories may expand coverage in soft markets. Neither feedback is present.
+
+3. *No self-insurance or alternative risk transfer.* Captives, parametric covers, and retained deductibles are not modelled. In hard markets, a fraction of demand migrates to these alternatives, reducing the insured pool and limiting the capacity crunch. The converse — migration back to the market in soft markets — would expand demand and absorb excess capacity.
+
+**Consequence for cycle dynamics:** with flat demand, new capital entering in a hard market has no additional premium volume to absorb — the only adjustment mechanism is rate reduction. This causes rates to collapse faster than in the real market, where buyer re-entry and programme expansion absorb new capacity without immediately forcing prices down. The under-damped rate collapse seen in the canonical run (8.05% in yr17 → 6.23% by yr20 despite continued cat activity) is partly a consequence of this structural gap. See `docs/roadmap.md Phase 3` for the planned demand elasticity design.
 
 Canonical config: 100 uniform insureds (sum_insured = 50M USD each).
 
@@ -291,6 +301,8 @@ factor          = clamp(1.0 + cr_signal + capacity_uplift,  0.90,  1.40)
 Factor semantics: 0.90 = soft floor (AP = 90% of TP); 1.00 = break-even; 1.40 = hard cap (AP = 140% of TP). Insufficient history (< 2 years) defaults to 1.0 (neutral, for warmup). MS3 tracks AvT as a regulatory signal: a persistent AvT < 1.0 indicates the market is pricing below technical and flags syndicate-level intervention risk.
 
 **Calibration note:** `cat_elf` is anchored — not updated from experience — so TP does not erode during quiet cat periods. The AP/TP mechanism therefore produces rate softening through the market factor, not through technical price drift. This mirrors the MS3 Technical Rate / Actual vs Technical (AvT) distinction.
+
+**Structural pricing gap `[PARTIAL]`:** `market_ap_tp_factor` is a single coordinator-broadcast value applied identically to all insurers. All insurers therefore quote the same premium for the same risk at all times; price discovery is not competitive. In the real market each syndicate sets its own AP/TP ratio based on its own capital position, book composition, and risk appetite — a capital-depleted insurer rationally holds rates high while a well-capitalised new entrant may price more aggressively. The consequence: in the current model a hard market softens as soon as the 3-year CR average normalises, regardless of individual insurers' capital recovery status. Distributed individual pricing — where each insurer's `ap_tp_factor` reflects its own capital buffer and loss experience — is required before the hard-market duration will match empirical norms. See `docs/roadmap.md Phase 1` for the planned design and diagnostic hypotheses.
 
 **Inputs:**
 - Current market cycle indicator (coordinator-published annually; derived from aggregate premium movement — see §8).
@@ -512,7 +524,17 @@ Central Fund and managed runoff remain `[TBD]` (§7.3).
 
 ### §7.4 Voluntary exit `[TBD]`
 
-Whether to model voluntary capital withdrawal during soft markets is not yet decided.
+Without voluntary exit, market supply never contracts except through insolvency. In the current model, once an insurer enters it writes business indefinitely as long as it remains solvent. This creates a structural asymmetry: supply expands in hard markets (entry trigger at AP/TP > 1.10) but never contracts in soft markets — a ratchet that inflates capacity monotonically over time.
+
+The real market corrects in both directions. When sustained soft pricing drives combined ratios above 100% for multiple years, syndicates withdraw from unprofitable lines, reduce their stamp capacity (maximum NPI), or run off their books voluntarily. Managing agents return capital to Names rather than deploying it at sub-cost-of-capital rates. The aggregate effect is a supply contraction that stabilises rates in soft markets, preventing them from falling indefinitely.
+
+**Diagnostic in current output:** TotalCap grows from 1.20B (initial) to 1.80B by year 25 despite two severe cat years — a 50% capital increase over 20 years. In-force policy count is constrained by the cat agg limit, so expanded capital does not translate into materially more written premium per insurer. The capital accumulates rather than being returned, implying insurers have no mechanism to exit when returns are poor.
+
+**Design options:**
+- *Profit-floor exit:* if an insurer's 3-year average combined ratio exceeds a threshold (e.g. 110%), it exits the broker round-robin but does not become insolvent — existing policies run off. Re-entry is possible when market AP/TP rises above the entry threshold.
+- *Capital withdrawal:* insurers return excess capital to par when TotalCap exceeds a target multiple of required premium capacity. This caps accumulation without requiring insolvency.
+
+The interaction with phenomenon 1 (Underwriting Cycle) is direct: voluntary exit closes the lower tail of the cycle. Without it, the soft market has no natural floor other than the AP/TP hard floor (0.90 × TP), and the hard market cannot persist long enough to attract meaningful capital because the existing over-capitalised insurers immediately resume writing at the lower rate. See `docs/roadmap.md Phase 2` for design options and diagnostic hypotheses.
 
 ---
 
