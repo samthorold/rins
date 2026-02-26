@@ -326,6 +326,93 @@ mod tests {
         }
     }
 
+    // ── Pareto severity range tests ───────────────────────────────────────────
+
+    /// Canonical Pareto(scale=0.04): all samples must be ≥ scale (the distribution
+    /// minimum). The rand_distr Pareto is parameterised over [scale, ∞).
+    #[test]
+    fn pareto_damage_fraction_never_below_scale() {
+        let scale = 0.04;
+        let model = DamageFractionModel::Pareto { scale, shape: 2.5, cap: 0.50 };
+        let mut rng = rng();
+        for _ in 0..10_000 {
+            let v = model.sample(&mut rng);
+            assert!(v >= scale, "Pareto sample {v} is below scale {scale}");
+        }
+    }
+
+    /// Canonical Pareto with cap=0.50: all samples must be ≤ cap after truncation.
+    #[test]
+    fn pareto_damage_fraction_never_above_cap() {
+        let cap = 0.50;
+        let model = DamageFractionModel::Pareto { scale: 0.04, shape: 2.5, cap };
+        let mut rng = rng();
+        for _ in 0..10_000 {
+            let v = model.sample(&mut rng);
+            assert!(v <= cap, "Pareto sample {v} exceeds cap {cap}");
+        }
+    }
+
+    // ── Multi-territory scheduling tests ──────────────────────────────────────
+
+    /// With 3 territories in config, every scheduled LossEvent must target a
+    /// territory that appears in the config list — never an unknown value.
+    #[test]
+    fn schedule_loss_events_assigns_known_territories() {
+        let territories =
+            vec!["US-NE".to_string(), "US-SE".to_string(), "US-Gulf".to_string()];
+        let cfg = CatConfig {
+            annual_frequency: 20.0,
+            pareto_scale: 0.04,
+            pareto_shape: 2.5,
+            max_damage_fraction: 0.50,
+            territories: territories.clone(),
+        };
+        let mut rng = rng();
+        let mut next_id = 0u64;
+        for y in 1..=20u32 {
+            for (_, e) in schedule_loss_events(&cfg, Year(y), &mut rng, &mut next_id) {
+                if let Event::LossEvent { territory, .. } = e {
+                    assert!(
+                        territories.contains(&territory),
+                        "event territory '{territory}' not in config list"
+                    );
+                }
+            }
+        }
+    }
+
+    /// With λ=20 and 3 territories over 20 years (~400 total events), each territory
+    /// must receive a statistically significant share. Requires ≥ 50 events each
+    /// (expected ≈133). Probability of failing on seed=42 is negligible.
+    #[test]
+    fn schedule_loss_events_covers_all_territories() {
+        use std::collections::HashMap;
+        let territories =
+            vec!["US-NE".to_string(), "US-SE".to_string(), "US-Gulf".to_string()];
+        let cfg = CatConfig {
+            annual_frequency: 20.0,
+            pareto_scale: 0.04,
+            pareto_shape: 2.5,
+            max_damage_fraction: 0.50,
+            territories: territories.clone(),
+        };
+        let mut rng = rng();
+        let mut next_id = 0u64;
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for y in 1..=20u32 {
+            for (_, e) in schedule_loss_events(&cfg, Year(y), &mut rng, &mut next_id) {
+                if let Event::LossEvent { territory, .. } = e {
+                    *counts.entry(territory).or_insert(0) += 1;
+                }
+            }
+        }
+        for t in &territories {
+            let n = counts.get(t).copied().unwrap_or(0);
+            assert!(n >= 50, "territory '{t}' received only {n} events (expected ≈133)");
+        }
+    }
+
     /// Pareto(scale=1.0, shape=2.0) always samples ≥ 1.0, clipped to 1.0
     /// → ground_up_loss must equal sum_insured.
     #[test]

@@ -523,6 +523,103 @@ mod tests {
         }
     }
 
+    /// Two insureds in US-SE with different sum_insured values. Using a model that
+    /// always produces df=1.0 (Pareto scale=1.0), GUL must equal each insured's own SI.
+    /// This confirms the shared damage fraction scales proportionally with sum_insured.
+    #[test]
+    fn cat_gul_proportional_to_sum_insured_same_territory() {
+        let mut market = Market::new();
+        let si_small = ASSET_VALUE;
+        let si_large = ASSET_VALUE * 2;
+        // register_insured directly — on_loss_event only needs insured_registry.
+        market.register_insured(InsuredId(1), "US-SE", si_small);
+        market.register_insured(InsuredId(2), "US-SE", si_large);
+
+        // full_damage_models: Pareto(scale=1.0) → df always clips to 1.0.
+        let events = market.on_loss_event(
+            Day(100),
+            Peril::WindstormAtlantic,
+            "US-SE",
+            &full_damage_models(),
+            &mut rng(),
+        );
+        assert_eq!(events.len(), 2);
+        let guls: HashMap<InsuredId, u64> = events
+            .iter()
+            .filter_map(|(_, e)| {
+                if let Event::AssetDamage { insured_id, ground_up_loss, .. } = e {
+                    Some((*insured_id, *ground_up_loss))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            guls[&InsuredId(1)], si_small,
+            "small insured GUL must equal SI_small when df=1.0"
+        );
+        assert_eq!(
+            guls[&InsuredId(2)], si_large,
+            "large insured GUL must equal SI_large when df=1.0"
+        );
+    }
+
+    /// A LossEvent striking a territory with no registered insureds must emit nothing.
+    #[test]
+    fn loss_event_to_empty_territory_emits_nothing() {
+        let mut market = Market::new();
+        market.register_insured(InsuredId(1), "US-SE", ASSET_VALUE);
+        // Strike US-Gulf — no insureds there.
+        let events = market.on_loss_event(
+            Day(100),
+            Peril::WindstormAtlantic,
+            "US-Gulf",
+            &full_damage_models(),
+            &mut rng(),
+        );
+        assert!(
+            events.is_empty(),
+            "no AssetDamage when struck territory has no registered insureds"
+        );
+    }
+
+    /// Three insureds in three different territories. Striking each territory in
+    /// turn must produce exactly one AssetDamage for the matching insured.
+    #[test]
+    fn loss_event_strikes_correct_subset_across_three_territories() {
+        let mut market = Market::new();
+        let iid_ne = InsuredId(10);
+        let iid_se = InsuredId(11);
+        let iid_gulf = InsuredId(12);
+        market.register_insured(iid_ne, "US-NE", ASSET_VALUE);
+        market.register_insured(iid_se, "US-SE", ASSET_VALUE);
+        market.register_insured(iid_gulf, "US-Gulf", ASSET_VALUE);
+
+        for (territory, expected_iid) in [
+            ("US-SE", iid_se),
+            ("US-Gulf", iid_gulf),
+            ("US-NE", iid_ne),
+        ] {
+            let events = market.on_loss_event(
+                Day(100),
+                Peril::WindstormAtlantic,
+                territory,
+                &full_damage_models(),
+                &mut rng(),
+            );
+            assert_eq!(events.len(), 1, "territory {territory}: expected exactly 1 AssetDamage");
+            match &events[0].1 {
+                Event::AssetDamage { insured_id, .. } => {
+                    assert_eq!(
+                        *insured_id, expected_iid,
+                        "territory {territory}: wrong insured hit"
+                    );
+                }
+                e => panic!("expected AssetDamage, got {e:?}"),
+            }
+        }
+    }
+
     #[test]
     fn on_loss_event_only_hits_insureds_in_matching_territory() {
         // Insured A in US-SE; insured B in US-NE.
