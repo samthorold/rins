@@ -35,6 +35,8 @@ pub struct YearStats {
     pub exit_count: u32,
     /// Count of InsurerReEntered events in the year (runoff insurer re-entering).
     pub re_entry_count: u32,
+    /// Active insurer count at year-end (after entries, exits, insolvencies).
+    pub insurer_count: u32,
     /// AP/TP ratio in effect at the start of this year (computed from prior-year trailing CRs).
     /// 1.0 = neutral; < 1.0 = soft market; > 1.0 = hard market.
     pub ap_tp_factor: f64,
@@ -57,6 +59,7 @@ impl YearStats {
             entrant_count: 0,
             exit_count: 0,
             re_entry_count: 0,
+            insurer_count: 0,
             ap_tp_factor: 0.0,
         }
     }
@@ -297,6 +300,7 @@ pub fn analyse(
     let mut stats: HashMap<u32, YearStats> = HashMap::new();
     let mut last_capital: HashMap<InsurerId, u64> = initial_capitals.clone();
     let mut assets_seen: HashMap<u32, HashSet<InsuredId>> = HashMap::new();
+    let mut active_insurer_count = initial_capitals.len() as u32;
 
     for sim_event in events {
         let year = sim_event.day.year().0;
@@ -320,6 +324,7 @@ pub fn analyse(
                 }
             }
             Event::InsurerInsolvent { .. } => {
+                active_insurer_count = active_insurer_count.saturating_sub(1);
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.insolvent_count += 1;
             }
@@ -333,14 +338,17 @@ pub fn analyse(
             }
             Event::InsurerEntered { insurer_id, initial_capital, .. } => {
                 last_capital.insert(*insurer_id, *initial_capital);
+                active_insurer_count += 1;
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.entrant_count += 1;
             }
             Event::InsurerExited { .. } => {
+                active_insurer_count = active_insurer_count.saturating_sub(1);
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.exit_count += 1;
             }
             Event::InsurerReEntered { .. } => {
+                active_insurer_count += 1;
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.re_entry_count += 1;
             }
@@ -352,10 +360,11 @@ pub fn analyse(
                 }
             }
             Event::YearEnd { year: y } => {
-                // Snapshot total capital at year boundary.
+                // Snapshot total capital and active insurer count at year boundary.
                 let total_cap: u64 = last_capital.values().sum();
                 let s = stats.entry(y.0).or_insert_with(|| YearStats::zero(y.0));
                 s.total_capital = total_cap;
+                s.insurer_count = active_insurer_count;
             }
             _ => {}
         }

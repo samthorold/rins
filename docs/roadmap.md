@@ -12,7 +12,7 @@ The canonical run (seed=42, 8×150M insurers, 100 insureds, 25 analysis years) s
 
 **Gap 1 — Coordinator-broadcast pricing.** All insurers apply the same `market_ap_tp_factor`, computed from the market-aggregate 3-year CR. A capital-depleted incumbent prices identically to a flush new entrant. There is no mechanism for insurers to hold rates while competitors soften, so the hard market collapses as soon as the aggregate CR signal normalises — regardless of individual capital recovery status.
 
-**Gap 2 — No voluntary exit, and uncapped entry count.** Insurers enter when AP/TP > 1.10 but never leave except via insolvency. Supply is a ratchet: it expands in hard markets and holds in soft ones. The resulting monotonic capital accumulation prevents the soft-market phase of the cycle from developing.
+**Gap 2 — No voluntary exit, and uncapped entry count.** `[Fixed — Phase 2]` Insurers enter when AP/TP > 1.10 but never leave except via insolvency. Supply is a ratchet: it expands in hard markets and holds in soft ones. The resulting monotonic capital accumulation prevents the soft-market phase of the cycle from developing.
 
 A companion sub-gap on the entry side: the 1-year cooldown constrains the *timing* of entry but not the *total* number of entrants. A sustained 10-year hard market would spawn 10 new insurers on top of the starting 8 — more than doubling capacity — with no declining marginal attractiveness signal. The real market has a finite pool of willing capital with a rising supply curve: the nth entrant requires higher expected returns than the (n-1)th because it draws from progressively less-experienced or higher-hurdle capital sources. The model assumes flat, infinite supply. Both the exit floor and the entry ceiling are needed for a symmetric supply response; fixing only voluntary exit leaves the entry side uncapped.
 
@@ -58,20 +58,18 @@ Secondary hypotheses:
 
 ---
 
-## Phase 2 — Voluntary exit (soft-market capital withdrawal)
+## Phase 2 — Voluntary exit (soft-market capital withdrawal) `[DONE — 2026-02-27]`
 
-**Mechanism.** After each `YearEnd`, each insurer evaluates whether to continue writing new business. If the insurer's own 3-year average combined ratio exceeds a `runoff_threshold` (e.g. 105%) *and* the insurer is not in a capital-recovery phase (own capital > some floor, e.g. 90% of initial), it enters runoff: stops accepting new submissions, lets in-force policies expire naturally, and logs an `InsurerExited` event. The broker removes it from the round-robin. It may re-enter when the market AP/TP signal rises above the entry threshold.
+**Mechanism.** After each `YearEnd`, each insurer evaluates whether to continue writing new business. If the insurer's own 3-year average combined ratio exceeds `runoff_cr_threshold` (canonical: 1.05) *and* capital > `capital_exit_floor × initial_capital` (canonical: 0.90), it enters runoff: stops accepting new submissions, lets in-force policies expire naturally, and logs an `InsurerExited` event. The broker removes it from the round-robin. It re-enters when the market AP/TP signal rises above 1.10.
 
-A weaker alternative: capital return. When an insurer's capital exceeds a target multiple of its annual premium (e.g. 3.0×), it pays a dividend back to par. This caps the monotonic capital accumulation without requiring the full entry/exit mechanic.
-
-**Primary hypothesis.** Market total capital stops monotonically accumulating. In multi-year benign stretches (yrs 9–15 in the canonical run: 7 consecutive years with no cats and CombR averaging ~82%), one or more insurers exit or return capital, reducing supply and establishing a soft-market rate floor. Combined with Phase 1, the market transitions from a one-sided ratchet into a full oscillatory cycle: capacity entry in hard markets, exit in soft ones.
+**Primary hypothesis — confirmed.** A clear two-sided supply cycle emerges. Year 8 (CombR 112.7%, 1 cat) triggers 3 voluntary exits, dropping the market from 5 to 2 active insurers. The 2 survivors write profitably (CombR ~77–99%) but capacity is severely constrained: 43–51 policies dropped per year throughout years 9–20 vs 0 in years 6–8. Year 20 (3 cat events, LR 150.4%, AP/TP 1.43) triggers a re-entry wave of 9 new insurers in a single year, fully restoring capacity by year 21 (Dropped# drops from 51 to 0). The market then oscillates through a new exit wave (years 22–24, –4, –2, –1) as the soft-market CR signal triggers voluntary withdrawal again. Supply is no longer a one-sided ratchet.
 
 **Secondary hypotheses.**
-- TotalCap(B) shows mean-reversion rather than monotonic growth. The range [1.0B, 1.6B] replaces the current [1.2B, 1.8B] trend.
-- Dropped# rises in soft markets as exiting insurers remove capacity, not only in hard markets following capital depletion.
-- Hard market amplitude increases: with fewer surviving insurers, the remaining ones can hold rates higher before new entrants appear.
+- TotalCap(B) non-monotonic — *confirmed*: capital falls from 1.29B (yr 19) to 1.22B (yr 20) during the cat cluster, recovers to 1.65B post-entry wave, then drifts back to 1.58B as exits re-fire. The monotonic accumulation of Phase 1 is broken.
+- Dropped# rises in capacity-constrained years — *confirmed*: 43–51 dropped/year in the 2-insurer period (yrs 9–20), dropping to 0 immediately on re-entry. Demand-driven rejection not yet distinguishable (Phase 3).
+- Hard market amplitude increases — *confirmed*: AP/TP reaches 1.43 in year 20 vs a maximum of ~1.08 in the Phase 1 canonical run. Fewer surviving insurers hold rates higher before new entrants appear.
 
-**Diagnostics.** New `InsurerExited` event in year table. Watch TotalCap(B) for reversal or plateau in years 9–15. Compare `Entrants#` vs implied exits to see net capacity movement.
+**Does not fix.** Demand inelasticity (Gap 3). Buyers still purchase fixed-SI coverage at fixed terms regardless of rate level. Without demand response, the cycle is supply-side only — it oscillates, but amplitude and period are driven entirely by capital flows rather than the two-sided equilibrium the real market exhibits.
 
 **Does not fix.** Demand inelasticity. Buyers still buy fixed-SI at fixed terms regardless of rate level. Without demand response, the cycle is supply-side only — it oscillates, but the amplitude and period are driven entirely by capital flows rather than by the two-sided equilibrium the real market exhibits.
 

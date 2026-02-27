@@ -223,10 +223,10 @@ fn main() {
 
     println!("=== Tier 2 — Year Character Table ===");
     println!(
-        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>10} | {:>8} | {:>9} | {:>7} | {:>6}",
-        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "AvgCR3%", "Rate%", "Cats#", "TotalCap(B)", "Insolvent#", "Dropped#", "Entrants#", "Exits#", "ApTp"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>6} | {:>10}",
+        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "AvgCR3%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers"
     );
-    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 12 + 3 + 10 + 3 + 11 + 3 + 8));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10));
 
     let mut recent_lrs: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
 
@@ -303,8 +303,19 @@ fn main() {
         } else {
             "  n/a ".to_string()
         };
+        let insurer_str = {
+            let base = format!("{}", s.insurer_count);
+            let plus = s.entrant_count + s.re_entry_count;
+            let minus = s.exit_count + s.insolvent_count;
+            match (plus > 0, minus > 0) {
+                (true, true)  => format!("{base} +{plus}-{minus}"),
+                (true, false) => format!("{base} +{plus}"),
+                (false, true) => format!("{base} -{minus}"),
+                (false, false) => base,
+            }
+        };
         println!(
-            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>10} | {:>8} | {:>9} | {:>7} | {}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>8} | {} | {}",
             s.year,
             assets_b,
             gul_b,
@@ -316,11 +327,9 @@ fn main() {
             rol_pct,
             s.cat_event_count,
             cap_b,
-            s.insolvent_count,
             s.dropped_count,
-            s.entrant_count,
-            s.exit_count,
             ap_tp_str,
+            insurer_str,
         );
     }
     println!();
