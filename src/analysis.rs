@@ -31,11 +31,7 @@ pub struct YearStats {
     pub cat_event_count: u32,
     /// Count of InsurerEntered events in the year.
     pub entrant_count: u32,
-    /// Count of InsurerExited events in the year (voluntary runoff).
-    pub exit_count: u32,
-    /// Count of InsurerReEntered events in the year (runoff insurer re-entering).
-    pub re_entry_count: u32,
-    /// Active insurer count at year-end (after entries, exits, insolvencies).
+    /// Active insurer count at year-end (after entries and insolvencies).
     pub insurer_count: u32,
     /// AP/TP ratio in effect at the start of this year (computed from prior-year trailing CRs).
     /// 1.0 = neutral; < 1.0 = soft market; > 1.0 = hard market.
@@ -60,8 +56,6 @@ impl YearStats {
             total_assets: 0,
             cat_event_count: 0,
             entrant_count: 0,
-            exit_count: 0,
-            re_entry_count: 0,
             insurer_count: 0,
             ap_tp_factor: 0.0,
             gini_market_share: 0.0,
@@ -367,16 +361,6 @@ pub fn analyse(
                 active_insurer_count += 1;
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.entrant_count += 1;
-            }
-            Event::InsurerExited { .. } => {
-                active_insurer_count = active_insurer_count.saturating_sub(1);
-                let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
-                s.exit_count += 1;
-            }
-            Event::InsurerReEntered { .. } => {
-                active_insurer_count += 1;
-                let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
-                s.re_entry_count += 1;
             }
             Event::CoverageRequested { insured_id, risk } => {
                 let seen = assets_seen.entry(year).or_default();
@@ -1216,8 +1200,6 @@ mod tests {
             quotes_per_submission: None,
             max_rate_on_line: 1.0,
             disable_cats: false,
-            runoff_cr_threshold: 2.0,
-            capital_exit_floor: 0.0,
         }
     }
 

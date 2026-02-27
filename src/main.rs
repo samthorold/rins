@@ -238,7 +238,7 @@ fn print_analysis(
         let ap_tp_str = if n >= 2 {
             let avg_lr = recent_lrs.iter().sum::<f64>() / n as f64;
             let avg_cr = avg_lr + expense_ratio;
-            let cr_signal = (avg_cr - 1.0_f64).clamp(-0.25, 0.40);
+            let cr_signal = (avg_cr - 1.0_f64).clamp(-0.30, 0.80);
             let capacity_uplift = if s.dropped_count > 10 { 0.05 } else { 0.0 };
             let factor = 1.0 + cr_signal + capacity_uplift;
             format!("{:>6.2}", factor)
@@ -247,8 +247,8 @@ fn print_analysis(
         };
         let insurer_str = {
             let base = format!("{}", s.insurer_count);
-            let plus = s.entrant_count + s.re_entry_count;
-            let minus = s.exit_count + s.insolvent_count;
+            let plus = s.entrant_count;
+            let minus = s.insolvent_count;
             match (plus > 0, minus > 0) {
                 (true, true)  => format!("{base} +{plus}-{minus}"),
                 (true, false) => format!("{base} +{plus}"),

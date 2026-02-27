@@ -59,12 +59,6 @@ impl Broker {
         self.relationship_scores.entry(id).or_insert(0.0);
     }
 
-    /// Remove an insurer from the routing pool (e.g. voluntary runoff).
-    /// Score is retained in `relationship_scores` so a re-entrant gets their old score back.
-    pub fn remove_insurer(&mut self, id: InsurerId) {
-        self.insurer_ids.retain(|&i| i != id);
-    }
-
     /// A policy was bound with this insurer. Increment their relationship score by 1.0.
     pub fn on_policy_bound(&mut self, insurer_id: InsurerId) {
         *self.relationship_scores.entry(insurer_id).or_insert(0.0) += 1.0;
@@ -587,45 +581,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn re_entrant_retains_score() {
-        // Score insurer 1 to 2.0, remove from pool, re-add — score must still be ~2.0.
-        let mut broker = broker_with_insurers(1, vec![1]);
-        broker.on_policy_bound(InsurerId(1));
-        broker.on_policy_bound(InsurerId(1)); // score = 2.0
-        broker.remove_insurer(InsurerId(1));
-        broker.add_insurer(InsurerId(1)); // re-entry: or_insert keeps existing score
-        assert!((broker.score_of(InsurerId(1)).unwrap() - 2.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn remove_insurer_shrinks_pool() {
-        // Start with 3 insurers [1, 2, 3]; solicit 1 per submission; remove insurer 2.
-        // Two subsequent CoverageRequested events must route only to insurers 1 and 3.
-        let mut broker = broker_with_qps(2, vec![1, 2, 3], 1);
-        broker.remove_insurer(InsurerId(2));
-
-        let risk = small_risk();
-        let events1 = broker.on_coverage_requested(Day(0), InsuredId(1), risk.clone());
-        let events2 = broker.on_coverage_requested(Day(0), InsuredId(2), risk);
-
-        let routed: Vec<InsurerId> = events1
-            .iter()
-            .chain(events2.iter())
-            .filter_map(|(_, e)| {
-                if let Event::LeadQuoteRequested { insurer_id, .. } = e {
-                    Some(*insurer_id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        assert_eq!(routed.len(), 2, "one quote per submission → 2 total");
-        for id in &routed {
-            assert_ne!(*id, InsurerId(2), "removed insurer must not receive quotes");
-        }
-        // Both remaining insurers should appear (round-robin with 2 remaining).
-        assert!(routed.contains(&InsurerId(1)) || routed.contains(&InsurerId(3)));
-    }
 }

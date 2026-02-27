@@ -12,7 +12,7 @@ The canonical run (seed=42, 8×150M insurers, 100 insureds, 25 analysis years) s
 
 **Gap 1 — Coordinator-broadcast pricing.** All insurers apply the same `market_ap_tp_factor`, computed from the market-aggregate 3-year CR. A capital-depleted incumbent prices identically to a flush new entrant. There is no mechanism for insurers to hold rates while competitors soften, so the hard market collapses as soon as the aggregate CR signal normalises — regardless of individual capital recovery status.
 
-**Gap 2 — No voluntary exit, and uncapped entry count.** `[Fixed — Phase 2]` Insurers enter when AP/TP > 1.10 but never leave except via insolvency. Supply is a ratchet: it expands in hard markets and holds in soft ones. The resulting monotonic capital accumulation prevents the soft-market phase of the cycle from developing.
+**Gap 2 — No voluntary exit, and uncapped entry count.** `[Deferred — see Phase 2]` Insurers enter when AP/TP > 1.10 but never leave except via insolvency. Supply is a ratchet: it expands in hard markets and holds in soft ones. The resulting monotonic capital accumulation prevents the soft-market phase of the cycle from developing.
 
 A companion sub-gap on the entry side: the 1-year cooldown constrains the *timing* of entry but not the *total* number of entrants. A sustained 10-year hard market would spawn 10 new insurers on top of the starting 8 — more than doubling capacity — with no declining marginal attractiveness signal. The real market has a finite pool of willing capital with a rising supply curve: the nth entrant requires higher expected returns than the (n-1)th because it draws from progressively less-experienced or higher-hurdle capital sources. The model assumes flat, infinite supply. Both the exit floor and the entry ceiling are needed for a symmetric supply response; fixing only voluntary exit leaves the entry side uncapped.
 
@@ -52,26 +52,19 @@ Primary hypothesis — *partially confirmed.* The year-16 double-cat (LossR=146.
 Secondary hypotheses:
 - Rate dispersion **confirmed**: CV of quoted premiums is 0.07–0.18 in every post-warmup year (Year 1 = 0.00 as expected — new entrants, no experience). Dispersion is persistent, not just post-cat.
 - New-entrant market share — *not yet measurable* from the year table; requires per-insurer bound-policy counts (Phase 4 diagnostic).
-- 5+ year hard-market duration — *not yet reached*; extended from 3 to ~4 years; Phase 2 (voluntary exit) needed for full confirmation.
+- 5+ year hard-market duration — *not yet reached*; extended from 3 to ~4 years; soft-market supply contraction (variable line sizes, deferred) needed for full confirmation.
 
 **Does not fix.** Demand inelasticity (Gap 3) and supply ratchet (Gap 2). The rate erosion mechanism shifts from administrative to competitive, but there is still no demand-side resistance and no voluntary exit to close the soft-market floor.
 
 ---
 
-## Phase 2 — Voluntary exit (soft-market capital withdrawal) `[DONE — 2026-02-27]`
+## Phase 2 — Voluntary exit (soft-market capital withdrawal) `[REMOVED]`
 
-**Mechanism.** After each `YearEnd`, each insurer evaluates whether to continue writing new business. If the insurer's own 3-year average combined ratio exceeds `runoff_cr_threshold` (canonical: 1.05) *and* capital > `capital_exit_floor × initial_capital` (canonical: 0.90), it enters runoff: stops accepting new submissions, lets in-force policies expire naturally, and logs an `InsurerExited` event. The broker removes it from the round-robin. It re-enters when the market AP/TP signal rises above 1.10.
+**Rationale for removal.** The binary exit/re-entry mechanism produced unrealistic synchronised behaviour: all insurers sharing similar loss histories hit the runoff CR threshold simultaneously (mass exits in a single year), and all runoff insurers flooded back the moment `market_ap_tp_factor > 1.10` (mass re-entries). Swings like +9/−7 insurers in a single year bear no resemblance to Lloyd's market dynamics.
 
-**Primary hypothesis — confirmed.** A clear two-sided supply cycle emerges. Year 8 (CombR 112.7%, 1 cat) triggers 3 voluntary exits, dropping the market from 5 to 2 active insurers. The 2 survivors write profitably (CombR ~77–99%) but capacity is severely constrained: 43–51 policies dropped per year throughout years 9–20 vs 0 in years 6–8. Year 20 (3 cat events, LR 150.4%, AP/TP 1.43) triggers a re-entry wave of 9 new insurers in a single year, fully restoring capacity by year 21 (Dropped# drops from 51 to 0). The market then oscillates through a new exit wave (years 22–24, –4, –2, –1) as the soft-market CR signal triggers voluntary withdrawal again. Supply is no longer a one-sided ratchet.
+More fundamentally, binary class exit is the wrong abstraction. Lloyd's syndicates almost never fully withdraw from a class — they reduce participation (line sizes), price themselves out of bad business, or tighten terms. Full class exit carries heavy relational and regulatory costs and is not a lever syndicates use routinely. The intended soft-market withdrawal effect will emerge naturally from variable line sizes and more faithful capital management, which are planned but not yet implemented.
 
-**Secondary hypotheses.**
-- TotalCap(B) non-monotonic — *confirmed*: capital falls from 1.29B (yr 19) to 1.22B (yr 20) during the cat cluster, recovers to 1.65B post-entry wave, then drifts back to 1.58B as exits re-fire. The monotonic accumulation of Phase 1 is broken.
-- Dropped# rises in capacity-constrained years — *confirmed*: 43–51 dropped/year in the 2-insurer period (yrs 9–20), dropping to 0 immediately on re-entry. Demand-driven rejection not yet distinguishable (Phase 3).
-- Hard market amplitude increases — *confirmed*: AP/TP reaches 1.43 in year 20 vs a maximum of ~1.08 in the Phase 1 canonical run. Fewer surviving insurers hold rates higher before new entrants appear.
-
-**Does not fix.** Demand inelasticity (Gap 3). Buyers still purchase fixed-SI coverage at fixed terms regardless of rate level. Without demand response, the cycle is supply-side only — it oscillates, but amplitude and period are driven entirely by capital flows rather than the two-sided equilibrium the real market exhibits.
-
-**Does not fix.** Demand inelasticity. Buyers still buy fixed-SI at fixed terms regardless of rate level. Without demand response, the cycle is supply-side only — it oscillates, but the amplitude and period are driven entirely by capital flows rather than by the two-sided equilibrium the real market exhibits.
+**Deferred.** The mechanism will be revisited once variable participation fractions are implemented (planned). At that point, syndicates can express soft-market caution by reducing their line size rather than exiting entirely, which is the correct market abstraction. See `market-mechanics.md §7.4` for the updated design rationale.
 
 ---
 

@@ -67,7 +67,7 @@ Steps 1 and 2 are now mechanically represented: the `market_ap_tp_factor` (AP/TP
 2. **Coordinator-broadcast pricing.** All insurers apply the same `market_ap_tp_factor` from the coordinator. Price discovery is not competitive — no insurer can hold rates while others soften, and no insurer can undercut to gain share. In the real market, syndicates set individual prices; the hard market sustains longer because individual syndicates rationally hold their rates until their own capital is restored.
 
 **Remaining mechanisms for full cycle oscillation:**
-- Soft-market voluntary exit (market-mechanics.md §7.4) — without exit, supply never contracts in benign periods; the lower phase of the cycle is missing.
+- Soft-market supply contraction (market-mechanics.md §7.4, intentionally deferred) — binary exit/re-entry was removed as an unrealistic abstraction; supply contraction will emerge from variable line sizes once implemented.
 - Demand elasticity — buyers must be able to adjust coverage quantity (limit, deductible, self-insurance) so demand responds to price and amplifies both the hard and soft phases.
 - Competitive individual pricing — distributed price-setting rather than a single coordinator signal would allow rate differentials between capital-rich and capital-poor insurers, sustaining the hard market while capital recovers.
 

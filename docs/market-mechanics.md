@@ -522,19 +522,20 @@ Central Fund and managed runoff remain `[TBD]` (§7.3).
 
 **Design note:** the Central Fund is a welfare mechanism, not a cycle mechanism. It should not materially alter cycle period or amplitude.
 
-### §7.4 Voluntary exit `[TBD]`
+### §7.4 Voluntary exit `[DEFERRED]`
 
-Without voluntary exit, market supply never contracts except through insolvency. In the current model, once an insurer enters it writes business indefinitely as long as it remains solvent. This creates a structural asymmetry: supply expands in hard markets (entry trigger at AP/TP > 1.10) but never contracts in soft markets — a ratchet that inflates capacity monotonically over time.
+Binary exit/re-entry was implemented (Phase 2) but removed because it produced unrealistic synchronised behaviour: all insurers sharing similar aggregate loss histories hit the runoff threshold in the same year (mass exits), and all runoff insurers re-entered simultaneously the moment the market AP/TP factor exceeded 1.10 (mass re-entries). This bears no resemblance to the gradual, idiosyncratic capacity adjustments seen in the Lloyd's market.
 
-The real market corrects in both directions. When sustained soft pricing drives combined ratios above 100% for multiple years, syndicates withdraw from unprofitable lines, reduce their stamp capacity (maximum NPI), or run off their books voluntarily. Managing agents return capital to Names rather than deploying it at sub-cost-of-capital rates. The aggregate effect is a supply contraction that stabilises rates in soft markets, preventing them from falling indefinitely.
+**Why binary exit is the wrong abstraction.** Lloyd's syndicates almost never fully withdraw from a class. The real mechanisms are:
+- Reducing participation fractions (line sizes) — the syndicate remains on the panel but writes a smaller share of each risk.
+- Pricing discipline — maintaining rates above the market, accepting fewer submissions, and letting the broker route business elsewhere.
+- Terms tightening — raising deductibles, narrowing coverage, or adding exclusions to reduce expected loss.
 
-**Diagnostic in current output:** TotalCap grows from 1.20B (initial) to 1.80B by year 25 despite two severe cat years — a 50% capital increase over 20 years. In-force policy count is constrained by the cat agg limit, so expanded capital does not translate into materially more written premium per insurer. The capital accumulates rather than being returned, implying insurers have no mechanism to exit when returns are poor.
+Full class exit carries heavy relational costs (broker relationships built over years) and regulatory friction (Lloyd's requires significant lead time and approval). It is reserved for extreme cases, not a routine soft-market lever.
 
-**Design options:**
-- *Profit-floor exit:* if an insurer's 3-year average combined ratio exceeds a threshold (e.g. 110%), it exits the broker round-robin but does not become insolvent — existing policies run off. Re-entry is possible when market AP/TP rises above the entry threshold.
-- *Capital withdrawal:* insurers return excess capital to par when TotalCap exceeds a target multiple of required premium capacity. This caps accumulation without requiring insolvency.
+**Deferred until variable line sizes are implemented.** The intended soft-market withdrawal effect will emerge naturally once syndicates can express caution by reducing their line size rather than exiting entirely. Variable participation fractions are planned. At that point, soft-market supply contraction becomes a continuous quantity rather than a binary switch, matching the real market mechanism.
 
-The interaction with phenomenon 1 (Underwriting Cycle) is direct: voluntary exit closes the lower tail of the cycle. Without it, the soft market has no natural floor other than the AP/TP hard floor (0.90 × TP), and the hard market cannot persist long enough to attract meaningful capital because the existing over-capitalised insurers immediately resume writing at the lower rate. See `docs/roadmap.md Phase 2` for design options and diagnostic hypotheses.
+The interaction with phenomenon 1 (Underwriting Cycle) is direct: soft-market supply contraction closes the lower tail of the cycle. Until variable line sizes are in place, the model's soft-market floor is set by the AP/TP signal floor (0.70 × TP) rather than capacity withdrawal. See `docs/roadmap.md Phase 2` for the removal rationale.
 
 ---
 

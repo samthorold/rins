@@ -103,13 +103,6 @@ pub struct SimulationConfig {
     /// When true, no cat `LossEvent`s are scheduled. Attritional losses still run.
     /// Useful for isolating attritional dynamics without cat noise.
     pub disable_cats: bool,
-    /// Own 3-year average combined ratio above which an insurer voluntarily enters runoff.
-    /// Insurer must also have capital > capital_exit_floor × initial_capital.
-    /// Canonical: 1.05 — exits after three consecutive loss-making years.
-    pub runoff_cr_threshold: f64,
-    /// Fraction of initial_capital below which the insurer cannot voluntarily exit
-    /// (heads toward insolvency instead). Canonical: 0.90.
-    pub capital_exit_floor: f64,
 }
 
 /// Insured asset value: 25M USD in cents.
@@ -143,9 +136,11 @@ impl SimulationConfig {
                 .collect(),
             n_insureds: 100,
             attritional: AttritionalConfig {
-                annual_rate: 2.0,  // ~2 claims/yr per insured; freq × E[df] = ELF_att ≈ 3.0%
-                mu: -4.7,          // E[df] = exp(-4.7 + 0.5) = exp(-4.2) ≈ 1.5%
-                sigma: 1.0,
+                annual_rate: 2.0,   // ~2 claims/yr per insured; freq × E[df] = ELF_att ≈ 3.0%
+                mu: -4.245,         // E[df] = exp(-4.245 + 0.045) = exp(-4.2) ≈ 1.5% (preserved)
+                sigma: 0.3,         // tight spread — attritional = high-frequency, small losses;
+                                    // CV_per_claim ≈ 0.31 → aggregate CV across 57 policies ≈ 4%
+                                    // (was sigma=1.0 → CV≈15%, masking cat signal)
             },
             catastrophe: CatConfig {
                 annual_frequency: 0.5,    // one cat event every 2 years on average
@@ -163,8 +158,6 @@ impl SimulationConfig {
             quotes_per_submission: Some(4), // solicit top-4 (by relationship score) per submission
             max_rate_on_line: 0.15, // 15% RoL ceiling — above current band, binding post-hardening
             disable_cats: false,
-            runoff_cr_threshold: 1.05, // exits after 3 consecutive loss-making years (avg CR > 105%)
-            capital_exit_floor: 0.90,  // must retain ≥ 90% of initial capital to voluntarily exit
         }
     }
 }

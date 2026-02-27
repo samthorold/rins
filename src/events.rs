@@ -24,8 +24,6 @@ pub enum DeclineReason {
     MaxLineSizeExceeded,
     MaxCatAggregateBreached,
     Insolvent,
-    /// Insurer is in voluntary runoff; no new business accepted until re-entry.
-    InRunoff,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,13 +127,6 @@ pub enum Event {
         insurer_id: InsurerId,
         initial_capital: u64,
     },
-    /// An insurer has voluntarily entered runoff after persistent above-threshold combined
-    /// ratios. The insurer stops writing new business; in-force policies run to expiry.
-    /// Logged directly (not dispatched) at the YearEnd that triggered the decision.
-    InsurerExited { insurer_id: InsurerId },
-    /// A runoff insurer has re-entered the market after the market AP/TP factor exceeded
-    /// the entry threshold. Logged directly (not dispatched) at the triggering YearEnd.
-    InsurerReEntered { insurer_id: InsurerId },
 }
 
 /// A dispatched event with its simulation day. Position in `Simulation.log` is its implicit sequence number.
