@@ -74,6 +74,8 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
         quotes_per_submission: None,
         max_rate_on_line: 1.0,
         disable_cats: false,
+        runoff_cr_threshold: 2.0,
+        capital_exit_floor: 0.0,
     };
     let mut sim = Simulation::from_config(config);
     sim.start();

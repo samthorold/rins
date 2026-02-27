@@ -13,6 +13,9 @@ pub struct Insurer {
     /// Set to true the first time a claim drives capital to zero.
     /// An insolvent insurer declines all new quote requests but continues settling claims.
     pub insolvent: bool,
+    /// Set to true when the insurer voluntarily enters runoff.
+    /// A runoff insurer declines all new quote requests; in-force policies run to expiry.
+    pub in_runoff: bool,
     /// Actuarial channel: E[attritional_loss] / sum_insured.
     /// Updated each YearEnd via EWMA from realized attritional burning cost.
     attritional_elf: f64,
@@ -49,6 +52,11 @@ pub struct Insurer {
     own_loss_ratios: VecDeque<f64>,
     /// Number of years of own experience accumulated; drives credibility weight.
     own_years: u32,
+    /// Own 3-year average combined ratio above which the insurer voluntarily enters runoff.
+    runoff_cr_threshold: f64,
+    /// Capital floor (as fraction of initial_capital) below which voluntary exit is blocked.
+    /// An insurer below this floor is heading toward insolvency, not runoff.
+    capital_exit_floor: f64,
 }
 
 /// Minimum weight always given to the market AP/TP factor, even at full own-experience credibility.
@@ -69,11 +77,14 @@ impl Insurer {
         solvency_capital_fraction: Option<f64>,
         pml_damage_fraction_200: f64,
         depletion_sensitivity: f64,
+        runoff_cr_threshold: f64,
+        capital_exit_floor: f64,
     ) -> Self {
         Insurer {
             id,
             capital: initial_capital,
             insolvent: false,
+            in_runoff: false,
             attritional_elf,
             cat_elf,
             target_loss_ratio,
@@ -90,6 +101,8 @@ impl Insurer {
             depletion_sensitivity,
             own_loss_ratios: VecDeque::new(),
             own_years: 0,
+            runoff_cr_threshold,
+            capital_exit_floor,
         }
     }
 
@@ -107,6 +120,17 @@ impl Insurer {
         risk: &Risk,
         market_ap_tp_factor: f64,
     ) -> Vec<(Day, Event)> {
+        if self.in_runoff {
+            return vec![(
+                day,
+                Event::LeadQuoteDeclined {
+                    submission_id,
+                    insured_id,
+                    insurer_id: self.id,
+                    reason: DeclineReason::InRunoff,
+                },
+            )];
+        }
         if self.insolvent {
             return vec![(
                 day,
@@ -292,6 +316,24 @@ impl Insurer {
                 }
             }
         }
+
+        // Voluntary runoff check: exit when own 3-year avg CR exceeds threshold
+        // AND capital is still healthy enough to run off (above exit floor).
+        // Requires at least 3 years of own premium history for a credible signal.
+        if !self.in_runoff
+            && !self.insolvent
+            && self.own_loss_ratios.len() >= 3
+            && self.capital as f64 > self.capital_exit_floor * self.initial_capital as f64
+        {
+            let avg_lr =
+                self.own_loss_ratios.iter().sum::<f64>() / self.own_loss_ratios.len() as f64;
+            let avg_cr = avg_lr + self.expense_ratio;
+            if avg_cr > self.runoff_cr_threshold {
+                self.in_runoff = true;
+                return vec![(day, Event::InsurerExited { insurer_id: self.id })];
+            }
+        }
+
         vec![]
     }
 }
@@ -313,7 +355,9 @@ mod tests {
     fn make_insurer(id: InsurerId, capital: i64) -> Insurer {
         // attritional_elf=0.239, cat_elf=0.0, profit_loading=0.0, depletion_sensitivity=0.0
         // depletion_sensitivity=0.0 → no depletion effect; preserves all existing test behaviour.
-        Insurer::new(id, capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0)
+        // runoff_cr_threshold=2.0 → never triggers exit in single-year tests.
+        // capital_exit_floor=0.0 → floor always passes.
+        Insurer::new(id, capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 2.0, 0.0)
     }
 
     /// Helper: quote and return the ATP for a standard small_risk().
@@ -363,7 +407,7 @@ mod tests {
         let initial_capital = 1_000_000i64;
         let gross_premium = 200_000u64;
         // expense_ratio=0.0 → net premium = gross premium
-        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.55, 0.3, 0.0, 0.0, None, None, 0.252, 0.0);
+        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.55, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 2.0, 0.0);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         ins.on_policy_bound(PolicyId(2), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         let total_net_premiums = (gross_premium * 2) as i64;
@@ -568,7 +612,7 @@ mod tests {
     #[test]
     fn max_line_size_exceeded_emits_declined() {
         // capital=0 → effective_line = 0.30 × 0 = 0 < ASSET_VALUE → declines MaxLineSizeExceeded.
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0);
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0, 2.0, 0.0);
         let risk = cat_risk(); // sum_insured = ASSET_VALUE > effective_line_limit (0)
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         assert!(
@@ -580,7 +624,7 @@ mod tests {
     #[test]
     fn max_cat_aggregate_breached_emits_declined() {
         // net_line_capacity=None skips the line check; capital=0 → effective_cat = 0 → declines MaxCatAggregateBreached.
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0);
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0, 2.0, 0.0);
         let risk = cat_risk(); // cat_aggregate(0) + sum_insured > effective_cat_limit(0)
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         assert!(
@@ -592,7 +636,7 @@ mod tests {
     #[test]
     fn within_limits_after_partial_fill_emits_quote_issued() {
         // capital=200M USD; effective_cat = 0.30 × 20B / 0.252 ≈ 23.8B > 2×ASSET_VALUE=10B → room for second policy.
-        let mut ins = Insurer::new(InsurerId(1), 20_000_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0);
+        let mut ins = Insurer::new(InsurerId(1), 20_000_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0, 2.0, 0.0);
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
         // cat_aggregate = ASSET_VALUE; effective_cat ≈ 23.8B → still room for one more
         let risk = cat_risk();
@@ -684,7 +728,7 @@ mod tests {
     #[test]
     fn on_policy_bound_credits_net_premium_to_capital() {
         // expense_ratio=0.25 → net = 75% of gross premium.
-        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.55, 0.3, 0.25, 0.0, None, None, 0.252, 0.0);
+        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.55, 0.3, 0.25, 0.0, None, None, 0.252, 0.0, 2.0, 0.0);
         let gross_premium = 400_000u64;
         ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
         let expected_net = (gross_premium as f64 * 0.75).round() as i64;
@@ -704,7 +748,7 @@ mod tests {
         let mut ins = Insurer::new(
             InsurerId(1), capital_cents,
             0.239, 0.0, 0.70, 0.3, 0.0, 0.0,
-            Some(0.30), None, 0.252, 0.0,
+            Some(0.30), None, 0.252, 0.0, 2.0, 0.0,
         );
         let events = ins.on_year_end(Day(360), ASSET_VALUE);
         assert!(ins.insolvent, "zombie insurer must be marked insolvent");
@@ -722,7 +766,7 @@ mod tests {
         let mut ins = Insurer::new(
             InsurerId(1), capital_cents,
             0.239, 0.0, 0.70, 0.3, 0.0, 0.0,
-            Some(0.30), None, 0.252, 0.0,
+            Some(0.30), None, 0.252, 0.0, 2.0, 0.0,
         );
         let events = ins.on_year_end(Day(360), ASSET_VALUE);
         assert!(!ins.insolvent, "insurer at threshold must not be marked insolvent");
@@ -767,8 +811,8 @@ mod tests {
         let capital_b = 10_000_000_000i64; // 100M USD in cents
         let capital_a = 10_000_000_000i64;
 
-        let mut ins_a = Insurer::new(InsurerId(1), capital_a, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0);
-        let ins_b = Insurer::new(InsurerId(2), capital_b, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0);
+        let mut ins_a = Insurer::new(InsurerId(1), capital_a, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0, 2.0, 0.0);
+        let ins_b = Insurer::new(InsurerId(2), capital_b, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0, 2.0, 0.0);
 
         ins_a.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
 
@@ -849,7 +893,7 @@ mod tests {
     fn new_insurer_uses_market_factor_when_no_experience() {
         // own_years=0 → credibility=0 → insurer_ap_tp = market_factor exactly.
         // depletion_sensitivity=1.0; capital=initial → no depletion adj.
-        let ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
+        let ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 2.0, 0.0);
         let market_factor = 1.20;
         let premium = quote_premium(&ins, market_factor);
 
@@ -869,7 +913,7 @@ mod tests {
         // insurer_ap_tp = 0.70 × 1.30 + 0.30 × 1.0 = 0.91 + 0.30 = 1.21
         let initial_capital = 1_000_000i64;
         let current_capital = 700_000i64; // 30% depletion
-        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
+        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 2.0, 0.0);
         ins.capital = current_capital;
         ins.own_years = 5; // full credibility
 
@@ -888,7 +932,7 @@ mod tests {
         // own_factor = 1.0 + 0.40 + 0.0 = 1.40
         // insurer_ap_tp = 1.0 × 1.40 = 1.40 > neutral market_factor=1.0
         let capital = 100_000_000i64;
-        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 2.0, 0.0);
         ins.own_years = 5;
 
         // Record a very high-loss year: premium=P, claims=2P → LR=2.0
@@ -913,7 +957,7 @@ mod tests {
         // A new insurer with own_years=0 follows market exactly;
         // after YearEnd (own_years=1, credibility=0.2), the blend shifts toward own_factor.
         let capital = 100_000_000i64;
-        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 2.0, 0.0);
 
         // Before YearEnd: own_years=0
         assert_eq!(ins.own_years, 0);
@@ -943,7 +987,7 @@ mod tests {
         // market_factor = 0.90
         // insurer_ap_tp = 0.4 × 1.40 + 0.6 × 0.90 = 0.56 + 0.54 = 1.10
         let capital = 100_000_000i64;
-        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0);
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 2.0, 0.0);
         ins.own_years = 2;
 
         // Record one high-loss year: LR=2.0
@@ -963,6 +1007,84 @@ mod tests {
         let premium_quoted = quote_premium(&ins, 0.90);
         assert_eq!(premium_quoted, expected,
             "partial credibility blend: 0.4×1.40 + 0.6×0.90 = 1.10; got {premium_quoted}, expected {expected}");
+    }
+
+    // ── Phase 2: Voluntary exit / runoff ──────────────────────────────────────
+
+    /// Helper: push `n` years of LR history into `own_loss_ratios` via on_year_end.
+    /// Uses a policy bound + claim to produce the desired LR each year.
+    fn push_lr_years(ins: &mut Insurer, lr: f64, n: usize) {
+        let premium = 1_000_000u64;
+        let claim = (premium as f64 * lr).round() as u64;
+        for i in 0..(n as u64) {
+            ins.on_policy_bound(PolicyId(100 + i), ASSET_VALUE, premium, &[Peril::Attritional]);
+            if claim > 0 {
+                let _ = ins.on_claim_settled(Day(10 + i), claim, Peril::Attritional);
+            }
+            let _ = ins.on_year_end(Day(360 + i), ASSET_VALUE);
+        }
+    }
+
+    #[test]
+    fn enter_runoff_on_persistent_cr_exceedance() {
+        // runoff_cr_threshold=1.05, capital_exit_floor=0.0 (never blocks exit).
+        // Push 3 years of LR=0.80 → avg CR = 0.80 + 0.0 (expense_ratio=0) = 0.80 < 1.05 → no exit.
+        // Then push 3 years of LR=1.10 → avg CR=1.10 > 1.05 → exit fires.
+        let capital = 100_000_000_000i64; // 1B USD; well above any exit floor
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 1.05, 0.0);
+
+        // 3 benign years — avg CR < threshold
+        push_lr_years(&mut ins, 0.80, 3);
+        assert!(!ins.in_runoff, "below-threshold years must not trigger exit");
+
+        // Reset own_loss_ratios by resetting own_years (white-box: trigger via high LR years)
+        // 3 loss-making years
+        push_lr_years(&mut ins, 1.10, 3);
+        assert!(ins.in_runoff, "persistent CR > 1.05 must set in_runoff=true");
+    }
+
+    #[test]
+    fn no_runoff_when_capital_depleted() {
+        // capital_exit_floor=0.95 → insurer must have > 0.95 × initial_capital to voluntarily exit.
+        // Set capital to 0.90 × initial_capital (below floor) and assert no exit.
+        let initial_capital = 100_000_000_000i64; // 1B USD
+        let current_capital = (initial_capital as f64 * 0.90).round() as i64;
+        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 1.05, 0.95);
+        ins.capital = current_capital;
+
+        // Push 3 bad years → avg CR > threshold, but capital below floor
+        push_lr_years(&mut ins, 1.10, 3);
+        assert!(!ins.in_runoff, "capital below exit floor must suppress voluntary exit");
+    }
+
+    #[test]
+    fn no_runoff_when_only_two_years_of_data() {
+        // Need ≥ 3 years of own loss history before exit can fire.
+        let capital = 100_000_000_000i64;
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 1.05, 0.0);
+
+        // Only 2 years of bad experience
+        push_lr_years(&mut ins, 1.10, 2);
+        assert!(!ins.in_runoff, "fewer than 3 years of history must not trigger exit");
+    }
+
+    #[test]
+    fn quote_declined_in_runoff() {
+        // With in_runoff=true, on_lead_quote_requested must return LeadQuoteDeclined{InRunoff}.
+        let capital = 100_000_000_000i64;
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 1.05, 0.0);
+        ins.in_runoff = true;
+
+        let risk = Risk {
+            sum_insured: ASSET_VALUE,
+            territory: "US-SE".to_string(),
+            perils_covered: vec![Peril::Attritional],
+        };
+        let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
+        assert!(
+            matches!(event, Event::LeadQuoteDeclined { reason: DeclineReason::InRunoff, .. }),
+            "in_runoff insurer must emit LeadQuoteDeclined(InRunoff), got {event:?}"
+        );
     }
 
 }

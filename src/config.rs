@@ -103,6 +103,13 @@ pub struct SimulationConfig {
     /// When true, no cat `LossEvent`s are scheduled. Attritional losses still run.
     /// Useful for isolating attritional dynamics without cat noise.
     pub disable_cats: bool,
+    /// Own 3-year average combined ratio above which an insurer voluntarily enters runoff.
+    /// Insurer must also have capital > capital_exit_floor × initial_capital.
+    /// Canonical: 1.05 — exits after three consecutive loss-making years.
+    pub runoff_cr_threshold: f64,
+    /// Fraction of initial_capital below which the insurer cannot voluntarily exit
+    /// (heads toward insolvency instead). Canonical: 0.90.
+    pub capital_exit_floor: f64,
 }
 
 /// Insured asset value: 25M USD in cents.
@@ -156,6 +163,8 @@ impl SimulationConfig {
             quotes_per_submission: None, // solicit all 8 insurers per submission
             max_rate_on_line: 0.15, // 15% RoL ceiling — above current band, binding post-hardening
             disable_cats: false,
+            runoff_cr_threshold: 1.05, // exits after 3 consecutive loss-making years (avg CR > 105%)
+            capital_exit_floor: 0.90,  // must retain ≥ 90% of initial capital to voluntarily exit
         }
     }
 }

@@ -91,6 +91,8 @@ impl Simulation {
                     c.solvency_capital_fraction,
                     pml,
                     c.depletion_sensitivity,
+                    config.runoff_cr_threshold,
+                    config.capital_exit_floor,
                 )
             })
             .collect();
@@ -452,6 +454,10 @@ impl Simulation {
 
             // InsurerEntered is logged directly by spawn_new_insurer — no further dispatch.
             Event::InsurerEntered { .. } => {}
+
+            // InsurerExited and InsurerReEntered are logged directly by handle_year_end.
+            Event::InsurerExited { .. } => {}
+            Event::InsurerReEntered { .. } => {}
         }
     }
 
@@ -507,13 +513,18 @@ impl Simulation {
         // Update each insurer's expected_loss_fraction via EWMA from this year's experience.
         // Also detect zombies (capital > 0 but max_line < min policy size) and mark them insolvent.
         // Collect emitted events before scheduling to avoid conflicting mutable borrows.
-        let zombie_events: Vec<(Day, Event)> = self
+        let year_end_events: Vec<(Day, Event)> = self
             .insurers
             .iter_mut()
             .flat_map(|insurer| insurer.on_year_end(day, ASSET_VALUE))
             .collect();
-        for (d, ev) in zombie_events {
-            self.schedule(d, ev);
+        for (d, ev) in year_end_events {
+            if let Event::InsurerExited { insurer_id } = &ev {
+                self.broker.remove_insurer(*insurer_id);
+                self.log.push(SimEvent { day: d, event: ev });
+            } else {
+                self.schedule(d, ev);
+            }
         }
 
         // ── Entry criterion ───────────────────────────────────────────────────
@@ -560,6 +571,26 @@ impl Simulation {
             }
         }
 
+        // Re-entry: runoff insurers re-enter when the market AP/TP factor exceeds threshold.
+        if self.market_ap_tp_factor > AP_TP_ENTRY_THRESHOLD {
+            let re_entries: Vec<InsurerId> = self
+                .insurers
+                .iter()
+                .filter(|ins| ins.in_runoff && !ins.insolvent)
+                .map(|ins| ins.id)
+                .collect();
+            for insurer_id in re_entries {
+                if let Some(insurer) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
+                    insurer.in_runoff = false;
+                }
+                self.broker.add_insurer(insurer_id);
+                self.log.push(SimEvent {
+                    day,
+                    event: Event::InsurerReEntered { insurer_id },
+                });
+            }
+        }
+
         // Schedule next year if within simulation horizon.
         let total_years = self.config.warmup_years + self.config.years;
         if year.0 < total_years {
@@ -578,21 +609,22 @@ impl Simulation {
         let territory_factor = 1.0 / n_territories as f64;
         let (initial_capital, cat_elf, target_loss_ratio, profit_loading, pml_frac,
              attritional_elf, ewma_credibility, expense_ratio, net_line_capacity, scf,
-             depletion_sensitivity) =
+             depletion_sensitivity, runoff_cr_threshold, capital_exit_floor) =
             self.config.insurers.first()
                 .map(|t| {
                     let pml = t.pml_damage_fraction_override.unwrap_or(pml_200) * territory_factor;
                     (t.initial_capital, t.cat_elf, t.target_loss_ratio, t.profit_loading, pml,
                      t.attritional_elf, t.ewma_credibility, t.expense_ratio,
-                     t.net_line_capacity, t.solvency_capital_fraction, t.depletion_sensitivity)
+                     t.net_line_capacity, t.solvency_capital_fraction, t.depletion_sensitivity,
+                     self.config.runoff_cr_threshold, self.config.capital_exit_floor)
                 })
                 .unwrap_or((15_000_000_000i64, 0.011, 0.62, 0.05, pml_200 * territory_factor,
-                            0.030, 0.3, 0.344, Some(0.30), Some(0.30), 1.0));
+                            0.030, 0.3, 0.344, Some(0.30), Some(0.30), 1.0, 1.05, 0.90));
 
         let insurer = Insurer::new(
             id, initial_capital, attritional_elf, cat_elf, target_loss_ratio,
             ewma_credibility, expense_ratio, profit_loading, net_line_capacity, scf, pml_frac,
-            depletion_sensitivity,
+            depletion_sensitivity, runoff_cr_threshold, capital_exit_floor,
         );
         let initial_capital_u64 = initial_capital.max(0) as u64;
 
@@ -644,6 +676,8 @@ mod tests {
             quotes_per_submission: None,
             max_rate_on_line: 1.0, // unlimited — tests accept all quotes by default
             disable_cats: false,
+            runoff_cr_threshold: 2.0, // never triggers in tests
+            capital_exit_floor: 0.0,  // no exit floor in tests
         }
     }
 
@@ -1337,6 +1371,8 @@ mod tests {
                 Some(0.30),     // SCF = 0.30
                 pml,
                 0.0,            // depletion_sensitivity=0 (not tested here)
+                2.0,            // runoff_cr_threshold: never triggers
+                0.0,            // capital_exit_floor: no floor
             )
         };
 

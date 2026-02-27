@@ -207,8 +207,8 @@ fn print_analysis(
         warmup + 1
     );
     println!(
-        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>10} | {:>8} | {:>9} | {:>6}",
-        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "AvgCR3%", "Rate%", "Cats#", "TotalCap(B)", "Insolvent#", "Dropped#", "Entrants#", "ApTp"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>10} | {:>8} | {:>9} | {:>7} | {:>6}",
+        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "AvgCR3%", "Rate%", "Cats#", "TotalCap(B)", "Insolvent#", "Dropped#", "Entrants#", "Exits#", "ApTp"
     );
     println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 12 + 3 + 10 + 3 + 11 + 3 + 8));
 
@@ -246,7 +246,7 @@ fn print_analysis(
             "  n/a ".to_string()
         };
         println!(
-            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>10} | {:>8} | {:>9} | {}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>10} | {:>8} | {:>9} | {:>7} | {}",
             s.year,
             assets_b,
             gul_b,
@@ -261,6 +261,7 @@ fn print_analysis(
             s.insolvent_count,
             s.dropped_count,
             s.entrant_count,
+            s.exit_count,
             ap_tp_str,
         );
     }

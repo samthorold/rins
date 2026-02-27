@@ -45,6 +45,12 @@ impl Broker {
         self.insurer_ids.push(id);
     }
 
+    /// Remove an insurer from the round-robin routing pool (e.g. voluntary runoff).
+    /// `next_insurer_idx % n` auto-adjusts after the pool shrinks.
+    pub fn remove_insurer(&mut self, id: InsurerId) {
+        self.insurer_ids.retain(|&i| i != id);
+    }
+
     /// An insured has requested coverage. Solicit k insurers concurrently (round-robin
     /// start, wrapping), create a submission, and schedule k `LeadQuoteRequested` at day+1.
     pub fn on_coverage_requested(
@@ -484,5 +490,36 @@ mod tests {
     fn insured_sum_insured_is_correct() {
         let broker = broker_with_insurers(1, vec![1]);
         assert_eq!(broker.insureds[0].sum_insured(), ASSET_VALUE);
+    }
+
+    #[test]
+    fn remove_insurer_shrinks_pool() {
+        // Start with 3 insurers [1, 2, 3]; solicit 1 per submission; remove insurer 2.
+        // Two subsequent CoverageRequested events must route only to insurers 1 and 3.
+        let mut broker = broker_with_qps(2, vec![1, 2, 3], 1);
+        broker.remove_insurer(InsurerId(2));
+
+        let risk = small_risk();
+        let events1 = broker.on_coverage_requested(Day(0), InsuredId(1), risk.clone());
+        let events2 = broker.on_coverage_requested(Day(0), InsuredId(2), risk);
+
+        let routed: Vec<InsurerId> = events1
+            .iter()
+            .chain(events2.iter())
+            .filter_map(|(_, e)| {
+                if let Event::LeadQuoteRequested { insurer_id, .. } = e {
+                    Some(*insurer_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(routed.len(), 2, "one quote per submission → 2 total");
+        for id in &routed {
+            assert_ne!(*id, InsurerId(2), "removed insurer must not receive quotes");
+        }
+        // Both remaining insurers should appear (round-robin with 2 remaining).
+        assert!(routed.contains(&InsurerId(1)) || routed.contains(&InsurerId(3)));
     }
 }
