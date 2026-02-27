@@ -545,7 +545,7 @@ impl Simulation {
         } else {
             let avg_lr = self.recent_loss_ratios.iter().sum::<f64>() / n as f64;
             let avg_cr = avg_lr + expense_ratio;
-            let cr_signal = (avg_cr - 1.0_f64).clamp(-0.30, 0.80);
+            let cr_signal = (avg_cr - 1.0_f64).clamp(-0.50, 0.80);
             let capacity_uplift = if self.year_dropped_count > 10 { 0.05 } else { 0.0 };
             1.0 + cr_signal + capacity_uplift
         };

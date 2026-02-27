@@ -117,14 +117,14 @@ impl SimulationConfig {
             // 8 homogeneous established insurers, each 150M USD capital.
             //
             // Cat ELF is territory-adjusted: freq=0.5 × E[df]=6.7% ÷ 3 territories = 1.1%.
-            // ATP = (0.030+0.011)/0.62 = 6.6%; premium ≈ 6.9% of SI.
+            // ATP = (0.050+0.011)/0.62 = 9.8%; premium ≈ 10.3% of SI.
             insurers: (1..=8)
                 .map(|i| InsurerConfig {
                     id: InsurerId(i),
                     initial_capital: 15_000_000_000, // 150M USD in cents
-                    attritional_elf: 0.030, // annual_rate=2.0 × E[df]=1.5% → att_ELF=3.0%
+                    attritional_elf: 0.050, // annual_rate=2.0 × E[df]=2.5% → att_ELF=5.0%
                     cat_elf: 0.011, // freq=0.5 × E[df]=6.7% ÷ 3 territories → cat_ELF=1.1%
-                    target_loss_ratio: 0.62, // (att+cat ELF)/rate = 0.041/0.066 ≈ 0.62
+                    target_loss_ratio: 0.62, // (att+cat ELF)/rate = 0.061/0.098 ≈ 0.62
                     ewma_credibility: 0.3,
                     expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
                     profit_loading: 0.05, // 5% markup above ATP; MS3 risk/capital charge
@@ -136,10 +136,10 @@ impl SimulationConfig {
                 .collect(),
             n_insureds: 100,
             attritional: AttritionalConfig {
-                annual_rate: 2.0,   // ~2 claims/yr per insured; freq × E[df] = ELF_att ≈ 3.0%
-                mu: -4.245,         // E[df] = exp(-4.245 + 0.045) = exp(-4.2) ≈ 1.5% (preserved)
+                annual_rate: 2.0,   // ~2 claims/yr per insured; freq × E[df] = ELF_att ≈ 5.0%
+                mu: -3.73,          // E[df] = exp(-3.73 + 0.045) = exp(-3.685) ≈ 2.5%
                 sigma: 0.3,         // tight spread — attritional = high-frequency, small losses;
-                                    // CV_per_claim ≈ 0.31 → aggregate CV across 57 policies ≈ 4%
+                                    // CV_per_claim ≈ 0.31 → aggregate CV across 57 policies ≈ 3%
                                     // (was sigma=1.0 → CV≈15%, masking cat signal)
             },
             catastrophe: CatConfig {

@@ -226,7 +226,7 @@ impl Insurer {
         } else {
             let avg_lr = self.own_loss_ratios.iter().sum::<f64>() / self.own_loss_ratios.len() as f64;
             let avg_cr = avg_lr + self.expense_ratio;
-            (avg_cr - 1.0).clamp(-0.30, 0.80)
+            (avg_cr - 1.0).clamp(-0.50, 0.80)
         };
 
         let own_factor = 1.0 + own_cr_signal + cap_depletion_adj;

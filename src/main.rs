@@ -238,7 +238,7 @@ fn print_analysis(
         let ap_tp_str = if n >= 2 {
             let avg_lr = recent_lrs.iter().sum::<f64>() / n as f64;
             let avg_cr = avg_lr + expense_ratio;
-            let cr_signal = (avg_cr - 1.0_f64).clamp(-0.30, 0.80);
+            let cr_signal = (avg_cr - 1.0_f64).clamp(-0.50, 0.80);
             let capacity_uplift = if s.dropped_count > 10 { 0.05 } else { 0.0 };
             let factor = 1.0 + cr_signal + capacity_uplift;
             format!("{:>6.2}", factor)
