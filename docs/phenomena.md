@@ -11,7 +11,7 @@ This is a living document. Phenomena are added as the literature review progress
 | 2 | Catastrophe-Amplified Capital Crisis | PARTIAL |
 | 3 | Broker-Syndicate Network Herding | PLANNED |
 | 4 | Specialist vs. Generalist Divergence | PLANNED |
-| 5 | Relationship-Driven Placement Stickiness | PLANNED |
+| 5 | Relationship-Driven Placement Stickiness | PARTIAL |
 | 6 | Counter-cyclical Capacity Supply | PLANNED |
 | 7 | Post-Catastrophe Market Concentration Surge | PLANNED |
 | 8 | Geographic and Peril Accumulation Risk | PARTIAL |
@@ -113,15 +113,17 @@ Steps 1 and 2 are now mechanically represented: the `market_ap_tp_factor` (AP/TP
 
 ---
 
-## 5. Relationship-Driven Placement Stickiness `[PLANNED]`
+## 5. Relationship-Driven Placement Stickiness `[PARTIAL]`
 
 **What it is:** Despite available capacity from new or lower-priced syndicates, brokers continue routing risks to established partners. Market share adjusts slowly even when pricing differences are material.
 
 **Why it matters:** Placement stickiness damps the speed of competitive adjustment, lengthening cycle periods and creating periods of apparent market inefficiency. It is a behavioural friction with measurable empirical counterparts.
 
-**Expected agent mechanism:** Broker relationship scores decay slowly and are reinforced by successful placements. New syndicates start with low scores and must win business at disadvantaged terms to build reputation. Existing relationships are retained even when the established syndicate is not the cheapest quote, because the broker internalises service quality, panel reliability, and future reciprocity.
+**Implemented mechanism (Phase 3):** `Broker.relationship_scores` accumulate +1.0 per `PolicyBound` and decay ×0.80 per `YearEnd`. `on_coverage_requested` solicits the top-k (canonical: 4 of N) insurers by score — incumbents get first look; new entrants start at 0.0 and must price below incumbents to win business and build score. Gini coefficient of bound-policy count is tracked per year (0.03–0.19 in canonical run). The routing mechanism is active; the stickiness dynamic is emerging.
 
-*Requires: relationship scores (market-mechanics.md §5).*
+**Remaining gap:** With a single-insurer panel and cheapest-wins selection, relationship score affects *who is solicited* but not *who wins* — the cheapest insurer in the solicited set always wins. Full stickiness (incumbent wins even if not cheapest) requires either a multi-insurer panel where the lead's price sets the anchor, or a buyer preference factor that bends the acceptance rule toward incumbent insurers. Both are Phase 5 prerequisites.
+
+*Partially satisfies: routing concentration. Requires Phase 5 lead-follow for full stickiness effect.*
 
 ---
 

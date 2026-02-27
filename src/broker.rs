@@ -4,6 +4,10 @@ use crate::events::{Event, Risk};
 use crate::insured::Insured;
 use crate::types::{Day, InsuredId, InsurerId, SubmissionId};
 
+/// Multiplicative decay applied to all relationship scores at each YearEnd.
+/// A score of 1.0 halves in ~3.1 years (0.80^3.1 ≈ 0.50).
+const SCORE_DECAY: f64 = 0.80;
+
 /// Transient state while a submission is in flight.
 /// All solicited insurers are contacted upfront; the cheapest accepted quote wins.
 struct PendingQuote {
@@ -15,8 +19,8 @@ struct PendingQuote {
 }
 
 /// Single broker that services all insureds.
-/// Routes coverage requests to all (or k) insurers concurrently; presents the
-/// cheapest accepted quote back to the insured.
+/// Routes coverage requests to score-ranked insurers (incumbents get first look);
+/// presents the cheapest accepted quote back to the insured.
 pub struct Broker {
     pub insureds: Vec<Insured>,
     insurer_ids: Vec<InsurerId>,
@@ -25,10 +29,17 @@ pub struct Broker {
     pending: HashMap<SubmissionId, PendingQuote>,
     /// Number of insurers solicited per submission (≥ 1, ≤ insurer_ids.len()).
     quotes_per_submission: usize,
+    /// Accumulated relationship score per insurer. +1.0 per PolicyBound, ×0.80 per YearEnd.
+    /// Re-entrants retain their decayed score; new IDs start at 0.0.
+    pub relationship_scores: HashMap<InsurerId, f64>,
 }
 
 impl Broker {
     pub fn new(insureds: Vec<Insured>, insurer_ids: Vec<InsurerId>, quotes_per_submission: usize) -> Self {
+        let mut relationship_scores = HashMap::new();
+        for &id in &insurer_ids {
+            relationship_scores.insert(id, 0.0);
+        }
         Broker {
             insureds,
             insurer_ids,
@@ -36,23 +47,44 @@ impl Broker {
             next_submission_id: 0,
             pending: HashMap::new(),
             quotes_per_submission,
+            relationship_scores,
         }
     }
 
-    /// Add a new insurer to the round-robin routing pool.
-    /// The insurer will be reached in the normal rotation from this point forward.
+    /// Add a new insurer to the routing pool.
+    /// Re-entrants (previously seen InsurerId) retain their decayed score.
+    /// New InsurerId values start at 0.0.
     pub fn add_insurer(&mut self, id: InsurerId) {
         self.insurer_ids.push(id);
+        self.relationship_scores.entry(id).or_insert(0.0);
     }
 
-    /// Remove an insurer from the round-robin routing pool (e.g. voluntary runoff).
-    /// `next_insurer_idx % n` auto-adjusts after the pool shrinks.
+    /// Remove an insurer from the routing pool (e.g. voluntary runoff).
+    /// Score is retained in `relationship_scores` so a re-entrant gets their old score back.
     pub fn remove_insurer(&mut self, id: InsurerId) {
         self.insurer_ids.retain(|&i| i != id);
     }
 
-    /// An insured has requested coverage. Solicit k insurers concurrently (round-robin
-    /// start, wrapping), create a submission, and schedule k `LeadQuoteRequested` at day+1.
+    /// A policy was bound with this insurer. Increment their relationship score by 1.0.
+    pub fn on_policy_bound(&mut self, insurer_id: InsurerId) {
+        *self.relationship_scores.entry(insurer_id).or_insert(0.0) += 1.0;
+    }
+
+    /// Year ended. Decay all relationship scores by SCORE_DECAY.
+    pub fn on_year_end(&mut self) {
+        for score in self.relationship_scores.values_mut() {
+            *score *= SCORE_DECAY;
+        }
+    }
+
+    /// Return the relationship score for an insurer (None if never seen).
+    pub fn score_of(&self, id: InsurerId) -> Option<f64> {
+        self.relationship_scores.get(&id).copied()
+    }
+
+    /// An insured has requested coverage. Solicit k insurers ordered by relationship score
+    /// (descending); cyclic distance from `next_insurer_idx` breaks ties so that equal-score
+    /// pools degenerate to the existing round-robin behaviour.
     pub fn on_coverage_requested(
         &mut self,
         day: Day,
@@ -67,6 +99,25 @@ impl Broker {
         let start_idx = self.next_insurer_idx % n;
         self.next_insurer_idx += 1;
 
+        // Sort pool indices by (score DESC, cyclic_distance_from_start_idx ASC).
+        // When all scores are equal this degenerates to round-robin (cyclic order from start_idx).
+        let mut indices: Vec<usize> = (0..n).collect();
+        let scores = &self.relationship_scores;
+        let insurer_ids = &self.insurer_ids;
+        indices.sort_by(|&a, &b| {
+            let sa = scores.get(&insurer_ids[a]).copied().unwrap_or(0.0);
+            let sb = scores.get(&insurer_ids[b]).copied().unwrap_or(0.0);
+            // Primary: higher score first.
+            let score_ord = sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal);
+            if score_ord != std::cmp::Ordering::Equal {
+                return score_ord;
+            }
+            // Tiebreaker: smaller cyclic distance from start_idx first (round-robin).
+            let da = (a + n - start_idx) % n;
+            let db = (b + n - start_idx) % n;
+            da.cmp(&db)
+        });
+
         let submission_id = SubmissionId(self.next_submission_id);
         self.next_submission_id += 1;
         self.pending.insert(
@@ -74,9 +125,10 @@ impl Broker {
             PendingQuote { insured_id, quotes_outstanding: k, best_quote: None },
         );
 
-        (0..k)
-            .map(|j| {
-                let insurer_id = self.insurer_ids[(start_idx + j) % n];
+        indices[..k]
+            .iter()
+            .map(|&j| {
+                let insurer_id = self.insurer_ids[j];
                 (
                     day.offset(1),
                     Event::LeadQuoteRequested {
@@ -490,6 +542,60 @@ mod tests {
     fn insured_sum_insured_is_correct() {
         let broker = broker_with_insurers(1, vec![1]);
         assert_eq!(broker.insureds[0].sum_insured(), ASSET_VALUE);
+    }
+
+    // ── relationship scores ───────────────────────────────────────────────────
+
+    #[test]
+    fn relationship_score_zero_on_new_insurer() {
+        let mut broker = broker_with_insurers(1, vec![]);
+        broker.add_insurer(InsurerId(42));
+        assert_eq!(broker.score_of(InsurerId(42)), Some(0.0));
+    }
+
+    #[test]
+    fn relationship_score_increments_on_policy_bound() {
+        let mut broker = broker_with_insurers(1, vec![1]);
+        broker.on_policy_bound(InsurerId(1));
+        assert!((broker.score_of(InsurerId(1)).unwrap() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn relationship_score_decays_on_year_end() {
+        let mut broker = broker_with_insurers(1, vec![1]);
+        broker.on_policy_bound(InsurerId(1)); // score = 1.0
+        broker.on_year_end(); // score = 1.0 × 0.80 = 0.80
+        assert!((broker.score_of(InsurerId(1)).unwrap() - 0.80).abs() < 1e-9);
+    }
+
+    #[test]
+    fn high_score_insurer_preferred_when_k_lt_n() {
+        // Insurer 1 score=5.0 (via 5 × on_policy_bound), insurers 2 and 3 score=0.0.
+        // k=1 → every submission must route exclusively to insurer 1.
+        let mut broker = broker_with_qps(3, vec![1, 2, 3], 1);
+        for _ in 0..5 {
+            broker.on_policy_bound(InsurerId(1));
+        }
+        for id in 1..=3u64 {
+            let events = broker.on_coverage_requested(Day(0), InsuredId(id), small_risk());
+            assert_eq!(events.len(), 1);
+            if let Event::LeadQuoteRequested { insurer_id, .. } = events[0].1 {
+                assert_eq!(insurer_id, InsurerId(1), "high-score insurer must always be selected");
+            } else {
+                panic!("expected LeadQuoteRequested");
+            }
+        }
+    }
+
+    #[test]
+    fn re_entrant_retains_score() {
+        // Score insurer 1 to 2.0, remove from pool, re-add — score must still be ~2.0.
+        let mut broker = broker_with_insurers(1, vec![1]);
+        broker.on_policy_bound(InsurerId(1));
+        broker.on_policy_bound(InsurerId(1)); // score = 2.0
+        broker.remove_insurer(InsurerId(1));
+        broker.add_insurer(InsurerId(1)); // re-entry: or_insert keeps existing score
+        assert!((broker.score_of(InsurerId(1)).unwrap() - 2.0).abs() < f64::EPSILON);
     }
 
     #[test]

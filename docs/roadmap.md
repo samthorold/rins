@@ -75,7 +75,26 @@ Secondary hypotheses:
 
 ---
 
-## Phase 3 — Demand elasticity (heterogeneous reservation prices)
+## Phase 3 — Relationship-ranked routing `[DONE — 2026-02-27]`
+
+**Mechanism.** Replace round-robin start-index routing with relationship-score–ranked selection. `Broker` accumulates `relationship_scores: HashMap<InsurerId, f64>`: +1.0 per `PolicyBound`, ×0.80 per `YearEnd` (halves in ~3.1 years). `on_coverage_requested` sorts the insurer pool by score descending; cyclic distance from `next_insurer_idx` breaks ties so all-equal scores degenerate to the prior round-robin behaviour. Canonical `quotes_per_submission` changed from `None` (all 8) to `Some(4)` (top-4 by score). Re-entrants retain their decayed score; new InsurerId values start at 0.0.
+
+**Results (seed=42, 8×150M insurers, 100 insureds, 25yr run).**
+
+Primary hypothesis — *partially confirmed.* Gini values in the year table are non-trivial (0.03–0.19), confirming that market share is no longer perfectly uniform. The highest concentration occurs in years 15–16 (Gini=0.114, 0.190) during the entry wave following the year-14 double-cat: incumbents with accumulated scores capture disproportionate share in the first post-crisis year, while the 10+ new entrants start at 0.0 and must compete on price to build scores. In quiet years with stable composition (e.g. years 7–9, Gini=0.035–0.060), concentration is low — incumbents have similar scores from balanced history and k=4-of-7 gives broad coverage. The Gini column serves as the primary diagnostic for all future phases.
+
+**Key patterns:**
+- Hard-market/exit years (years 11–12, 14): Gini falls (few surviving insurers, each holding substantial scored relationships with a fraction of the insured pool).
+- Entry wave (year 15–16): Gini rises sharply (high-score incumbents + low-score new entrants competing for same k=4 slots).
+- Stable soft markets (years 21–25): Gini 0.03–0.12 — low-concentration equilibrium as scores converge.
+
+**Does not fix.** Demand inelasticity (Gap 3). The Gini diagnostic does not yet reveal demand-side dynamics; the `Dropped#` column still conflates supply-constrained and demand-constrained non-placements.
+
+---
+
+## Phase 4 — Demand elasticity (heterogeneous reservation prices)
+
+**Sequencing note.** Demand elasticity was originally Phase 3, but its cycle contribution is indirect: it moderates amplitude and separates supply-constrained from demand-constrained non-placements, but does not introduce new cycle mechanisms. Phase 3 (relationship routing) directly affects which insurers win business and at what price, producing competitive dynamics — market share concentration, new-entrant undercutting, winner-take-more soft markets — that are cycle-relevant in isolation and unlock Phase 5. Demand elasticity is more valuable once those competitive dynamics are visible, because price-sensitive buyers exiting in hard markets interact with relationship scores to shape who retains the residual pool.
 
 **Mechanism.** Replace the single uniform `max_rate_on_line = 0.15` with a distribution across insureds. The simplest parametric form: `max_rol ~ Uniform(low, high)` or `LogNormal(mu, sigma)`, calibrated so that at the canonical 6–8% rate band nearly all insureds participate, but above 10–12% a measurable fraction opt out (raising retentions, self-insuring, or placing with lower-quality markets not modelled).
 
@@ -90,26 +109,6 @@ A richer extension: buyers with above-average GUL history have lower reservation
 - The insured pool in hard markets is adversely selected toward high-loss-history buyers (low-risk buyers price out first), mildly elevating the loss ratio above ATP expectations.
 
 **Diagnostics.** Track `QuoteRejected` vs `SubmissionDropped` separately. Plot in-force policy count vs Rate% across years — a downward slope confirms demand elasticity is active.
-
-**Does not fix.** Competitive quoting. The broker still routes to one insurer at a time; there is no mechanism for buyers to shop or for insurers to compete for the same submission simultaneously.
-
----
-
-## Phase 4 — Relationship-ranked routing (competitive quoting infrastructure already built)
-
-**What is already implemented.** The concurrent solicitation and cheapest-wins selection mechanism described in earlier versions of this phase is already in production. `Broker::on_coverage_requested` solicits `k = quotes_per_submission` insurers in parallel (canonical: `None` → all N insurers); `on_lead_quote_issued` tracks responses in `PendingQuote` and retains the cheapest; `QuotePresented` carries the winning `(insurer_id, premium)`. Phase 1's per-insurer `own_ap_tp_factor` already produces meaningful price dispersion (CV 0.07–0.18 post-warmup), so competition over quotes is real.
-
-**Remaining work.** Round-robin start-index routing means the subset of insurers solicited when `k < N` is positionally determined, not relationship-determined. Replacing the round-robin start index with relationship-score ranking is the only architectural change needed: the broker selects the top-k insurers by score for the relevant line, solicits them concurrently, and the cheapest-wins logic runs unchanged.
-
-This is the architectural prerequisite for the lead-follow subscription model (Phase 5), which requires a nominated lead (highest-score insurer) distinct from the follower pool.
-
-**Primary hypothesis.** With relationship-ranked routing, submission flow concentrates on high-score incumbents. New entrants — starting with low scores — win business disproportionately by pricing below incumbents, building scores gradually. Market share becomes a function of relationship score × price competitiveness, not routing position. Persistently expensive incumbents lose share to lower-priced new entrants and (via Phase 2) eventually exit.
-
-**Secondary hypotheses.**
-- Gini coefficient of market share across insurers rises post-cat (concentration among surviving incumbents) and falls in soft markets (new entrant competition).
-- Phenomenon 4 (Specialist vs Generalist Divergence) can begin to emerge: insurers with aggressive pricing on specific risk types win disproportionate share of those risks.
-
-**Diagnostics.** Per-insurer bound-policy count, by year. Market share Gini coefficient measurable from `PolicyBound.insurer_id` counts.
 
 ---
 
@@ -129,10 +128,10 @@ Phases are ordered by two criteria: (a) independent value — does the phase pro
 
 | Phase | Independent value | Unlocks |
 |---|---|---|
-| 1 — Individual pricing | High — rate dispersion and hard-market duration immediately testable | Phase 4, Phase 5 |
+| 1 — Individual pricing | High — rate dispersion and hard-market duration immediately testable | Phase 3, Phase 5 |
 | 2 — Voluntary exit | High — supply-side oscillation testable in isolation | Full cycle confirmation |
-| 3 — Demand elasticity | Medium — cycle modulation measurable, but cycle must already exist | Phenomenon 9 |
-| 4 — Competitive quoting | Medium — market share dynamics; needs Phase 1 to produce price dispersion worth competing over | Phase 5 |
+| 3 — Competitive quoting | Medium-High — market share concentration and new-entrant undercutting testable; needs Phase 1 price dispersion | Phase 5 |
+| 4 — Demand elasticity | Medium — cycle modulation and supply/demand separation; most useful once competitive dynamics (Phase 3) visible | Phenomenon 9 |
 | 5 — Lead-follow | Low in isolation — full value requires Phases 1–4 and relationship scores | Phenomena 3, 5, 7 |
 
-Phases 1 and 2 are independent of each other and could be developed in parallel. Phase 3 requires a functioning cycle (Phases 1+2) to be meaningful. Phases 4 and 5 require Phase 1's individual pricing to produce competitive dynamics worth modelling.
+Phases 1 and 2 are independent of each other and could be developed in parallel. Phase 3 requires Phase 1's individual pricing to produce competitive dynamics worth routing for. Phase 4 (demand elasticity) is most legible once Phase 3 market-share dynamics are running — price-sensitive buyers exiting interacts with relationship scores to shape who retains the residual pool. Phase 5 requires all prior phases.

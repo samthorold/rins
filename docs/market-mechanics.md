@@ -26,7 +26,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
 | Underwriter channel / AP/TP ratio (MS3 AvT) | ACTIVE — three-level pricing: ATP → TP (× profit loading) → AP (× market_ap_tp_factor); factor driven by trailing 3yr CR + capacity pressure | `src/insurer.rs::underwriter_premium`, `src/simulation.rs::handle_year_end` |
 | Supply / demand balance (insured reservation price) | PARTIAL — step-function demand curve implemented; quantity adjustment (variable limits, deductibles, self-insurance) and demand response to loss experience not modelled; consequence: demand cannot amplify or resist rate movements, weakening cycle amplitude | `src/insured.rs::on_quote_presented` |
-| Broker relationship scores | PLANNED | — |
+| Broker relationship scores | ACTIVE — +1.0 per PolicyBound, ×0.80 per YearEnd; routing sorted by score DESC + cyclic tiebreaker | `src/broker.rs` |
 | Syndicate entry / exit (capital entry) | ACTIVE — AP/TP > 1.10 trigger + new insurer spawn; 1-year cooldown; critical for underwriting cycle emergence | `src/simulation.rs::handle_year_end` |
 | Annual coordinator statistics | PLANNED | — |
 | Quarterly renewal seasonality | PLANNED | — |
@@ -153,7 +153,7 @@ Canonical config: 5 insurers, 1B USD initial capital each.
 
 ### §3.3 Broker `[ACTIVE]`
 
-A single Broker intermediates between Insureds and Insurers. Routes `CoverageRequested` to insurers via round-robin, assembles panel (currently single-insurer), and manages submission state. Source: `src/broker.rs`.
+A single Broker intermediates between Insureds and Insurers. Routes `CoverageRequested` to the top-k insurers by relationship score (score DESC, cyclic tiebreaker for equal scores), assembles panel (currently single-insurer), and manages submission state. Source: `src/broker.rs`.
 
 **All-declined path:** when every solicited insurer declines a submission (`quotes_outstanding` reaches zero with `best_quote = None`), the broker emits `SubmissionDropped { submission_id, insured_id }` instead of silently dropping the submission. The simulation dispatcher handles `SubmissionDropped` identically to `QuoteRejected`: it schedules a renewal `CoverageRequested` at day + 358, so the insured retries next year rather than permanently vanishing from the model.
 
@@ -409,13 +409,13 @@ Lloyd's operates a subscription market: a lead syndicate sets terms, and followe
 
 ### Current implementation `[PARTIAL]`
 
-Round-robin single-insurer routing with exposure-limit re-routing (`src/broker.rs`). The quoting chain is:
+Score-ranked single-insurer routing with exposure-limit re-routing (`src/broker.rs`). The quoting chain is:
 
 ```
 CoverageRequested (+1d) → LeadQuoteRequested (same day) → LeadQuoteIssued (+1d) → QuotePresented (same day) → QuoteAccepted (+1d) → PolicyBound
 ```
 
-If the selected insurer breaches an exposure limit it emits `LeadQuoteDeclined` instead of `LeadQuoteIssued`. The broker re-routes to the next insurer in the round-robin (up to N attempts); if all N insurers decline, the submission is dropped silently.
+If the selected insurer breaches an exposure limit it emits `LeadQuoteDeclined` instead of `LeadQuoteIssued`. The broker re-routes to the next insurer in the scored pool (up to k attempts); if all k solicited insurers decline, the submission is dropped.
 
 Total `CoverageRequested` → `PolicyBound` cycle: **3 days** (on the happy path). Multi-syndicate panel assembly and lead/follow pricing modes are planned.
 
@@ -540,12 +540,22 @@ The interaction with phenomenon 1 (Underwriting Cycle) is direct: voluntary exit
 
 ## 8. Market Dynamics
 
-### §8.1 Broker relationship score evolution `[PLANNED]`
+### §8.1 Broker relationship score evolution `[ACTIVE]`
 
-Each broker maintains a relationship score per (syndicate, line-of-business) pair. Scores are initialised low for new relationships and evolve through placement activity.
+The broker maintains `relationship_scores: HashMap<InsurerId, f64>`. Scores evolve through placement activity and passive decay.
 
 **Update rules:**
-- On successful placement (`RiskPlaced`): all participating syndicates receive a positive increment proportional to their share; the lead receives an additional increment.
+- On `PolicyBound`: the bound insurer receives +1.0. Called from `Simulation::dispatch` → `broker.on_policy_bound(insurer_id)`.
+- On `YearEnd`: all scores multiplied by `SCORE_DECAY = 0.80` (halves in ~3.1 years). Called from `handle_year_end` before insurer `on_year_end`.
+- Re-entrant insurer: `add_insurer` uses `entry(id).or_insert(0.0)` — existing (decayed) score is preserved; new InsurerId starts at 0.0.
+
+**Score → routing behaviour:** `on_coverage_requested` sorts the active insurer pool by score descending; cyclic distance from `next_insurer_idx` breaks ties (equal-score pools degenerate to round-robin). The top-k insurers (canonical: k=4 of N) are solicited concurrently. This produces placement stickiness (see `phenomena.md §5`) and gives new entrants a structural disadvantage until they build score via competitive pricing.
+
+**Gini diagnostic:** `YearStats.gini_market_share` (computed in `analysis::analyse`) measures the Gini coefficient of `PolicyBound` counts across active insurers per year. Warmup Gini ≈ 0.03–0.06 (near-equal scores); post-entry-wave Gini rises to 0.10–0.19 as high-score incumbents and zero-score new entrants compete for k=4 slots.
+
+**Initialisation:** insurers start at score 0.0 (uniform). First-year routing is effectively round-robin.
+
+*[Previous PLANNED content:]*
 - On quote declined (`QuoteDeclined`): small negative adjustment.
 - On syndicate non-performance: larger negative adjustment.
 - Passive decay: scores decay toward a baseline at a slow exponential rate.

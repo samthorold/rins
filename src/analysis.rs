@@ -40,6 +40,9 @@ pub struct YearStats {
     /// AP/TP ratio in effect at the start of this year (computed from prior-year trailing CRs).
     /// 1.0 = neutral; < 1.0 = soft market; > 1.0 = hard market.
     pub ap_tp_factor: f64,
+    /// Gini coefficient of bound-policy count across active insurers in this year.
+    /// 0.0 = perfectly equal share; 1.0 = one insurer writes everything.
+    pub gini_market_share: f64,
 }
 
 impl YearStats {
@@ -61,6 +64,7 @@ impl YearStats {
             re_entry_count: 0,
             insurer_count: 0,
             ap_tp_factor: 0.0,
+            gini_market_share: 0.0,
         }
     }
 
@@ -273,6 +277,24 @@ impl std::fmt::Display for MechanicsViolation {
     }
 }
 
+/// Compute the Gini coefficient over a map of bound-policy counts per insurer.
+/// Uses the sorted-array formula: G = 2Σ(i × x_i) / (n × Σx_i) − (n+1)/n.
+/// Returns 0.0 for empty or all-zero inputs.
+fn gini_from_counts(counts: &HashMap<InsurerId, u32>) -> f64 {
+    let mut xs: Vec<f64> = counts.values().map(|&c| c as f64).collect();
+    if xs.is_empty() {
+        return 0.0;
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = xs.len() as f64;
+    let total: f64 = xs.iter().sum();
+    if total == 0.0 {
+        return 0.0;
+    }
+    let weighted: f64 = xs.iter().enumerate().map(|(i, &x)| (i + 1) as f64 * x).sum();
+    2.0 * weighted / (n * total) - (n + 1.0) / n
+}
+
 /// Compute per-year statistics from a typed event slice.
 ///
 /// `initial_capitals` seeds each insurer's capital before any ClaimSettled is seen.
@@ -301,15 +323,19 @@ pub fn analyse(
     let mut last_capital: HashMap<InsurerId, u64> = initial_capitals.clone();
     let mut assets_seen: HashMap<u32, HashSet<InsuredId>> = HashMap::new();
     let mut active_insurer_count = initial_capitals.len() as u32;
+    // Bound-policy count per (year, insurer_id) — used to compute the Gini coefficient.
+    let mut bound_by_insurer: HashMap<u32, HashMap<InsurerId, u32>> = HashMap::new();
 
     for sim_event in events {
         let year = sim_event.day.year().0;
 
         match &sim_event.event {
-            Event::PolicyBound { premium, sum_insured, .. } => {
+            Event::PolicyBound { insurer_id, premium, sum_insured, .. } => {
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.bound_premium += premium;
                 s.sum_insured += sum_insured;
+                // Track per-insurer bound count for Gini computation.
+                *bound_by_insurer.entry(year).or_default().entry(*insurer_id).or_insert(0) += 1;
             }
             Event::ClaimSettled { insurer_id, amount, remaining_capital, .. } => {
                 last_capital.insert(*insurer_id, *remaining_capital);
@@ -365,6 +391,10 @@ pub fn analyse(
                 let s = stats.entry(y.0).or_insert_with(|| YearStats::zero(y.0));
                 s.total_capital = total_cap;
                 s.insurer_count = active_insurer_count;
+                // Gini coefficient of bound-policy count across active writers this year.
+                if let Some(counts) = bound_by_insurer.get(&y.0) {
+                    s.gini_market_share = gini_from_counts(counts);
+                }
             }
             _ => {}
         }

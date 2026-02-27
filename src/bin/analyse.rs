@@ -223,10 +223,10 @@ fn main() {
 
     println!("=== Tier 2 — Year Character Table ===");
     println!(
-        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>6} | {:>10}",
-        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "AvgCR3%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>6} | {:>10} | {:>6}",
+        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "AvgCR3%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers", "Gini"
     );
-    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6));
 
     let mut recent_lrs: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
 
@@ -315,7 +315,7 @@ fn main() {
             }
         };
         println!(
-            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>8} | {} | {}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>8} | {} | {} | {:>6.3}",
             s.year,
             assets_b,
             gul_b,
@@ -330,6 +330,7 @@ fn main() {
             s.dropped_count,
             ap_tp_str,
             insurer_str,
+            s.gini_market_share,
         );
     }
     println!();

@@ -387,6 +387,8 @@ impl Simulation {
                             }
                         }
                     }
+                    // Update broker relationship score: incumbent gets +1 for each bound policy.
+                    self.broker.on_policy_bound(insurer_id);
                 }
 
                 self.year_premium_written += premium;
@@ -510,6 +512,9 @@ impl Simulation {
     }
 
     fn handle_year_end(&mut self, day: Day, year: Year) {
+        // Decay broker relationship scores at year boundary (before insurer on_year_end).
+        self.broker.on_year_end();
+
         // Update each insurer's expected_loss_fraction via EWMA from this year's experience.
         // Also detect zombies (capital > 0 but max_line < min policy size) and mark them insolvent.
         // Collect emitted events before scheduling to avoid conflicting mutable borrows.

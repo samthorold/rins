@@ -160,7 +160,7 @@ impl SimulationConfig {
                     "US-Gulf".to_string(),
                 ],
             },
-            quotes_per_submission: None, // solicit all 8 insurers per submission
+            quotes_per_submission: Some(4), // solicit top-4 (by relationship score) per submission
             max_rate_on_line: 0.15, // 15% RoL ceiling — above current band, binding post-hardening
             disable_cats: false,
             runoff_cr_threshold: 1.05, // exits after 3 consecutive loss-making years (avg CR > 105%)
