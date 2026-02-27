@@ -51,6 +51,10 @@ pub struct Insurer {
     own_years: u32,
 }
 
+/// Minimum weight always given to the market AP/TP factor, even at full own-experience credibility.
+/// At credibility=1.0 the blend is: 70% own signal + 30% market signal.
+const MARKET_FLOOR_WEIGHT: f64 = 0.30;
+
 impl Insurer {
     pub fn new(
         id: InsurerId,
@@ -198,9 +202,17 @@ impl Insurer {
     }
 
     /// Blend market factor with per-insurer capital state and loss history.
-    /// credibility = min(own_years / 5.0, 1.0); new entrant follows market exactly.
+    ///
+    /// Market weight starts at 1.0 for new entrants (no own experience) and falls as credibility
+    /// accumulates, but never below `MARKET_FLOOR_WEIGHT`. This ensures that even mature insurers
+    /// remain anchored to the market signal — mirroring how Lloyd's syndicates observe competitor
+    /// pricing and PMD benchmarks regardless of own history.
+    ///
+    /// `credibility = min(own_years / 5, 1.0)`
+    /// `market_weight = max(1 − credibility, MARKET_FLOOR_WEIGHT)`
     fn own_ap_tp_factor(&self, market_factor: f64) -> f64 {
         let credibility = (self.own_years as f64 / 5.0).min(1.0);
+        let market_weight = (1.0 - credibility).max(MARKET_FLOOR_WEIGHT);
 
         let depletion = if self.initial_capital > 0 {
             (1.0 - self.capital as f64 / self.initial_capital as f64).max(0.0)
@@ -217,8 +229,8 @@ impl Insurer {
             (avg_cr - 1.0).clamp(-0.25, 0.40)
         };
 
-        let own_factor = (1.0 + own_cr_signal + cap_depletion_adj).clamp(0.90, 1.40);
-        credibility * own_factor + (1.0 - credibility) * market_factor
+        let own_factor = 1.0 + own_cr_signal + cap_depletion_adj;
+        (1.0 - market_weight) * own_factor + market_weight * market_factor
     }
 
     /// Underwriter channel: TP × own_ap_tp_factor (blend of market signal and own state).
@@ -852,8 +864,9 @@ mod tests {
     fn depleted_insurer_quotes_above_market_with_full_credibility() {
         // 30% depletion, own_years=5 (credibility=1.0), no loss history → own_cr_signal=0.0
         // cap_depletion_adj = clamp(0.30 × 1.0, 0, 0.30) = 0.30
-        // own_factor = clamp(1.0 + 0.0 + 0.30, 0.90, 1.40) = 1.30
-        // insurer_ap_tp = 1.0 × 1.30 + 0.0 × market_factor = 1.30
+        // own_factor = 1.0 + 0.0 + 0.30 = 1.30
+        // market_weight = max(1.0 − 1.0, 0.30) = 0.30 (floor — market always has a voice)
+        // insurer_ap_tp = 0.70 × 1.30 + 0.30 × 1.0 = 0.91 + 0.30 = 1.21
         let initial_capital = 1_000_000i64;
         let current_capital = 700_000i64; // 30% depletion
         let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
@@ -862,9 +875,9 @@ mod tests {
 
         let premium = quote_premium(&ins, 1.0);
         let atp = (0.239 * ASSET_VALUE as f64 / 0.70).round() as u64;
-        let expected = (atp as f64 * 1.30).round() as u64;
+        let expected = (atp as f64 * 1.21).round() as u64;
         assert_eq!(premium, expected,
-            "depleted insurer with full credibility must quote at own_factor=1.30: got {premium}, expected {expected}");
+            "depleted insurer with full credibility must quote at 0.70×1.30+0.30×1.0=1.21: got {premium}, expected {expected}");
     }
 
     #[test]
@@ -872,7 +885,7 @@ mod tests {
         // No capital depletion (capital=initial); credibility=1.0 (own_years=5).
         // Bind one policy, settle 200% claim relative to premium → LR=2.0.
         // own_cr_signal = clamp((2.0 + 0.0) − 1.0, −0.25, 0.40) = 0.40 (expense_ratio=0.0)
-        // own_factor = clamp(1.0 + 0.40 + 0.0, 0.90, 1.40) = 1.40
+        // own_factor = 1.0 + 0.40 + 0.0 = 1.40
         // insurer_ap_tp = 1.0 × 1.40 = 1.40 > neutral market_factor=1.0
         let capital = 100_000_000i64;
         let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
@@ -925,11 +938,12 @@ mod tests {
         // own_years=2 → credibility=0.4
         // Record LR=2.0 (claims=2×premium, expense_ratio=0.0 → CR=2.0)
         // own_cr_signal = clamp(2.0 − 1.0, −0.25, 0.40) = 0.40 (capped)
-        // own_factor = clamp(1.0 + 0.40 + 0.0, 0.90, 1.40) = 1.40 (capped)
+        // cap_depletion_adj = 0.0 (depletion_sensitivity=0.0 — isolates credibility blending)
+        // own_factor = 1.0 + 0.40 + 0.0 = 1.40
         // market_factor = 0.90
         // insurer_ap_tp = 0.4 × 1.40 + 0.6 × 0.90 = 0.56 + 0.54 = 1.10
         let capital = 100_000_000i64;
-        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0);
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0);
         ins.own_years = 2;
 
         // Record one high-loss year: LR=2.0

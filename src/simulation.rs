@@ -542,7 +542,7 @@ impl Simulation {
             let avg_cr = avg_lr + expense_ratio;
             let cr_signal = (avg_cr - 1.0_f64).clamp(-0.25, 0.40);
             let capacity_uplift = if self.year_dropped_count > 10 { 0.05 } else { 0.0 };
-            (1.0 + cr_signal + capacity_uplift).clamp(0.90, 1.40)
+            1.0 + cr_signal + capacity_uplift
         };
 
         // Entry fires when market prices above technical (AP/TP > threshold).
@@ -1269,7 +1269,7 @@ mod tests {
     fn syndicate_entry_fires_on_profitability_signal() {
         // High attritional loss rate (annual_rate=10) with attritional_elf=0.239, target_LR=0.70:
         // E[LR] ≈ 10 × exp(-3+0.5) × SI / (0.239/0.70 × SI) ≈ 2.4× → avg_cr >> 1.10
-        // → market_ap_tp_factor = 1.40 (hard cap) from year 3 onward → entry fires.
+        // → market_ap_tp_factor ≥ 1.40 from year 3 onward → entry fires.
         let mut config = minimal_config(10, 7);
         config.attritional.annual_rate = 10.0;
         let sim = run_sim(config);
@@ -1283,10 +1283,11 @@ mod tests {
 
     #[test]
     fn syndicate_entry_not_triggered_without_profitability_signal() {
-        // No catastrophe events → deterministically low attritional LR ≈ 0.48 → avg_cr ≈ 0.48
-        // → market_ap_tp_factor = 0.90 (floor) < 1.10 → entry never fires.
+        // No losses at all → LR = 0 → avg_cr = 0 → cr_signal = −0.25 → factor = 0.75 < 1.10
+        // → entry never fires. Zero attritional rate makes this deterministic regardless of seed.
         let mut config = minimal_config(10, 5);
         config.catastrophe.annual_frequency = 0.0;
+        config.attritional.annual_rate = 0.0;
         let sim = run_sim(config);
         let entered = sim
             .log

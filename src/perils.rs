@@ -93,7 +93,7 @@ pub fn schedule_attritional_losses_for_insured(
         return vec![];
     }
     let model = DamageFractionModel::LogNormal { mu: config.mu, sigma: config.sigma };
-    let poisson = Poisson::new(config.annual_rate).expect("invalid Poisson rate");
+    let Ok(poisson) = Poisson::new(config.annual_rate) else { return vec![] };
     let n = poisson.sample(rng) as u64;
 
     (0..n)

@@ -240,7 +240,7 @@ fn print_analysis(
             let avg_cr = avg_lr + expense_ratio;
             let cr_signal = (avg_cr - 1.0_f64).clamp(-0.25, 0.40);
             let capacity_uplift = if s.dropped_count > 10 { 0.05 } else { 0.0 };
-            let factor = (1.0 + cr_signal + capacity_uplift).clamp(0.90, 1.40);
+            let factor = 1.0 + cr_signal + capacity_uplift;
             format!("{:>6.2}", factor)
         } else {
             "  n/a ".to_string()
