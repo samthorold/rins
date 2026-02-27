@@ -12,7 +12,9 @@ The canonical run (seed=42, 8×150M insurers, 100 insureds, 25 analysis years) s
 
 **Gap 1 — Coordinator-broadcast pricing.** All insurers apply the same `market_ap_tp_factor`, computed from the market-aggregate 3-year CR. A capital-depleted incumbent prices identically to a flush new entrant. There is no mechanism for insurers to hold rates while competitors soften, so the hard market collapses as soon as the aggregate CR signal normalises — regardless of individual capital recovery status.
 
-**Gap 2 — No voluntary exit.** Insurers enter when AP/TP > 1.10 but never leave except via insolvency. Supply is a ratchet: it expands in hard markets and holds in soft ones. The resulting monotonic capital accumulation prevents the soft-market phase of the cycle from developing.
+**Gap 2 — No voluntary exit, and uncapped entry count.** Insurers enter when AP/TP > 1.10 but never leave except via insolvency. Supply is a ratchet: it expands in hard markets and holds in soft ones. The resulting monotonic capital accumulation prevents the soft-market phase of the cycle from developing.
+
+A companion sub-gap on the entry side: the 1-year cooldown constrains the *timing* of entry but not the *total* number of entrants. A sustained 10-year hard market would spawn 10 new insurers on top of the starting 8 — more than doubling capacity — with no declining marginal attractiveness signal. The real market has a finite pool of willing capital with a rising supply curve: the nth entrant requires higher expected returns than the (n-1)th because it draws from progressively less-experienced or higher-hurdle capital sources. The model assumes flat, infinite supply. Both the exit floor and the entry ceiling are needed for a symmetric supply response; fixing only voluntary exit leaves the entry side uncapped.
 
 **Gap 3 — Inelastic demand.** All 100 insureds buy full coverage at fixed sum_insured. Demand does not respond to price. In the real market, hard-market rate spikes cause buyers to raise retentions, reduce limits, or self-insure, shrinking effective demand and absorbing some of the supply contraction. Soft-market rates attract buyers back in. Without this, new entrant capital can only clear by reducing rates — it has no volume to absorb.
 
@@ -95,16 +97,18 @@ A richer extension: buyers with above-average GUL history have lower reservation
 
 ---
 
-## Phase 4 — Competitive quoting (broker solicits multiple simultaneous quotes)
+## Phase 4 — Relationship-ranked routing (competitive quoting infrastructure already built)
 
-**Mechanism.** The broker submits each risk to *k* insurers simultaneously (e.g. k=3, relationship-ranked or round-robin). It collects all responses and selects the cheapest willing insurer that can accommodate the exposure. This requires restructuring the quoting chain: `LeadQuoteRequested` fires to *k* insurers in parallel, the broker waits for all responses, then emits `QuotePresented` to the insured using the best available quote.
+**What is already implemented.** The concurrent solicitation and cheapest-wins selection mechanism described in earlier versions of this phase is already in production. `Broker::on_coverage_requested` solicits `k = quotes_per_submission` insurers in parallel (canonical: `None` → all N insurers); `on_lead_quote_issued` tracks responses in `PendingQuote` and retains the cheapest; `QuotePresented` carries the winning `(insurer_id, premium)`. Phase 1's per-insurer `own_ap_tp_factor` already produces meaningful price dispersion (CV 0.07–0.18 post-warmup), so competition over quotes is real.
 
-This is the architectural prerequisite for the lead-follow subscription model (Phase 5). In the short term it produces genuine competitive clearing: the market rate for any risk is the lowest price offered by a capacity-able insurer, not an administrative formula.
+**Remaining work.** Round-robin start-index routing means the subset of insurers solicited when `k < N` is positionally determined, not relationship-determined. Replacing the round-robin start index with relationship-score ranking is the only architectural change needed: the broker selects the top-k insurers by score for the relevant line, solicits them concurrently, and the cheapest-wins logic runs unchanged.
 
-**Primary hypothesis.** Rate dispersion across insurers produces competitive erosion in soft markets. The cheapest willing insurer wins each submission; persistently expensive insurers lose market share and (via Phase 2) eventually exit. Market concentration falls in soft markets as insurers compete on price; rises after cat years as depleted high-pricing incumbents cede share.
+This is the architectural prerequisite for the lead-follow subscription model (Phase 5), which requires a nominated lead (highest-score insurer) distinct from the follower pool.
+
+**Primary hypothesis.** With relationship-ranked routing, submission flow concentrates on high-score incumbents. New entrants — starting with low scores — win business disproportionately by pricing below incumbents, building scores gradually. Market share becomes a function of relationship score × price competitiveness, not routing position. Persistently expensive incumbents lose share to lower-priced new entrants and (via Phase 2) eventually exit.
 
 **Secondary hypotheses.**
-- Gini coefficient of market share across insurers rises post-cat (concentration) and falls in soft markets (fragmentation).
+- Gini coefficient of market share across insurers rises post-cat (concentration among surviving incumbents) and falls in soft markets (new entrant competition).
 - Phenomenon 4 (Specialist vs Generalist Divergence) can begin to emerge: insurers with aggressive pricing on specific risk types win disproportionate share of those risks.
 
 **Diagnostics.** Per-insurer bound-policy count, by year. Market share Gini coefficient measurable from `PolicyBound.insurer_id` counts.
