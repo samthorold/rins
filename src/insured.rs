@@ -2,13 +2,21 @@ use crate::config::ASSET_VALUE;
 use crate::events::{Event, Peril, Risk};
 use crate::types::{Day, InsuredId, InsurerId, SubmissionId};
 
+/// Uplift added to acceptance threshold per unit of damage fraction suffered.
+const UPLIFT_FACTOR: f64 = 0.5;
+/// Multiplier applied to `rol_uplift` at each YearEnd (~1.5yr half-life).
+const UPLIFT_DECAY: f64 = 0.65;
+/// Maximum additional acceptance headroom above `base_max_rate_on_line`.
+const MAX_UPLIFT: f64 = 0.50;
+
 pub struct Insured {
     pub id: InsuredId,
     /// The asset this insured holds and seeks coverage for.
     pub risk: Risk,
-    /// Maximum rate on line (premium / sum_insured) the insured will accept.
-    /// Quotes above this threshold trigger `QuoteRejected` and the insured retries at renewal.
-    max_rate_on_line: f64,
+    /// Baseline reservation price (set at construction, never mutated).
+    base_max_rate_on_line: f64,
+    /// Additional acceptance headroom accumulated from recent losses; decays each year.
+    rol_uplift: f64,
 }
 
 impl Insured {
@@ -16,7 +24,8 @@ impl Insured {
         Self {
             id,
             risk: Risk { sum_insured: ASSET_VALUE, territory, perils_covered },
-            max_rate_on_line,
+            base_max_rate_on_line: max_rate_on_line,
+            rol_uplift: 0.0,
         }
     }
 
@@ -24,8 +33,24 @@ impl Insured {
         self.risk.sum_insured
     }
 
+    /// Effective acceptance threshold: base + accumulated uplift from recent losses.
+    pub fn effective_max_rol(&self) -> f64 {
+        self.base_max_rate_on_line + self.rol_uplift
+    }
+
+    /// Called when an `AssetDamage` event hits this insured.
+    /// Increases acceptance threshold proportionally to severity; capped at `MAX_UPLIFT`.
+    pub fn on_asset_damage(&mut self, damage_fraction: f64) {
+        self.rol_uplift = (self.rol_uplift + UPLIFT_FACTOR * damage_fraction).min(MAX_UPLIFT);
+    }
+
+    /// Called at each `YearEnd`. Decays the uplift so memories fade over ~1.5 years.
+    pub fn on_year_end(&mut self) {
+        self.rol_uplift *= UPLIFT_DECAY;
+    }
+
     /// The insured decides whether to accept the quote based on its reservation price.
-    /// Emits `QuoteRejected` if `premium / sum_insured > max_rate_on_line`; `QuoteAccepted` otherwise.
+    /// Emits `QuoteRejected` if `premium / sum_insured > effective_max_rol()`; `QuoteAccepted` otherwise.
     pub fn on_quote_presented(
         &self,
         day: Day,
@@ -34,7 +59,7 @@ impl Insured {
         premium: u64,
     ) -> Vec<(Day, Event)> {
         let rate = premium as f64 / self.risk.sum_insured as f64;
-        if rate > self.max_rate_on_line {
+        if rate > self.effective_max_rol() {
             vec![(day, Event::QuoteRejected { submission_id, insured_id: self.id })]
         } else {
             vec![(
@@ -61,6 +86,103 @@ mod tests {
             vec![Peril::WindstormAtlantic, Peril::Attritional],
             1.0, // accepts all quotes
         )
+    }
+
+    // ── post-loss demand uplift ───────────────────────────────────────────────
+
+    #[test]
+    fn on_asset_damage_raises_effective_max_rol() {
+        let mut insured = Insured::new(
+            InsuredId(1), "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic], 0.10,
+        );
+        insured.on_asset_damage(0.20);
+        // uplift = 0.5 × 0.20 = 0.10; effective = 0.10 + 0.10 = 0.20
+        assert!((insured.effective_max_rol() - 0.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_damage_does_not_change_uplift() {
+        let mut insured = Insured::new(
+            InsuredId(2), "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic], 0.10,
+        );
+        insured.on_asset_damage(0.0);
+        assert!((insured.effective_max_rol() - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn on_year_end_decays_rol_uplift() {
+        let mut insured = Insured::new(
+            InsuredId(3), "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic], 0.10,
+        );
+        insured.on_asset_damage(0.40); // uplift = 0.20
+        insured.on_year_end();
+        // after decay: 0.20 × 0.65 = 0.13; effective = 0.10 + 0.13 = 0.23
+        let expected = 0.10 + 0.20 * UPLIFT_DECAY;
+        assert!((insured.effective_max_rol() - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn uplift_decays_toward_zero_over_years() {
+        let mut insured = Insured::new(
+            InsuredId(4), "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic], 0.10,
+        );
+        insured.on_asset_damage(1.0); // uplift = 0.50 (capped)
+        for _ in 0..10 { insured.on_year_end(); }
+        // 0.50 × 0.65^10 ≈ 0.013 — well below 0.01 is borderline; check < 0.02
+        assert!(insured.effective_max_rol() - 0.10 < 0.02, "uplift should be near zero after 10 years");
+    }
+
+    #[test]
+    fn uplift_capped_at_max_uplift() {
+        let mut insured = Insured::new(
+            InsuredId(5), "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic], 0.10,
+        );
+        for _ in 0..5 { insured.on_asset_damage(0.50); } // uncapped sum = 1.25
+        assert!((insured.effective_max_rol() - (0.10 + MAX_UPLIFT)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quote_accepted_above_base_after_large_loss() {
+        // Base=0.10, quote at 18% RoL, damage fraction=0.50 → uplift=0.25, effective=0.35 → accept
+        let mut insured = Insured::new(
+            InsuredId(6), "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic, Peril::Attritional], 0.10,
+        );
+        insured.on_asset_damage(0.50); // uplift = 0.25
+        let premium = (ASSET_VALUE as f64 * 0.18) as u64;
+        let events = insured.on_quote_presented(Day(1), SubmissionId(1), InsurerId(1), premium);
+        assert!(matches!(events[0].1, Event::QuoteAccepted { .. }),
+            "quote at 18% RoL should be accepted after uplift to 35%, got {:?}", events[0].1);
+    }
+
+    #[test]
+    fn quote_rejected_above_effective_after_small_loss() {
+        // Base=0.10, uplift=0.02 (damage=0.04), effective=0.12; quote at 13% → reject
+        let mut insured = Insured::new(
+            InsuredId(7), "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic, Peril::Attritional], 0.10,
+        );
+        insured.on_asset_damage(0.04); // uplift = 0.5 × 0.04 = 0.02
+        let premium = (ASSET_VALUE as f64 * 0.13) as u64;
+        let events = insured.on_quote_presented(Day(1), SubmissionId(2), InsurerId(1), premium);
+        assert!(matches!(events[0].1, Event::QuoteRejected { .. }),
+            "quote at 13% should be rejected when effective threshold is 12%");
+    }
+
+    #[test]
+    fn uplift_accumulates_across_multiple_losses() {
+        let mut insured = Insured::new(
+            InsuredId(8), "US-SE".to_string(),
+            vec![Peril::WindstormAtlantic], 0.10,
+        );
+        insured.on_asset_damage(0.10); // uplift = 0.05
+        insured.on_asset_damage(0.10); // uplift = 0.10
+        assert!((insured.effective_max_rol() - 0.20).abs() < 1e-9);
     }
 
     #[test]

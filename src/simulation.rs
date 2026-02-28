@@ -413,6 +413,15 @@ impl Simulation {
                 for (d, e) in events {
                     self.schedule(d, e);
                 }
+
+                // Notify insured so uplift state reflects the loss severity.
+                let df = ground_up_loss as f64 / ASSET_VALUE as f64;
+                for insured in &mut self.broker.insureds {
+                    if insured.id == insured_id {
+                        insured.on_asset_damage(df);
+                        break;
+                    }
+                }
             }
 
             Event::ClaimSettled { insurer_id, amount, peril, .. } => {
@@ -498,6 +507,11 @@ impl Simulation {
     fn handle_year_end(&mut self, day: Day, year: Year) {
         // Decay broker relationship scores at year boundary (before insurer on_year_end).
         self.broker.on_year_end();
+
+        // Decay post-loss demand uplift for all insureds.
+        for insured in &mut self.broker.insureds {
+            insured.on_year_end();
+        }
 
         // Update each insurer's expected_loss_fraction via EWMA from this year's experience.
         // Also detect zombies (capital > 0 but max_line < min policy size) and mark them insolvent.
