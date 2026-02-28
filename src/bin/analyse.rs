@@ -233,11 +233,12 @@ fn main() {
     println!("=== Tier 2 — Year Character Table ===");
     println!(
         "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>6} | {:>10} | {:>6}",
-        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "AvgCR3%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers", "Gini"
+        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers", "Gini"
     );
     println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6));
 
-    let mut recent_lrs: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
+    const CR_EWMA_ALPHA: f64 = 1.0 / 3.0;
+    let mut cr_ewma: Option<f64> = None;
 
     // ── Tier 3: premium dispersion ────────────────────────────────────────────
     // Group LeadQuoteIssued.premium by year, compute mean and population CV.
@@ -289,28 +290,23 @@ fn main() {
         let cov_b = s.sum_insured as f64 / CENTS_PER_BUSD;
         let claims_b = s.claims as f64 / CENTS_PER_BUSD;
         let lr = if s.bound_premium > 0 { s.claims as f64 / s.bound_premium as f64 } else { 0.0 };
-        recent_lrs.push_back(lr);
-        if recent_lrs.len() > 3 { recent_lrs.pop_front(); }
-        let n = recent_lrs.len();
-        let avg_cr_pct: Option<f64> = if n >= 2 {
-            let avg_lr = recent_lrs.iter().sum::<f64>() / n as f64;
-            Some((avg_lr + expense_ratio) * 100.0)
-        } else {
-            None
+        let cr = lr + expense_ratio;
+        cr_ewma = Some(match cr_ewma {
+            None       => cr,
+            Some(prev) => CR_EWMA_ALPHA * cr + (1.0 - CR_EWMA_ALPHA) * prev,
+        });
+        let avg_cr_str = match cr_ewma {
+            Some(v) => format!("{:>7.1}%", v * 100.0),
+            None    => "   n/a  ".to_string(),
         };
-        let avg_cr_str = match avg_cr_pct {
-            Some(v) => format!("{:>7.1}%", v),
-            None => "   n/a  ".to_string(),
-        };
-        let ap_tp_str = if n >= 2 {
-            let avg_lr = recent_lrs.iter().sum::<f64>() / n as f64;
-            let avg_cr = avg_lr + expense_ratio;
-            let cr_signal = (avg_cr - 1.0_f64).clamp(-0.50, 0.80);
-            let capacity_uplift = if s.dropped_count > 10 { 0.05 } else { 0.0 };
-            let factor = 1.0 + cr_signal + capacity_uplift;
-            format!("{:>6.2}", factor)
-        } else {
-            "  n/a ".to_string()
+        let ap_tp_str = match cr_ewma {
+            None => "  n/a ".to_string(),
+            Some(ewma_cr) => {
+                let cr_signal = (ewma_cr - 1.0_f64).clamp(-0.50, 0.80);
+                let capacity_uplift = if s.dropped_count > 10 { 0.05 } else { 0.0 };
+                let factor = 1.0 + cr_signal + capacity_uplift;
+                format!("{:>6.2}", factor)
+            }
         };
         let insurer_str = {
             let base = format!("{}", s.insurer_count);

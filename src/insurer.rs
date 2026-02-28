@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use crate::events::{DeclineReason, Event, Peril, Risk};
 use crate::types::{Day, InsuredId, InsurerId, PolicyId, SubmissionId, YearAccumulator};
@@ -45,8 +45,8 @@ pub struct Insurer {
     initial_capital: i64,
     /// Sensitivity of capital-depletion adjustment: cap_depletion_adj = depletion × sensitivity.
     depletion_sensitivity: f64,
-    /// Rolling per-insurer annual loss ratios (max 3 years) for own CR computation.
-    own_loss_ratios: VecDeque<f64>,
+    /// EWMA of per-insurer annual combined ratios (α = 1/3, 5-year span).
+    own_cr_ewma: Option<f64>,
     /// Number of years of own experience accumulated; drives credibility weight.
     own_years: u32,
 }
@@ -54,6 +54,10 @@ pub struct Insurer {
 /// Minimum weight always given to the market AP/TP factor, even at full own-experience credibility.
 /// At credibility=1.0 the blend is: 70% own signal + 30% market signal.
 const MARKET_FLOOR_WEIGHT: f64 = 0.30;
+
+/// EWMA smoothing factor for the per-insurer combined-ratio signal.
+/// α = 2/(5+1) = 1/3 — equivalent to a 5-year exponentially-weighted span.
+const OWN_CR_EWMA_ALPHA: f64 = 1.0 / 3.0;
 
 impl Insurer {
     pub fn new(
@@ -88,7 +92,7 @@ impl Insurer {
             cat_policy_map: HashMap::new(),
             initial_capital,
             depletion_sensitivity,
-            own_loss_ratios: VecDeque::new(),
+            own_cr_ewma: None,
             own_years: 0,
         }
     }
@@ -221,12 +225,9 @@ impl Insurer {
         };
         let cap_depletion_adj = (depletion * self.depletion_sensitivity).clamp(0.0, 0.30);
 
-        let own_cr_signal = if self.own_loss_ratios.is_empty() {
-            0.0
-        } else {
-            let avg_lr = self.own_loss_ratios.iter().sum::<f64>() / self.own_loss_ratios.len() as f64;
-            let avg_cr = avg_lr + self.expense_ratio;
-            (avg_cr - 1.0).clamp(-0.50, 0.80)
+        let own_cr_signal = match self.own_cr_ewma {
+            None => 0.0,
+            Some(ewma_cr) => (ewma_cr - 1.0).clamp(-0.50, 0.80),
         };
 
         let own_factor = 1.0 + own_cr_signal + cap_depletion_adj;
@@ -270,13 +271,14 @@ impl Insurer {
             self.attritional_elf = self.ewma_credibility * realized_att_lf
                 + (1.0 - self.ewma_credibility) * self.attritional_elf;
         }
-        // Accumulate per-insurer loss ratio for own CR pricing signal.
+        // Accumulate per-insurer combined ratio into EWMA for own CR pricing signal.
         if self.ytd.premium > 0 {
             let own_lr = self.ytd.total_claims as f64 / self.ytd.premium as f64;
-            self.own_loss_ratios.push_back(own_lr);
-            if self.own_loss_ratios.len() > 3 {
-                self.own_loss_ratios.pop_front();
-            }
+            let own_cr = own_lr + self.expense_ratio;
+            self.own_cr_ewma = Some(match self.own_cr_ewma {
+                None       => own_cr,
+                Some(prev) => OWN_CR_EWMA_ALPHA * own_cr + (1.0 - OWN_CR_EWMA_ALPHA) * prev,
+            });
         }
         self.own_years += 1;
         self.ytd.reset();
@@ -928,7 +930,7 @@ mod tests {
         let _ = ins.on_year_end(Day(360), ASSET_VALUE);
 
         assert_eq!(ins.own_years, 1, "own_years must increment to 1 after one YearEnd");
-        assert_eq!(ins.own_loss_ratios.len(), 1, "one LR must be recorded");
+        assert!(ins.own_cr_ewma.is_some(), "own_cr_ewma must be initialised after one YearEnd with premium");
 
         // With own_years=1 credibility=0.2; own_factor elevated (high LR).
         // At market_factor=0.90 (soft), premium must still be > market's pure TP × 0.90

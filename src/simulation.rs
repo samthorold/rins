@@ -7,6 +7,11 @@ use rand_chacha::ChaCha20Rng;
 /// Days from CoverageRequested to PolicyBound (the quoting chain length).
 const QUOTING_CHAIN_DAYS: u64 = 3;
 
+/// EWMA smoothing factor for the market combined-ratio signal.
+/// α = 2/(5+1) = 1/3 — equivalent to a 5-year exponentially-weighted span.
+/// Weight profile: year N=33%, N-1=22%, N-2=15%, N-3=10%, N-4=7% (≈87% in 5 yrs).
+const MARKET_CR_EWMA_ALPHA: f64 = 1.0 / 3.0;
+
 /// 1-in-N PML damage fraction for a compound cat model: take the per-class max.
 ///
 /// For each class: pml = scale × (return_period × λ)^(1/shape).
@@ -54,8 +59,9 @@ pub struct Simulation {
     year_claims_settled: u64,
     /// Count of SubmissionDropped events this year. Reset at YearStart.
     year_dropped_count: u32,
-    /// Rolling 2-year buffer of annual loss ratios (for trailing CR check).
-    recent_loss_ratios: std::collections::VecDeque<f64>,
+    /// EWMA of annual combined ratios (α = 1/3, equivalent to 5-year span).
+    /// None until the first year of data is available.
+    cr_ewma: Option<f64>,
     /// 1-in-200 damage fraction computed at construction; used to size new standard entrants.
     pml_200: f64,
     /// Next InsurerId to assign to a dynamically-spawned entrant.
@@ -144,7 +150,7 @@ impl Simulation {
             year_premium_written: 0,
             year_claims_settled: 0,
             year_dropped_count: 0,
-            recent_loss_ratios: std::collections::VecDeque::new(),
+            cr_ewma: None,
             pml_200,
             next_insurer_id,
             last_entry_year: None,
@@ -514,24 +520,23 @@ impl Simulation {
         } else {
             0.0
         };
-        self.recent_loss_ratios.push_back(lr);
-        if self.recent_loss_ratios.len() > 3 {
-            self.recent_loss_ratios.pop_front();
-        }
+        let cr = lr + expense_ratio;
+        self.cr_ewma = Some(match self.cr_ewma {
+            None       => cr,
+            Some(prev) => MARKET_CR_EWMA_ALPHA * cr + (1.0 - MARKET_CR_EWMA_ALPHA) * prev,
+        });
 
         // ── AP/TP market factor ────────────────────────────────────────────────
         // Reflects where the market clears relative to the actuarial floor.
         // < 1.0 = soft market (AP below TP); > 1.0 = hard market.
         // Insufficient history (warmup) → neutral (1.0).
-        let n = self.recent_loss_ratios.len();
-        self.market_ap_tp_factor = if n < 2 {
-            1.0
-        } else {
-            let avg_lr = self.recent_loss_ratios.iter().sum::<f64>() / n as f64;
-            let avg_cr = avg_lr + expense_ratio;
-            let cr_signal = (avg_cr - 1.0_f64).clamp(-0.50, 0.80);
-            let capacity_uplift = if self.year_dropped_count > 10 { 0.05 } else { 0.0 };
-            1.0 + cr_signal + capacity_uplift
+        self.market_ap_tp_factor = match self.cr_ewma {
+            None => 1.0,
+            Some(ewma_cr) => {
+                let cr_signal = (ewma_cr - 1.0_f64).clamp(-0.50, 0.80);
+                let capacity_uplift = if self.year_dropped_count > 10 { 0.05 } else { 0.0 };
+                1.0 + cr_signal + capacity_uplift
+            }
         };
 
         // Entry fires when market prices above technical (AP/TP > threshold).
