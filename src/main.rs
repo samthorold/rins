@@ -208,10 +208,10 @@ fn print_analysis(
         warmup + 1
     );
     println!(
-        "{:>4} | {:>9} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>6} | {:>10} | {:>6}",
-        "Year", "Assets(B)", "GUL(B)", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers", "Gini"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>6} | {:>10} | {:>6}",
+        "Year", "Assets(B)", "GUL(B)", "CatGUL%", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers", "Gini"
     );
-    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6));
 
     const CENTS_PER_BUSD: f64 = 100_000_000_000.0; // cents per billion USD
 
@@ -220,7 +220,9 @@ fn print_analysis(
 
     for s in &stats {
         let assets_b = s.total_assets as f64 / CENTS_PER_BUSD;
-        let gul_b = (s.attr_gul + s.cat_gul) as f64 / CENTS_PER_BUSD;
+        let total_gul = s.attr_gul + s.cat_gul;
+        let gul_b = total_gul as f64 / CENTS_PER_BUSD;
+        let cat_gul_pct = if total_gul > 0 { s.cat_gul as f64 / total_gul as f64 * 100.0 } else { 0.0 };
         let cov_b = s.sum_insured as f64 / CENTS_PER_BUSD;
         let claims_b = s.claims as f64 / CENTS_PER_BUSD;
         let lr = if s.bound_premium > 0 { s.claims as f64 / s.bound_premium as f64 } else { 0.0 };
@@ -254,10 +256,11 @@ fn print_analysis(
             }
         };
         println!(
-            "{:>4} | {:>9.2} | {:>8.2} | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>8} | {} | {} | {:>6.3}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>7.1}% | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>8} | {} | {} | {:>6.3}",
             s.year,
             assets_b,
             gul_b,
+            cat_gul_pct,
             cov_b,
             claims_b,
             s.loss_ratio() * 100.0,
