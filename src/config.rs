@@ -123,7 +123,7 @@ impl SimulationConfig {
     pub fn canonical() -> Self {
         SimulationConfig {
             seed: 42,
-            years: 45,
+            years: 50,
             warmup_years: 5,
             // 8 homogeneous established insurers, each 150M USD capital.
             //
