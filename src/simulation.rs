@@ -575,7 +575,7 @@ impl Simulation {
                      t.attritional_elf, t.ewma_credibility, t.expense_ratio,
                      t.net_line_capacity, t.solvency_capital_fraction, t.depletion_sensitivity)
                 })
-                .unwrap_or((15_000_000_000i64, 0.011, 0.62, 0.05, pml_200 * territory_factor,
+                .unwrap_or((15_000_000_000i64, 0.030, 0.62, 0.05, pml_200 * territory_factor,
                             0.030, 0.3, 0.344, Some(0.30), Some(0.30), 1.0));
 
         let insurer = Insurer::new(

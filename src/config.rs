@@ -127,8 +127,8 @@ impl SimulationConfig {
             warmup_years: 5,
             // 8 homogeneous established insurers, each 150M USD capital.
             //
-            // Cat ELF is territory-adjusted: freq=0.5 × E[df]=6.7% ÷ 3 territories = 1.1%.
-            // ATP = (0.050+0.011)/0.62 = 9.8%; premium ≈ 10.3% of SI.
+            // Cat ELF is territory-adjusted: freq=0.8 × E[df]=10.83% ÷ 3 territories = 2.89%.
+            // ATP = (0.050+0.030)/0.62 = 12.9%; premium (TP) ≈ 13.55% of SI.
             insurers: (1..=8)
                 .map(|i| InsurerConfig {
                     id: InsurerId(i),
@@ -136,9 +136,9 @@ impl SimulationConfig {
                     attritional_elf: 0.050, // annual_rate=2.0 × E[df]=2.5% → att_ELF=5.0%
                     // Compound cat ELF (÷ 3 territories):
                     //   minor: λ=1.0, E[df]=0.42% → 0.14% per insured
-                    //   major: λ=0.5, E[df]=6.67% → 1.11% per insured
-                    //   total cat_ELF ≈ 1.25% → rounded to 0.013
-                    cat_elf: 0.013,
+                    //   major: λ=0.8, E[df]=10.83% → 2.89% per insured
+                    //   total cat_ELF ≈ 3.03% → rounded to 0.030
+                    cat_elf: 0.030,
                     target_loss_ratio: 0.62,
                     ewma_credibility: 0.3,
                     expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
@@ -170,12 +170,12 @@ impl SimulationConfig {
                         max_damage_fraction: 0.08,
                     },
                     // Major events (Cat 3–5): lower frequency, capital-depleting severity.
-                    // Return period: 1-in-200 → scale × (200 × 0.5)^(1/2.5) ≈ 0.252
+                    // Return period: 1-in-200 → scale × (200 × 0.8)^(1/2.5) ≈ 0.495
                     CatEventClass {
                         label: "major".to_string(),
-                        annual_frequency: 0.5,
-                        pareto_scale: 0.040,  // minimum 4% df ($1M on $25M)
-                        pareto_shape: 2.5,    // E[df] = 0.04 × 2.5/1.5 = 6.67%
+                        annual_frequency: 0.8,
+                        pareto_scale: 0.065,  // minimum 6.5% df ($1.625M on $25M)
+                        pareto_shape: 2.5,    // E[df] = 0.065 × 2.5/1.5 = 10.83%
                         max_damage_fraction: 0.50,
                     },
                 ],
