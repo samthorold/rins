@@ -186,7 +186,7 @@ impl SimulationConfig {
                 ],
             },
             quotes_per_submission: Some(4), // solicit top-4 (by relationship score) per submission
-            max_rate_on_line: 0.15, // 15% RoL ceiling — above current band, binding post-hardening
+            max_rate_on_line: 0.30, // 30% RoL ceiling — allows market recovery after cat-driven EWMA spikes
             disable_cats: false,
         }
     }
