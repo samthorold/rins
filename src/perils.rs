@@ -1,5 +1,6 @@
 use rand::Rng;
 use rand_distr::{Distribution, LogNormal, Pareto, Poisson};
+use serde::Serialize;
 
 use crate::config::{AttritionalConfig, CatConfig};
 use crate::events::{Event, Peril, Risk};
@@ -110,6 +111,57 @@ pub fn schedule_attritional_losses_for_insured(
             ))
         })
         .collect()
+}
+
+/// A single entry in a standalone catastrophe event catalog.
+#[derive(Serialize)]
+pub struct CatCatalogEntry {
+    pub year: u32,
+    /// Absolute day within the year (1–359).
+    pub day: u64,
+    pub territory: String,
+    pub damage_fraction: f64,
+    pub peril: String,
+}
+
+/// Generate `n_years` of stochastic cat events independent of the market simulation.
+///
+/// Damage fractions are sampled at generation time from the cat damage model — unlike
+/// the main simulation, which defers sampling until `Market::on_loss_event` fires. This
+/// is appropriate for a standalone catalog tool where the damage fraction is an intrinsic
+/// property of the event rather than a market-state-dependent quantity.
+pub fn generate_cat_catalog(
+    cat: &CatConfig,
+    n_years: u32,
+    rng: &mut impl Rng,
+) -> Vec<CatCatalogEntry> {
+    if cat.annual_frequency <= 0.0 || cat.territories.is_empty() {
+        return vec![];
+    }
+    let damage_model = DamageFractionModel::Pareto {
+        scale: cat.pareto_scale,
+        shape: cat.pareto_shape,
+        cap: cat.max_damage_fraction,
+    };
+    let poisson = Poisson::new(cat.annual_frequency).expect("invalid Poisson lambda");
+    let mut entries = Vec::new();
+    for year in 1..=n_years {
+        let n = poisson.sample(rng) as u64;
+        for _ in 0..n {
+            let day = rng.random_range(1_u64..360);
+            let territory_idx = rng.random_range(0..cat.territories.len());
+            let territory = cat.territories[territory_idx].clone();
+            let damage_fraction = damage_model.sample(rng);
+            entries.push(CatCatalogEntry {
+                year,
+                day,
+                territory,
+                damage_fraction,
+                peril: "WindstormAtlantic".to_string(),
+            });
+        }
+    }
+    entries
 }
 
 #[cfg(test)]
