@@ -79,6 +79,8 @@ fn main() {
     let claim_after_fail = has(|v| matches!(v, MechanicsViolation::ClaimAfterExpiry { .. }));
     let cat_frac_fail =
         has(|v| matches!(v, MechanicsViolation::CatFractionInconsistent { .. }));
+    let invalid_df_fail =
+        has(|v| matches!(v, MechanicsViolation::InvalidDamageFraction { .. }));
 
     fn status(fail: bool) -> &'static str {
         if fail { "FAIL" } else { "PASS" }
@@ -107,6 +109,10 @@ fn main() {
     println!(
         "  [{}] Inv 6 — Cat GUL ≤ sum insured (damage fraction ≤ 1.0)",
         status(cat_frac_fail)
+    );
+    println!(
+        "  [{}] Inv 7 — LossEvent damage fraction in (0.0, 1.0]",
+        status(invalid_df_fail)
     );
 
     if violations.is_empty() {
@@ -137,6 +143,9 @@ fn main() {
                 MechanicsViolation::CatFractionInconsistent { peril, day, detail } => {
                     println!("    CatFractionInconsistent  peril={peril}  day={day}  {detail}");
                 }
+                MechanicsViolation::InvalidDamageFraction { event_id, damage_fraction } => {
+                    println!("    InvalidDamageFraction  event={event_id}  df={damage_fraction}");
+                }
             }
         }
     }
@@ -151,51 +160,51 @@ fn main() {
     let ihas = |f: fn(&IntegrityViolation) -> bool| int_violations.iter().any(f);
 
     println!(
-        "  [{}] Inv 7  — GUL ≤ sum insured (all perils)",
+        "  [{}] Inv 8  — GUL ≤ sum insured (all perils)",
         status(ihas(|v| matches!(v, IntegrityViolation::GulExceedsSumInsured { .. })))
     );
     println!(
-        "  [{}] Inv 8  — Aggregate claim ≤ sum insured per (policy, year)",
+        "  [{}] Inv 9  — Aggregate claim ≤ sum insured per (policy, year)",
         status(ihas(|v| matches!(v, IntegrityViolation::AggregateClaimExceedsSumInsured { .. })))
     );
     println!(
-        "  [{}] Inv 9  — Every ClaimSettled has a matching AssetDamage",
+        "  [{}] Inv 10 — Every ClaimSettled has a matching AssetDamage",
         status(ihas(|v| matches!(v, IntegrityViolation::ClaimWithoutMatchingLoss { .. })))
     );
     println!(
-        "  [{}] Inv 10 — Claim amount > 0",
+        "  [{}] Inv 11 — Claim amount > 0",
         status(ihas(|v| matches!(v, IntegrityViolation::ClaimAmountZero { .. })))
     );
     println!(
-        "  [{}] Inv 11 — ClaimSettled insurer matches PolicyBound insurer",
+        "  [{}] Inv 12 — ClaimSettled insurer matches PolicyBound insurer",
         status(ihas(|v| matches!(v, IntegrityViolation::ClaimInsurerMismatch { .. })))
     );
     println!(
-        "  [{}] Inv 12 — Every QuoteAccepted (non-final-day) has a PolicyBound",
+        "  [{}] Inv 13 — Every QuoteAccepted (non-final-day) has a PolicyBound",
         status(ihas(|v| matches!(v, IntegrityViolation::QuoteAcceptedWithoutPolicyBound { .. })))
     );
     println!(
-        "  [{}] Inv 13 — PolicyBound insurer matches LeadQuoteIssued insurer",
+        "  [{}] Inv 14 — PolicyBound insurer matches LeadQuoteIssued insurer",
         status(ihas(|v| matches!(v, IntegrityViolation::PolicyBoundInsurerMismatch { .. })))
     );
     println!(
-        "  [{}] Inv 14 — No duplicate PolicyBound for same policy_id",
+        "  [{}] Inv 15 — No duplicate PolicyBound for same policy_id",
         status(ihas(|v| matches!(v, IntegrityViolation::DuplicatePolicyBound { .. })))
     );
     println!(
-        "  [{}] Inv 15 — Every PolicyExpired references a bound policy",
+        "  [{}] Inv 16 — Every PolicyExpired references a bound policy",
         status(ihas(|v| matches!(v, IntegrityViolation::PolicyExpiredWithoutBound { .. })))
     );
     println!(
-        "  [{}] Inv 16 — Every LeadQuoteRequested has exactly one insurer response",
+        "  [{}] Inv 17 — Every LeadQuoteRequested has exactly one insurer response",
         status(ihas(|v| matches!(v, IntegrityViolation::LeadQuoteOrphanRequest { .. })))
     );
     println!(
-        "  [{}] Inv 17 — No duplicate insurer responses for same (submission, insurer)",
+        "  [{}] Inv 18 — No duplicate insurer responses for same (submission, insurer)",
         status(ihas(|v| matches!(v, IntegrityViolation::LeadQuoteDuplicateResponse { .. })))
     );
     println!(
-        "  [{}] Inv 18 — Every insurer response has a prior LeadQuoteRequested",
+        "  [{}] Inv 19 — Every insurer response has a prior LeadQuoteRequested",
         status(ihas(|v| matches!(v, IntegrityViolation::LeadQuoteOrphanResponse { .. })))
     );
 

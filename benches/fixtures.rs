@@ -1,4 +1,4 @@
-use rins::config::{AttritionalConfig, CatConfig, InsurerConfig, SimulationConfig};
+use rins::config::{AttritionalConfig, CatConfig, CatEventClass, InsurerConfig, SimulationConfig};
 use rins::events::{Event, Peril, Risk};
 use rins::market::Market;
 use rins::simulation::Simulation;
@@ -70,7 +70,16 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
             .collect(),
         n_insureds: scenario.n_insureds,
         attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
-        catastrophe: CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5, max_damage_fraction: 1.0, territories: vec!["US-SE".to_string()] },
+        catastrophe: CatConfig {
+            event_classes: vec![CatEventClass {
+                label: "test".to_string(),
+                annual_frequency: 0.5,
+                pareto_scale: 0.05,
+                pareto_shape: 1.5,
+                max_damage_fraction: 1.0,
+            }],
+            territories: vec!["US-SE".to_string()],
+        },
         quotes_per_submission: None,
         max_rate_on_line: 1.0,
         disable_cats: false,

@@ -6,6 +6,7 @@ use crate::config::{AttritionalConfig, CatConfig};
 use crate::events::{Event, Peril, Risk};
 use crate::types::{Day, InsuredId, Year};
 
+
 /// A damage fraction model: `sample()` returns a value in `[0.0, 1.0]`
 /// representing the fraction of the insured asset's total value that is damaged.
 /// Raw distribution outputs are clipped to 1.0.
@@ -41,10 +42,11 @@ impl DamageFractionModel {
 
 /// Schedule market-wide catastrophe `LossEvent`s for `year`.
 ///
-/// Draws a Poisson count from `cat.annual_frequency`, then for each event
-/// draws a uniform day-offset within the year. A single damage fraction is
-/// drawn at dispatch time (in `Market::on_loss_event`) and shared across all
-/// affected policies, modelling the correlated intensity of a physical event.
+/// Iterates over `cat.event_classes`, running one independent Poisson draw per class.
+/// For each event, a day-offset and territory are drawn uniformly, and a damage fraction
+/// is sampled from the class's Pareto distribution at scheduling time. The damage fraction
+/// is embedded in the `LossEvent` so the event is self-contained — `Market::on_loss_event`
+/// uses it directly without further sampling.
 ///
 /// `next_id` is mutated in-place; the caller owns the event-id counter.
 pub fn schedule_loss_events(
@@ -53,22 +55,42 @@ pub fn schedule_loss_events(
     rng: &mut impl Rng,
     next_id: &mut u64,
 ) -> Vec<(Day, Event)> {
-    if cat.annual_frequency <= 0.0 || cat.territories.is_empty() {
+    if cat.territories.is_empty() || cat.event_classes.is_empty() {
         return vec![];
     }
     let year_start = Day::year_start(year);
-    let poisson = Poisson::new(cat.annual_frequency).expect("invalid Poisson lambda");
-    let n = poisson.sample(rng) as u64;
-    (0..n)
-        .map(|_| {
+    let mut events = Vec::new();
+
+    for class in &cat.event_classes {
+        if class.annual_frequency <= 0.0 {
+            continue;
+        }
+        let model = DamageFractionModel::Pareto {
+            scale: class.pareto_scale,
+            shape: class.pareto_shape,
+            cap: class.max_damage_fraction,
+        };
+        let poisson = Poisson::new(class.annual_frequency).expect("invalid Poisson lambda");
+        let n = poisson.sample(rng) as u64;
+        for _ in 0..n {
             let offset = rng.random_range(1_u64..360);
             let event_id = *next_id;
             *next_id += 1;
             let territory_idx = rng.random_range(0..cat.territories.len());
             let territory = cat.territories[territory_idx].clone();
-            (year_start.offset(offset), Event::LossEvent { event_id, peril: Peril::WindstormAtlantic, territory })
-        })
-        .collect()
+            let damage_fraction = model.sample(rng);
+            events.push((
+                year_start.offset(offset),
+                Event::LossEvent {
+                    event_id,
+                    peril: Peril::WindstormAtlantic,
+                    territory,
+                    damage_fraction,
+                },
+            ));
+        }
+    }
+    events
 }
 
 /// Schedule attritional `AssetDamage` events for a single insured.
@@ -122,43 +144,51 @@ pub struct CatCatalogEntry {
     pub territory: String,
     pub damage_fraction: f64,
     pub peril: String,
+    /// Event class label (e.g. "minor" or "major") from the `CatEventClass`.
+    pub class: String,
 }
 
 /// Generate `n_years` of stochastic cat events independent of the market simulation.
 ///
-/// Damage fractions are sampled at generation time from the cat damage model — unlike
-/// the main simulation, which defers sampling until `Market::on_loss_event` fires. This
-/// is appropriate for a standalone catalog tool where the damage fraction is an intrinsic
-/// property of the event rather than a market-state-dependent quantity.
+/// Iterates over `cat.event_classes` and runs one independent Poisson draw per class.
+/// Damage fractions are sampled at generation time from each class's Pareto model,
+/// consistent with the main simulation's approach of embedding `damage_fraction` in
+/// `LossEvent` at scheduling time.
 pub fn generate_cat_catalog(
     cat: &CatConfig,
     n_years: u32,
     rng: &mut impl Rng,
 ) -> Vec<CatCatalogEntry> {
-    if cat.annual_frequency <= 0.0 || cat.territories.is_empty() {
+    if cat.territories.is_empty() || cat.event_classes.is_empty() {
         return vec![];
     }
-    let damage_model = DamageFractionModel::Pareto {
-        scale: cat.pareto_scale,
-        shape: cat.pareto_shape,
-        cap: cat.max_damage_fraction,
-    };
-    let poisson = Poisson::new(cat.annual_frequency).expect("invalid Poisson lambda");
     let mut entries = Vec::new();
     for year in 1..=n_years {
-        let n = poisson.sample(rng) as u64;
-        for _ in 0..n {
-            let day = rng.random_range(1_u64..360);
-            let territory_idx = rng.random_range(0..cat.territories.len());
-            let territory = cat.territories[territory_idx].clone();
-            let damage_fraction = damage_model.sample(rng);
-            entries.push(CatCatalogEntry {
-                year,
-                day,
-                territory,
-                damage_fraction,
-                peril: "WindstormAtlantic".to_string(),
-            });
+        for class in &cat.event_classes {
+            if class.annual_frequency <= 0.0 {
+                continue;
+            }
+            let damage_model = DamageFractionModel::Pareto {
+                scale: class.pareto_scale,
+                shape: class.pareto_shape,
+                cap: class.max_damage_fraction,
+            };
+            let poisson = Poisson::new(class.annual_frequency).expect("invalid Poisson lambda");
+            let n = poisson.sample(rng) as u64;
+            for _ in 0..n {
+                let day = rng.random_range(1_u64..360);
+                let territory_idx = rng.random_range(0..cat.territories.len());
+                let territory = cat.territories[territory_idx].clone();
+                let damage_fraction = damage_model.sample(rng);
+                entries.push(CatCatalogEntry {
+                    year,
+                    day,
+                    territory,
+                    damage_fraction,
+                    peril: "WindstormAtlantic".to_string(),
+                    class: class.label.clone(),
+                });
+            }
         }
     }
     entries
@@ -170,7 +200,7 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
 
     use super::*;
-    use crate::config::{AttritionalConfig, CatConfig, ASSET_VALUE};
+    use crate::config::{AttritionalConfig, CatConfig, CatEventClass, ASSET_VALUE};
     use crate::types::{Day, InsuredId, Year};
 
     fn rng() -> ChaCha20Rng {
@@ -181,8 +211,41 @@ mod tests {
         AttritionalConfig { annual_rate: 10.0, mu: -3.0, sigma: 1.0 }
     }
 
+    /// Single-class cat config (λ=2.0, Pareto(0.05, 1.5), cap=1.0). Used by legacy tests.
     fn cat_config() -> CatConfig {
-        CatConfig { annual_frequency: 2.0, pareto_scale: 0.05, pareto_shape: 1.5, max_damage_fraction: 1.0, territories: vec!["US-SE".to_string()] }
+        CatConfig {
+            event_classes: vec![CatEventClass {
+                label: "test".to_string(),
+                annual_frequency: 2.0,
+                pareto_scale: 0.05,
+                pareto_shape: 1.5,
+                max_damage_fraction: 1.0,
+            }],
+            territories: vec!["US-SE".to_string()],
+        }
+    }
+
+    /// Two-class compound cat config for compound-model TDD tests.
+    fn compound_cat_config() -> CatConfig {
+        CatConfig {
+            event_classes: vec![
+                CatEventClass {
+                    label: "minor".to_string(),
+                    annual_frequency: 20.0, // high λ so we reliably get events
+                    pareto_scale: 0.01,
+                    pareto_shape: 3.5,
+                    max_damage_fraction: 0.05, // minor cap
+                },
+                CatEventClass {
+                    label: "major".to_string(),
+                    annual_frequency: 20.0, // high λ so we reliably get events
+                    pareto_scale: 0.10,
+                    pareto_shape: 2.5,
+                    max_damage_fraction: 0.50,
+                },
+            ],
+            territories: vec!["US-SE".to_string()],
+        }
     }
 
     fn small_risk() -> Risk {
@@ -264,7 +327,16 @@ mod tests {
     /// With λ=2.0 over 100 years, mean annual count must lie in [1.5, 2.5].
     #[test]
     fn poisson_count_is_reasonable() {
-        let cfg = CatConfig { annual_frequency: 2.0, pareto_scale: 0.05, pareto_shape: 1.5, max_damage_fraction: 1.0, territories: vec!["US-SE".to_string()] };
+        let cfg = CatConfig {
+            event_classes: vec![CatEventClass {
+                label: "test".to_string(),
+                annual_frequency: 2.0,
+                pareto_scale: 0.05,
+                pareto_shape: 1.5,
+                max_damage_fraction: 1.0,
+            }],
+            territories: vec!["US-SE".to_string()],
+        };
         let mut rng = rng();
         let years = 100u32;
         let mut total = 0usize;
@@ -297,7 +369,16 @@ mod tests {
     /// All scheduled days must lie within [year_start+1, year_start+359].
     #[test]
     fn scheduled_days_within_year() {
-        let cfg = CatConfig { annual_frequency: 10.0, pareto_scale: 0.05, pareto_shape: 1.5, max_damage_fraction: 1.0, territories: vec!["US-SE".to_string()] };
+        let cfg = CatConfig {
+            event_classes: vec![CatEventClass {
+                label: "test".to_string(),
+                annual_frequency: 10.0,
+                pareto_scale: 0.05,
+                pareto_shape: 1.5,
+                max_damage_fraction: 1.0,
+            }],
+            territories: vec!["US-SE".to_string()],
+        };
         let mut rng = rng();
         let mut next_id = 0u64;
         let year = Year(3);
@@ -414,10 +495,13 @@ mod tests {
         let territories =
             vec!["US-NE".to_string(), "US-SE".to_string(), "US-Gulf".to_string()];
         let cfg = CatConfig {
-            annual_frequency: 20.0,
-            pareto_scale: 0.04,
-            pareto_shape: 2.5,
-            max_damage_fraction: 0.50,
+            event_classes: vec![CatEventClass {
+                label: "test".to_string(),
+                annual_frequency: 20.0,
+                pareto_scale: 0.04,
+                pareto_shape: 2.5,
+                max_damage_fraction: 0.50,
+            }],
             territories: territories.clone(),
         };
         let mut rng = rng();
@@ -443,10 +527,13 @@ mod tests {
         let territories =
             vec!["US-NE".to_string(), "US-SE".to_string(), "US-Gulf".to_string()];
         let cfg = CatConfig {
-            annual_frequency: 20.0,
-            pareto_scale: 0.04,
-            pareto_shape: 2.5,
-            max_damage_fraction: 0.50,
+            event_classes: vec![CatEventClass {
+                label: "test".to_string(),
+                annual_frequency: 20.0,
+                pareto_scale: 0.04,
+                pareto_shape: 2.5,
+                max_damage_fraction: 0.50,
+            }],
             territories: territories.clone(),
         };
         let mut rng = rng();
@@ -487,6 +574,165 @@ mod tests {
                     *ground_up_loss, ASSET_VALUE,
                     "with damage_fraction=1.0, gul must equal sum_insured"
                 );
+            }
+        }
+    }
+
+    // ── Compound cat model TDD tests ──────────────────────────────────────────
+
+    /// Test 1: With a two-class compound config (both λ=20), over many years some events
+    /// must have df ≤ minor.cap and some must have df > minor.cap (major events).
+    #[test]
+    fn compound_cat_config_schedule_produces_two_class_events() {
+        let cfg = compound_cat_config(); // minor.cap = 0.05, major.scale = 0.10
+        let mut rng = rng();
+        let mut next_id = 0u64;
+        let mut has_minor = false;
+        let mut has_major = false;
+        for y in 1..=5u32 {
+            for (_, e) in schedule_loss_events(&cfg, Year(y), &mut rng, &mut next_id) {
+                if let Event::LossEvent { damage_fraction, .. } = e {
+                    if damage_fraction <= 0.05 {
+                        has_minor = true;
+                    }
+                    if damage_fraction > 0.05 {
+                        has_major = true;
+                    }
+                }
+            }
+        }
+        assert!(has_minor, "expected some minor-class events (df ≤ 0.05)");
+        assert!(has_major, "expected some major-class events (df > 0.05)");
+    }
+
+    /// Test 2: All events produced by the minor class must have df in [scale_minor, cap_minor].
+    #[test]
+    fn schedule_loss_events_minor_df_within_bounds() {
+        // Use a config where the two classes have non-overlapping df ranges.
+        // minor: scale=0.01, cap=0.05. major: scale=0.20 (> minor.cap), cap=0.50.
+        let cfg = CatConfig {
+            event_classes: vec![
+                CatEventClass {
+                    label: "minor".to_string(),
+                    annual_frequency: 50.0,
+                    pareto_scale: 0.01,
+                    pareto_shape: 3.5,
+                    max_damage_fraction: 0.05,
+                },
+                CatEventClass {
+                    label: "major".to_string(),
+                    annual_frequency: 0.0, // disabled so all events are minor
+                    pareto_scale: 0.20,
+                    pareto_shape: 2.5,
+                    max_damage_fraction: 0.50,
+                },
+            ],
+            territories: vec!["US-SE".to_string()],
+        };
+        let mut rng = rng();
+        let mut next_id = 0u64;
+        let events = schedule_loss_events(&cfg, Year(1), &mut rng, &mut next_id);
+        assert!(!events.is_empty(), "expected minor events with λ=50");
+        for (_, e) in &events {
+            if let Event::LossEvent { damage_fraction, .. } = e {
+                assert!(
+                    *damage_fraction >= 0.01 && *damage_fraction <= 0.05,
+                    "minor df {damage_fraction} outside [0.01, 0.05]"
+                );
+            }
+        }
+    }
+
+    /// Test 3: All events produced by the major class must have df in [scale_major, cap_major].
+    #[test]
+    fn schedule_loss_events_major_df_within_bounds() {
+        let cfg = CatConfig {
+            event_classes: vec![
+                CatEventClass {
+                    label: "minor".to_string(),
+                    annual_frequency: 0.0, // disabled
+                    pareto_scale: 0.01,
+                    pareto_shape: 3.5,
+                    max_damage_fraction: 0.05,
+                },
+                CatEventClass {
+                    label: "major".to_string(),
+                    annual_frequency: 50.0,
+                    pareto_scale: 0.10,
+                    pareto_shape: 2.5,
+                    max_damage_fraction: 0.50,
+                },
+            ],
+            territories: vec!["US-SE".to_string()],
+        };
+        let mut rng = rng();
+        let mut next_id = 0u64;
+        let events = schedule_loss_events(&cfg, Year(1), &mut rng, &mut next_id);
+        assert!(!events.is_empty(), "expected major events with λ=50");
+        for (_, e) in &events {
+            if let Event::LossEvent { damage_fraction, .. } = e {
+                assert!(
+                    *damage_fraction >= 0.10 && *damage_fraction <= 0.50,
+                    "major df {damage_fraction} outside [0.10, 0.50]"
+                );
+            }
+        }
+    }
+
+    /// Test 4: Total annual event count ≈ λ_minor + λ_major over many years.
+    #[test]
+    fn schedule_loss_events_compound_mean_frequency() {
+        let lambda_minor = 1.0_f64;
+        let lambda_major = 2.0_f64;
+        let cfg = CatConfig {
+            event_classes: vec![
+                CatEventClass {
+                    label: "minor".to_string(),
+                    annual_frequency: lambda_minor,
+                    pareto_scale: 0.01,
+                    pareto_shape: 3.5,
+                    max_damage_fraction: 0.05,
+                },
+                CatEventClass {
+                    label: "major".to_string(),
+                    annual_frequency: lambda_major,
+                    pareto_scale: 0.10,
+                    pareto_shape: 2.5,
+                    max_damage_fraction: 0.50,
+                },
+            ],
+            territories: vec!["US-SE".to_string()],
+        };
+        let mut rng = rng();
+        let mut next_id = 0u64;
+        let years = 1_000u32;
+        let mut total = 0usize;
+        for y in 1..=years {
+            total += schedule_loss_events(&cfg, Year(y), &mut rng, &mut next_id).len();
+        }
+        let mean = total as f64 / years as f64;
+        let expected = lambda_minor + lambda_major; // 3.0
+        let tol = expected * 0.15; // ±15%
+        assert!(
+            (mean - expected).abs() <= tol,
+            "compound mean frequency {mean:.2} outside [{:.2}, {:.2}]",
+            expected - tol, expected + tol
+        );
+    }
+
+    /// Test 5: No LossEvent produced by schedule_loss_events should have damage_fraction == 0.0.
+    #[test]
+    fn loss_event_damage_fraction_positive() {
+        let mut rng = rng();
+        let mut next_id = 0u64;
+        for y in 1..=10u32 {
+            for (_, e) in schedule_loss_events(&cat_config(), Year(y), &mut rng, &mut next_id) {
+                if let Event::LossEvent { damage_fraction, event_id, .. } = e {
+                    assert!(
+                        damage_fraction > 0.0,
+                        "LossEvent {event_id} has non-positive damage_fraction={damage_fraction}"
+                    );
+                }
             }
         }
     }

@@ -1,25 +1,14 @@
 mod fixtures;
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
-
 use rins::events::{Event, Peril, SimEvent};
 use rins::market::Market;
-use rins::perils::DamageFractionModel;
 use rins::types::{Day, InsurerId, Year};
 
 use fixtures::{LARGE, MEDIUM, SMALL, build_simulation, prepopulate_policies};
-
-fn default_damage_models() -> HashMap<Peril, DamageFractionModel> {
-    HashMap::from([
-        (Peril::WindstormAtlantic, DamageFractionModel::Pareto { scale: 0.05, shape: 1.5, cap: 1.0 }),
-        (Peril::Attritional, DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 }),
-    ])
-}
 
 // ── Group 1: loss_distribution — policy count scaling ───────────────────────
 
@@ -35,17 +24,14 @@ fn bench_loss_distribution(c: &mut Criterion) {
                     || {
                         let mut market = Market::new();
                         prepopulate_policies(&mut market, pc);
-                        let damage_models = default_damage_models();
-                        let rng = ChaCha20Rng::seed_from_u64(42);
-                        (market, damage_models, rng)
+                        market
                     },
-                    |(market, damage_models, mut rng)| {
+                    |market| {
                         market.on_loss_event(
                             Day(180),
                             Peril::WindstormAtlantic,
                             "US-SE",
-                            &damage_models,
-                            &mut rng,
+                            0.10,
                         )
                     },
                     BatchSize::LargeInput,

@@ -56,21 +56,32 @@ pub struct AttritionalConfig {
     pub sigma: f64,
 }
 
-/// Catastrophe peril parameters — Pareto damage fraction, Poisson market-wide frequency.
+/// One severity class in the compound catastrophe model (e.g. "minor" or "major").
+/// `schedule_loss_events` runs one independent Poisson draw per class and samples
+/// a damage fraction from that class's Pareto distribution.
+#[derive(Clone)]
+pub struct CatEventClass {
+    /// Short label for debugging and catalog output ("minor", "major", …).
+    pub label: String,
+    /// Expected number of events of this class per year (Poisson rate).
+    pub annual_frequency: f64,
+    /// Pareto minimum damage fraction (scale > 0, < 1).
+    pub pareto_scale: f64,
+    /// Pareto tail index α; shape > 1 for finite mean.
+    pub pareto_shape: f64,
+    /// Upper truncation for Pareto draws ∈ (0, 1].
+    /// Proxy for maximum net per-occurrence retained severity absent explicit RI.
+    pub max_damage_fraction: f64,
+}
+
+/// Compound catastrophe peril parameters.
+/// Each event class has its own Poisson frequency and Pareto severity distribution,
+/// allowing the model to separate high-frequency/low-severity (minor) from
+/// low-frequency/high-severity (major) events.
 #[derive(Clone)]
 pub struct CatConfig {
-    /// Expected number of cat events per year (market-wide).
-    pub annual_frequency: f64,
-    /// Pareto scale: minimum damage fraction (> 0, < 1).
-    pub pareto_scale: f64,
-    /// Pareto shape: tail index α (> 1 for finite mean).
-    pub pareto_shape: f64,
-    /// Upper truncation point for the Pareto damage fraction draw ∈ (0, 1].
-    /// Acts as a proxy for the maximum net per-occurrence retained loss fraction in the
-    /// absence of explicit reinsurance modelling. Physical justification: a single cat
-    /// event cannot destroy more than ~50% of a geographically diversified portfolio.
-    /// Canonical: 0.50. Set to 1.0 to disable truncation.
-    pub max_damage_fraction: f64,
+    /// One or more severity classes. `schedule_loss_events` draws independently per class.
+    pub event_classes: Vec<CatEventClass>,
     /// Geographic territories this peril can strike. Each `LossEvent` targets one
     /// territory drawn uniformly at random from this list. Insureds are distributed
     /// across these territories cyclically at construction time.
@@ -123,8 +134,12 @@ impl SimulationConfig {
                     id: InsurerId(i),
                     initial_capital: 15_000_000_000, // 150M USD in cents
                     attritional_elf: 0.050, // annual_rate=2.0 × E[df]=2.5% → att_ELF=5.0%
-                    cat_elf: 0.011, // freq=0.5 × E[df]=6.7% ÷ 3 territories → cat_ELF=1.1%
-                    target_loss_ratio: 0.62, // (att+cat ELF)/rate = 0.061/0.098 ≈ 0.62
+                    // Compound cat ELF (÷ 3 territories):
+                    //   minor: λ=1.0, E[df]=0.42% → 0.14% per insured
+                    //   major: λ=0.5, E[df]=6.67% → 1.11% per insured
+                    //   total cat_ELF ≈ 1.25% → rounded to 0.013
+                    cat_elf: 0.013,
+                    target_loss_ratio: 0.62,
                     ewma_credibility: 0.3,
                     expense_ratio: 0.344, // Lloyd's 2024: 22.6% acquisition + 11.8% management
                     profit_loading: 0.05, // 5% markup above ATP; MS3 risk/capital charge
@@ -143,12 +158,27 @@ impl SimulationConfig {
                                     // (was sigma=1.0 → CV≈15%, masking cat signal)
             },
             catastrophe: CatConfig {
-                annual_frequency: 0.5,    // one cat event every 2 years on average
-                pareto_scale: 0.04,       // minimum 4% damage fraction ($2M on $50M); gross book
-                pareto_shape: 2.5,        // E[df] = 0.04 × 2.5 / 1.5 = 6.7%; fatter tail than shape=3
-                max_damage_fraction: 0.50, // cap upper tail — proxy for max net per-occurrence
-                                           // retention absent explicit RI; a single hurricane
-                                           // cannot destroy >50% of a spread portfolio
+                event_classes: vec![
+                    // Minor events (tropical storms / Cat 1–2): high frequency, low severity.
+                    // Provides chronic EWMA drag without capital-depleting shocks.
+                    // Return period: 1-in-10 → scale × (10 × 1.0)^(1/3.5) ≈ 0.009
+                    CatEventClass {
+                        label: "minor".to_string(),
+                        annual_frequency: 1.0,
+                        pareto_scale: 0.003,  // minimum 0.3% df — below att noise
+                        pareto_shape: 3.5,    // E[df] = 0.003 × 3.5/2.5 = 0.42%
+                        max_damage_fraction: 0.08,
+                    },
+                    // Major events (Cat 3–5): lower frequency, capital-depleting severity.
+                    // Return period: 1-in-200 → scale × (200 × 0.5)^(1/2.5) ≈ 0.252
+                    CatEventClass {
+                        label: "major".to_string(),
+                        annual_frequency: 0.5,
+                        pareto_scale: 0.040,  // minimum 4% df ($1M on $25M)
+                        pareto_shape: 2.5,    // E[df] = 0.04 × 2.5/1.5 = 6.67%
+                        max_damage_fraction: 0.50,
+                    },
+                ],
                 territories: vec![
                     "US-NE".to_string(),
                     "US-SE".to_string(),

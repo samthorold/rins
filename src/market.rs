@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 
-use rand::Rng;
-
 use crate::events::{Event, Peril, Risk};
-use crate::perils::DamageFractionModel;
 use crate::types::{Day, InsuredId, InsurerId, PolicyId, SubmissionId, Year};
 
 /// A successfully bound policy.
@@ -143,18 +140,13 @@ impl Market {
         day: Day,
         peril: Peril,
         territory: &str,
-        damage_models: &HashMap<Peril, DamageFractionModel>,
-        rng: &mut impl Rng,
+        damage_fraction: f64,
     ) -> Vec<(Day, Event)> {
-        let Some(model) = damage_models.get(&peril) else {
-            return vec![];
-        };
-        let df = model.sample(rng);
         self.insured_registry
             .iter()
             .filter(|(_, (t, _))| t.as_str() == territory)
             .filter_map(|(&insured_id, &(_, sum_insured))| {
-                let gul = (df * sum_insured as f64) as u64;
+                let gul = (damage_fraction * sum_insured as f64) as u64;
                 if gul == 0 {
                     return None;
                 }
@@ -220,16 +212,8 @@ impl Market {
 
 #[cfg(test)]
 mod tests {
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha20Rng;
-
     use super::*;
     use crate::config::ASSET_VALUE;
-    use crate::perils::DamageFractionModel;
-
-    fn rng() -> ChaCha20Rng {
-        ChaCha20Rng::seed_from_u64(42)
-    }
 
     fn small_risk() -> Risk {
         Risk {
@@ -237,13 +221,6 @@ mod tests {
             territory: "US-SE".to_string(),
             perils_covered: vec![Peril::WindstormAtlantic, Peril::Attritional],
         }
-    }
-
-    fn full_damage_models() -> HashMap<Peril, DamageFractionModel> {
-        // Pareto(scale=1.0, shape=2.0) always produces values ≥ 1.0, clipped to 1.0.
-        [(Peril::WindstormAtlantic, DamageFractionModel::Pareto { scale: 1.0, shape: 2.0, cap: 1.0 })]
-            .into_iter()
-            .collect()
     }
 
     /// Helper: register an insured, create an accepted + activated policy. Returns the PolicyId.
@@ -406,18 +383,13 @@ mod tests {
     /// the same ground_up_loss. This test fails with per-insured draws.
     #[test]
     fn cat_loss_uses_shared_damage_fraction() {
+        // With df supplied from LossEvent (sampled at scheduling time), all insureds
+        // with the same sum_insured in the same territory receive identical GUL.
         let mut market = Market::new();
         bind_policy(&mut market, 1, 1);
         bind_policy(&mut market, 2, 2);
-        // Both insureds have ASSET_VALUE. Use a variable model (not the
-        // degenerate Pareto(1,2) that always clips to 1.0).
-        let models: HashMap<Peril, DamageFractionModel> = [(
-            Peril::WindstormAtlantic,
-            DamageFractionModel::LogNormal { mu: -3.0, sigma: 1.0 },
-        )]
-        .into_iter()
-        .collect();
-        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", &models, &mut rng());
+        let df = 0.10;
+        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", df);
         assert_eq!(events.len(), 2);
         let guls: Vec<u64> = events
             .iter()
@@ -439,7 +411,7 @@ mod tests {
         bind_policy(&mut market, 2, 2);
 
         let events =
-            market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", &full_damage_models(), &mut rng());
+            market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", 1.0);
         assert_eq!(events.len(), 2, "one AssetDamage per registered insured");
         for (_, e) in &events {
             assert!(matches!(e, Event::AssetDamage { peril: Peril::WindstormAtlantic, .. }));
@@ -454,7 +426,7 @@ mod tests {
         bind_policy(&mut market, 1, 1);
         // Loss on expiry day: on_loss_event still emits AssetDamage (expiry is checked later).
         let events =
-            market.on_loss_event(Day(361), Peril::WindstormAtlantic, "US-SE", &full_damage_models(), &mut rng());
+            market.on_loss_event(Day(361), Peril::WindstormAtlantic, "US-SE", 1.0);
         assert_eq!(events.len(), 1, "on_loss_event emits AssetDamage even on expiry day");
     }
 
@@ -488,23 +460,17 @@ mod tests {
             Year(1),
         );
         // Insured not registered → no AssetDamage.
-        let events = market.on_loss_event(
-            Day(100),
-            Peril::WindstormAtlantic,
-            "US-SE",
-            &full_damage_models(),
-            &mut rng(),
-        );
+        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", 1.0);
         assert!(events.is_empty(), "unregistered insured must not receive AssetDamage");
     }
 
     #[test]
-    fn on_loss_event_skips_non_matching_peril() {
+    fn on_loss_event_skips_zero_damage_fraction() {
+        // damage_fraction=0.0 → gul=0 for all insureds → no AssetDamage emitted.
         let mut market = Market::new();
         bind_policy(&mut market, 1, 1);
-        let models: HashMap<Peril, DamageFractionModel> = HashMap::new();
-        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", &models, &mut rng());
-        assert!(events.is_empty(), "no events when damage model is missing");
+        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", 0.0);
+        assert!(events.is_empty(), "no events when damage fraction is zero");
     }
 
     #[test]
@@ -512,7 +478,7 @@ mod tests {
         let mut market = Market::new();
         bind_policy(&mut market, 1, 1);
         let events =
-            market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", &full_damage_models(), &mut rng());
+            market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", 1.0);
         for (_, e) in &events {
             if let Event::AssetDamage { ground_up_loss, .. } = e {
                 assert!(
@@ -535,14 +501,7 @@ mod tests {
         market.register_insured(InsuredId(1), "US-SE", si_small);
         market.register_insured(InsuredId(2), "US-SE", si_large);
 
-        // full_damage_models: Pareto(scale=1.0) → df always clips to 1.0.
-        let events = market.on_loss_event(
-            Day(100),
-            Peril::WindstormAtlantic,
-            "US-SE",
-            &full_damage_models(),
-            &mut rng(),
-        );
+        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", 1.0);
         assert_eq!(events.len(), 2);
         let guls: HashMap<InsuredId, u64> = events
             .iter()
@@ -570,13 +529,7 @@ mod tests {
         let mut market = Market::new();
         market.register_insured(InsuredId(1), "US-SE", ASSET_VALUE);
         // Strike US-Gulf — no insureds there.
-        let events = market.on_loss_event(
-            Day(100),
-            Peril::WindstormAtlantic,
-            "US-Gulf",
-            &full_damage_models(),
-            &mut rng(),
-        );
+        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-Gulf", 1.0);
         assert!(
             events.is_empty(),
             "no AssetDamage when struck territory has no registered insureds"
@@ -600,13 +553,7 @@ mod tests {
             ("US-Gulf", iid_gulf),
             ("US-NE", iid_ne),
         ] {
-            let events = market.on_loss_event(
-                Day(100),
-                Peril::WindstormAtlantic,
-                territory,
-                &full_damage_models(),
-                &mut rng(),
-            );
+            let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, territory, 1.0);
             assert_eq!(events.len(), 1, "territory {territory}: expected exactly 1 AssetDamage");
             match &events[0].1 {
                 Event::AssetDamage { insured_id, .. } => {
@@ -630,13 +577,7 @@ mod tests {
         market.register_insured(iid_a, "US-SE", ASSET_VALUE);
         market.register_insured(iid_b, "US-NE", ASSET_VALUE);
 
-        let events = market.on_loss_event(
-            Day(100),
-            Peril::WindstormAtlantic,
-            "US-SE",
-            &full_damage_models(),
-            &mut rng(),
-        );
+        let events = market.on_loss_event(Day(100), Peril::WindstormAtlantic, "US-SE", 1.0);
 
         assert_eq!(events.len(), 1, "only insured A (US-SE) should be hit");
         if let (_, Event::AssetDamage { insured_id, .. }) = &events[0] {

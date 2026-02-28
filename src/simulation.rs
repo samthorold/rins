@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashSet};
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -7,9 +7,19 @@ use rand_chacha::ChaCha20Rng;
 /// Days from CoverageRequested to PolicyBound (the quoting chain length).
 const QUOTING_CHAIN_DAYS: u64 = 3;
 
-/// 1-in-N Pareto damage fraction: scale × (return_period × annual_frequency)^(1/shape).
-fn pml_damage_fraction(scale: f64, shape: f64, annual_frequency: f64, return_period: f64) -> f64 {
-    scale * (return_period * annual_frequency).powf(1.0 / shape)
+/// 1-in-N PML damage fraction for a compound cat model: take the per-class max.
+///
+/// For each class: pml = scale × (return_period × λ)^(1/shape).
+/// The compound PML is the maximum across all classes — the dominant class
+/// (highest severity at the given return period) drives the aggregate limit.
+fn pml_damage_fraction_compound(
+    classes: &[crate::config::CatEventClass],
+    return_period: f64,
+) -> f64 {
+    classes
+        .iter()
+        .map(|c| c.pareto_scale * (return_period * c.annual_frequency).powf(1.0 / c.pareto_shape))
+        .fold(0.0_f64, f64::max)
 }
 
 use crate::broker::Broker;
@@ -18,7 +28,7 @@ use crate::events::{Event, EventLog, Peril, Risk, SimEvent};
 use crate::insured::Insured;
 use crate::insurer::Insurer;
 use crate::market::Market;
-use crate::perils::{self, DamageFractionModel};
+use crate::perils;
 use crate::types::{Day, InsuredId, InsurerId, Year};
 
 pub struct Simulation {
@@ -33,7 +43,6 @@ pub struct Simulation {
     pub broker: Broker,
     pub market: Market,
     next_event_id: u64,
-    damage_models: HashMap<Peril, DamageFractionModel>,
     config: SimulationConfig,
     /// (insured_id, year) pairs for which attritional losses have already been scheduled.
     /// Prevents double-scheduling when the same insured gets multiple CoverageRequested
@@ -62,12 +71,7 @@ pub struct Simulation {
 impl Simulation {
     /// Construct from a canonical config.
     pub fn from_config(config: SimulationConfig) -> Self {
-        let pml_200 = pml_damage_fraction(
-            config.catastrophe.pareto_scale,
-            config.catastrophe.pareto_shape,
-            config.catastrophe.annual_frequency,
-            200.0,
-        );
+        let pml_200 = pml_damage_fraction_compound(&config.catastrophe.event_classes, 200.0);
         // Each cat event strikes one territory; max per-event portfolio impact = pml_200 ÷ n_territories.
         // Applying territory_factor to the pml denominator of the cat aggregate limit scales the limit
         // upward to correctly reflect that geographic diversification reduces peak portfolio loss.
@@ -119,24 +123,6 @@ impl Simulation {
             .max(1);
         let broker = Broker::new(insureds, insurer_ids, qps);
 
-        let damage_models = HashMap::from([
-            (
-                Peril::WindstormAtlantic,
-                DamageFractionModel::Pareto {
-                    scale: config.catastrophe.pareto_scale,
-                    shape: config.catastrophe.pareto_shape,
-                    cap: config.catastrophe.max_damage_fraction,
-                },
-            ),
-            (
-                Peril::Attritional,
-                DamageFractionModel::LogNormal {
-                    mu: config.attritional.mu,
-                    sigma: config.attritional.sigma,
-                },
-            ),
-        ]);
-
         let total_years = config.warmup_years + config.years;
         let max_day = Day::year_end(Year(total_years));
 
@@ -153,7 +139,6 @@ impl Simulation {
             broker,
             market: Market::new(),
             next_event_id: 0,
-            damage_models,
             config,
             attritional_scheduled: HashSet::new(),
             year_premium_written: 0,
@@ -403,13 +388,12 @@ impl Simulation {
                 self.market.on_policy_expired(policy_id);
             }
 
-            Event::LossEvent { peril, territory, .. } => {
+            Event::LossEvent { peril, territory, damage_fraction, .. } => {
                 let events = self.market.on_loss_event(
                     day,
                     peril,
                     &territory,
-                    &self.damage_models,
-                    &mut self.rng,
+                    damage_fraction,
                 );
                 for (d, e) in events {
                     self.schedule(d, e);
@@ -615,7 +599,7 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AttritionalConfig, CatConfig, InsurerConfig, SimulationConfig};
+    use crate::config::{AttritionalConfig, CatConfig, CatEventClass, InsurerConfig, SimulationConfig};
     use crate::events::Event;
 
     fn minimal_config(years: u32, n_insureds: usize) -> SimulationConfig {
@@ -640,10 +624,13 @@ mod tests {
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
             catastrophe: CatConfig {
-                annual_frequency: 0.5,
-                pareto_scale: 0.05,
-                pareto_shape: 1.5,
-                max_damage_fraction: 1.0, // no truncation in tests
+                event_classes: vec![CatEventClass {
+                    label: "test".to_string(),
+                    annual_frequency: 0.5,
+                    pareto_scale: 0.05,
+                    pareto_shape: 1.5,
+                    max_damage_fraction: 1.0, // no truncation in tests
+                }],
                 territories: vec!["US-SE".to_string()], // single territory: all insureds hit
             },
             quotes_per_submission: None,
@@ -847,7 +834,7 @@ mod tests {
     #[test]
     fn asset_damage_appears_between_loss_event_and_claim_settled() {
         let mut config = minimal_config(1, 2);
-        config.catastrophe.annual_frequency = 10.0;
+        config.catastrophe.event_classes[0].annual_frequency = 10.0;
         let sim = run_sim(config);
 
         let has_loss_event =
@@ -887,7 +874,7 @@ mod tests {
     fn insurer_capital_accessible_after_run() {
         // Verifies capital does not panic under heavy cat load (no reset — capital persists).
         let mut config = minimal_config(2, 5);
-        config.catastrophe.annual_frequency = 10.0;
+        config.catastrophe.event_classes[0].annual_frequency = 10.0;
         let sim = run_sim(config);
         for ins in &sim.insurers {
             let _ = ins.capital; // verify no panic (may go negative)
@@ -900,7 +887,7 @@ mod tests {
         // insurer must become insolvent — verifying the full event chain
         // LossEvent → AssetDamage → ClaimSettled → insurer.on_claim_settled → InsurerInsolvent.
         let mut config = minimal_config(2, 10);
-        config.catastrophe.annual_frequency = 5.0;
+        config.catastrophe.event_classes[0].annual_frequency = 5.0;
         // Shrink capital so a single bad cat year wipes it out
         for ins_cfg in &mut config.insurers {
             ins_cfg.initial_capital = 1_000_000; // 0.01 USD — effectively zero
@@ -1183,7 +1170,7 @@ mod tests {
         // With large initial capital and moderate cat frequency, all ClaimSettled events
         // should carry a non-zero remaining_capital (insurer stays solvent throughout).
         let mut config = minimal_config(1, 3);
-        config.catastrophe.annual_frequency = 5.0;
+        config.catastrophe.event_classes[0].annual_frequency = 5.0;
         let sim = run_sim(config);
         let claim_events: Vec<u64> = sim
             .log
@@ -1291,7 +1278,7 @@ mod tests {
         // No losses at all → LR = 0 → avg_cr = 0 → cr_signal = −0.25 → factor = 0.75 < 1.10
         // → entry never fires. Zero attritional rate makes this deterministic regardless of seed.
         let mut config = minimal_config(10, 5);
-        config.catastrophe.annual_frequency = 0.0;
+        config.catastrophe.event_classes[0].annual_frequency = 0.0;
         config.attritional.annual_rate = 0.0;
         let sim = run_sim(config);
         let entered = sim
@@ -1319,13 +1306,17 @@ mod tests {
         use crate::insurer::Insurer;
         use crate::types::PolicyId;
 
-        let cat_cfg = CatConfig { annual_frequency: 0.5, pareto_scale: 0.05, pareto_shape: 1.5, max_damage_fraction: 1.0, territories: vec!["US-SE".to_string()] };
-        let pml_200 = pml_damage_fraction(
-            cat_cfg.pareto_scale,
-            cat_cfg.pareto_shape,
-            cat_cfg.annual_frequency,
-            200.0,
-        );
+        let cat_cfg = CatConfig {
+            event_classes: vec![CatEventClass {
+                label: "test".to_string(),
+                annual_frequency: 0.5,
+                pareto_scale: 0.05,
+                pareto_shape: 1.5,
+                max_damage_fraction: 1.0,
+            }],
+            territories: vec!["US-SE".to_string()],
+        };
+        let pml_200 = pml_damage_fraction_compound(&cat_cfg.event_classes, 200.0);
 
         let make_insurer = |pml_override: Option<f64>| -> Insurer {
             let pml = pml_override.unwrap_or(pml_200);

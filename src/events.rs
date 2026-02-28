@@ -26,7 +26,7 @@ pub enum DeclineReason {
     Insolvent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     /// Fires once at Day(0) to bootstrap the simulation. Schedules YearStart(year_start).
     /// `warmup_years` warm-up years are prepended before the `analysis_years` analysis period;
@@ -105,6 +105,11 @@ pub enum Event {
         /// `CatConfig.territories` at scheduling time; `on_loss_event` filters
         /// `insured_registry` to only emit `AssetDamage` for matching insureds.
         territory: String,
+        /// Damage fraction for this event, sampled at scheduling time from the
+        /// event class's Pareto distribution. Shared across all insureds in the
+        /// struck territory — the intensity field of the physical occurrence.
+        /// Invariant: in (0.0, 1.0] (checked by `verify_mechanics` Inv 7).
+        damage_fraction: f64,
     },
     /// A peril has damaged an insured's assets. Fired for every registered insured
     /// regardless of whether they hold an active policy. The market handler
@@ -129,14 +134,21 @@ pub enum Event {
     },
 }
 
+// Manual `Eq` impls: `f64` doesn't implement `Eq` due to NaN, but damage_fraction
+// is always a valid finite float in this domain, so PartialEq is an equivalence relation.
+// `SimEvent: Eq` is required by `Ord` (used in the BinaryHeap priority queue).
+impl Eq for Event {}
+
 /// A dispatched event with its simulation day. Position in `Simulation.log` is its implicit sequence number.
 ///
 /// Serves as both the immutable log entry and the priority queue entry. Ordering is by `day` only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimEvent {
     pub day: Day,
     pub event: Event,
 }
+
+impl Eq for SimEvent {}
 
 impl Ord for SimEvent {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -282,7 +294,7 @@ mod tests {
             },
             SimEvent {
                 day: Day(180),
-                event: Event::LossEvent { event_id: 1, peril: Peril::WindstormAtlantic, territory: "US-SE".to_string() },
+                event: Event::LossEvent { event_id: 1, peril: Peril::WindstormAtlantic, territory: "US-SE".to_string(), damage_fraction: 0.10 },
             },
         ];
 

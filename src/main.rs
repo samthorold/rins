@@ -161,6 +161,7 @@ fn print_analysis(
     println!("  [4] PolicyExpired timing:            {}", inv(|v| matches!(v, MechanicsViolation::PolicyExpiredTiming { .. })));
     println!("  [5] Claim after expiry:              {}", inv(|v| matches!(v, MechanicsViolation::ClaimAfterExpiry { .. })));
     println!("  [6] Cat fraction consistency:        {}", inv(|v| matches!(v, MechanicsViolation::CatFractionInconsistent { .. })));
+    println!("  [7] Damage fraction valid (0,1]:     {}", inv(|v| matches!(v, MechanicsViolation::InvalidDamageFraction { .. })));
 
     if violations.is_empty() {
         println!("  All mechanics invariants: PASS");

@@ -243,6 +243,8 @@ pub enum MechanicsViolation {
     ClaimAfterExpiry { policy_id: u64, claim_day: u64, expiry_day: u64 },
     /// AssetDamage ground_up_loss exceeds the insured sum_insured (damage fraction > 1.0).
     CatFractionInconsistent { peril: String, day: u64, detail: String },
+    /// LossEvent.damage_fraction is not in (0.0, 1.0] — zero or negative severity, or over-100%.
+    InvalidDamageFraction { event_id: u64, damage_fraction: f64 },
 }
 
 
@@ -266,6 +268,9 @@ impl std::fmt::Display for MechanicsViolation {
             }
             Self::CatFractionInconsistent { peril, day, detail } => {
                 write!(f, "CatFractionInconsistent peril={peril} day={day}: {detail}")
+            }
+            Self::InvalidDamageFraction { event_id, damage_fraction } => {
+                write!(f, "InvalidDamageFraction event={event_id}: df={damage_fraction}")
             }
         }
     }
@@ -509,6 +514,15 @@ pub fn verify_mechanics(events: &[SimEvent]) -> Vec<MechanicsViolation> {
                             expiry_day: exp,
                         });
                     }
+                }
+            }
+            // Invariant 7 — InvalidDamageFraction: LossEvent.damage_fraction must be in (0, 1].
+            Event::LossEvent { event_id, damage_fraction, .. } => {
+                if *damage_fraction <= 0.0 || *damage_fraction > 1.0 {
+                    violations.push(MechanicsViolation::InvalidDamageFraction {
+                        event_id: *event_id,
+                        damage_fraction: *damage_fraction,
+                    });
                 }
             }
             _ => {}
@@ -930,8 +944,8 @@ mod tests {
         // Attritional AssetDamage must not increment cat_event_count.
         let events = vec![
             sim_start(),
-            sim_ev(50, Event::LossEvent { event_id: 1, peril: Peril::WindstormAtlantic, territory: "US-SE".to_string() }),
-            sim_ev(80, Event::LossEvent { event_id: 2, peril: Peril::WindstormAtlantic, territory: "US-SE".to_string() }),
+            sim_ev(50, Event::LossEvent { event_id: 1, peril: Peril::WindstormAtlantic, territory: "US-SE".to_string(), damage_fraction: 0.10 }),
+            sim_ev(80, Event::LossEvent { event_id: 2, peril: Peril::WindstormAtlantic, territory: "US-SE".to_string(), damage_fraction: 0.05 }),
             sim_ev(
                 80,
                 Event::AssetDamage {
@@ -1164,10 +1178,48 @@ mod tests {
         );
     }
 
+    // ── Inv 7: LossEvent damage fraction validity ─────────────────────────────
+
+    #[test]
+    fn verify_mechanics_flags_zero_damage_fraction() {
+        // Inject a synthetic LossEvent with damage_fraction=0.0 — must trigger Inv 7.
+        let events = vec![
+            sim_ev(100, Event::LossEvent {
+                event_id: 99,
+                peril: Peril::WindstormAtlantic,
+                territory: "US-SE".to_string(),
+                damage_fraction: 0.0,
+            }),
+        ];
+        let violations = verify_mechanics(&events);
+        assert!(
+            violations.iter().any(|v| matches!(v, MechanicsViolation::InvalidDamageFraction { event_id: 99, .. })),
+            "expected InvalidDamageFraction violation, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn verify_mechanics_passes_valid_loss_event() {
+        // LossEvent with damage_fraction=0.5 — must not trigger any violation.
+        let events = vec![
+            sim_ev(100, Event::LossEvent {
+                event_id: 1,
+                peril: Peril::WindstormAtlantic,
+                territory: "US-SE".to_string(),
+                damage_fraction: 0.5,
+            }),
+        ];
+        let violations = verify_mechanics(&events);
+        assert!(
+            violations.is_empty(),
+            "expected no violations for valid damage_fraction=0.5, got: {violations:?}"
+        );
+    }
+
     // ── Integration tests ─────────────────────────────────────────────────────
 
     fn small_test_config(seed: u64) -> crate::config::SimulationConfig {
-        use crate::config::{AttritionalConfig, CatConfig, InsurerConfig, SimulationConfig};
+        use crate::config::{AttritionalConfig, CatConfig, CatEventClass, InsurerConfig, SimulationConfig};
         SimulationConfig {
             seed,
             years: 5,
@@ -1191,10 +1243,13 @@ mod tests {
             n_insureds: 20,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -4.7, sigma: 1.0 },
             catastrophe: CatConfig {
-                annual_frequency: 0.5,
-                pareto_scale: 0.04,
-                pareto_shape: 2.5,
-                max_damage_fraction: 1.0, // no truncation in tests
+                event_classes: vec![CatEventClass {
+                    label: "test".to_string(),
+                    annual_frequency: 0.5,
+                    pareto_scale: 0.04,
+                    pareto_shape: 2.5,
+                    max_damage_fraction: 1.0, // no truncation in tests
+                }],
                 territories: vec!["US-SE".to_string()],
             },
             quotes_per_submission: None,
