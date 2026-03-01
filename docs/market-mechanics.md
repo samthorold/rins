@@ -24,7 +24,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
 | Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE — capital-linked fractions (net_line_capacity=0.30, solvency_capital_fraction=0.30, pml_200 derived from cat model) | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
 | Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
-| Underwriter channel / AP/TP ratio (MS3 AvT) | ACTIVE — three-level pricing: ATP → TP (× profit loading) → AP (× market_ap_tp_factor); factor driven by trailing 3yr CR + capacity pressure | `src/insurer.rs::underwriter_premium`, `src/simulation.rs::handle_year_end` |
+| Underwriter channel / AP/TP ratio (MS3 AvT) | ACTIVE — three-level pricing: ATP → TP (× profit loading) → AP (× blended factor); coordinator broadcasts market factor (3yr CR + capacity pressure); each insurer blends own capital state and loss history against market signal via credibility weighting. Key hardcoded equilibria: capacity_uplift step function, clamp amplitude bounds, 30% market floor, 5yr credibility ramp — see §4.5. | `src/insurer.rs::underwriter_premium`, `src/insurer.rs::own_ap_tp_factor`, `src/simulation.rs::handle_year_end` |
 | Supply / demand balance (insured reservation price) | PARTIAL — step-function demand curve implemented; quantity adjustment (variable limits, deductibles, self-insurance) and demand response to loss experience not modelled; consequence: demand cannot amplify or resist rate movements, weakening cycle amplitude | `src/insured.rs::on_quote_presented` |
 | Broker relationship scores | ACTIVE — +1.0 per PolicyBound, ×0.80 per YearEnd; routing sorted by score DESC + cyclic tiebreaker | `src/broker.rs` |
 | Syndicate entry / exit (capital entry) | ACTIVE — AP/TP > 1.10 trigger + new insurer spawn; 1-year cooldown; critical for underwriting cycle emergence | `src/simulation.rs::handle_year_end` |
@@ -302,7 +302,38 @@ Factor semantics: 0.90 = soft floor (AP = 90% of TP); 1.00 = break-even; 1.40 = 
 
 **Calibration note:** `cat_elf` is anchored — not updated from experience — so TP does not erode during quiet cat periods. The AP/TP mechanism therefore produces rate softening through the market factor, not through technical price drift. This mirrors the MS3 Technical Rate / Actual vs Technical (AvT) distinction.
 
-**Structural pricing gap `[PARTIAL]`:** `market_ap_tp_factor` is a single coordinator-broadcast value applied identically to all insurers. All insurers therefore quote the same premium for the same risk at all times; price discovery is not competitive. In the real market each syndicate sets its own AP/TP ratio based on its own capital position, book composition, and risk appetite — a capital-depleted insurer rationally holds rates high while a well-capitalised new entrant may price more aggressively. The consequence: in the current model a hard market softens as soon as the 3-year CR average normalises, regardless of individual insurers' capital recovery status. Distributed individual pricing — where each insurer's `ap_tp_factor` reflects its own capital buffer and loss experience — is required before the hard-market duration will match empirical norms. See `docs/roadmap.md Phase 1` for the planned design and diagnostic hypotheses.
+**Design tension — hardcoded response functions:** Three elements of the coordinator formula encode the *result* of market learning rather than the mechanism of learning:
+
+- **`capacity_uplift = 0.05 if dropped_count > 10`** — this *is* the capacity-withdrawal price response that should emerge from individual insurer reasoning. When supply is scarce, each insurer should independently discover it can command a higher price; the coordinator need not inject a fixed uplift. The step function (exactly 5% at a threshold of 10 dropped submissions) is the designer specifying the hard-market phenomenon rather than letting it emerge. An insurer that observes its own cat aggregate approaching its limit already has a direct incentive to price higher; the uplift is redundant with — and overrides — that individual mechanism.
+
+- **`clamp(factor, 0.90, 1.40)`** — these bounds directly constrain cycle amplitude. The simulation cannot produce a 50% hard-market spike or a 40% soft-market collapse regardless of loss experience, because the bounds prevent it. They are calibration parameters masquerading as market structure.
+
+- **3-year lookback for `avg_3yr_CR`** — the effective memory of market pricing is fixed. Real syndicates learned what lookback horizon is predictive through decades of experience; the simulation bootstraps that result rather than discovering it.
+
+These terms encode learned equilibria as initial conditions. The simulation cannot falsify the assumption that the market responds to capacity pressure at these specific magnitudes and timescales — it is built in. See §4.5 for the path to replacing them with emergent mechanisms.
+
+**Per-insurer blending (Phase 1, implemented):** Each insurer blends the coordinator's market factor with its own capital state and loss history via `own_ap_tp_factor(market_factor)`:
+
+```
+credibility      = min(own_years / 5.0, 1.0)
+market_weight    = max(1 − credibility, MARKET_FLOOR_WEIGHT=0.30)
+
+cap_depletion    = max(0, 1 − capital / initial_capital)
+cap_depletion_adj = clamp(cap_depletion × depletion_sensitivity, 0.0, 0.30)
+
+own_cr_signal    = clamp(own_cr_ewma − 1.0, −0.50, +0.80)   [0.0 if no history]
+own_factor       = 1.0 + own_cr_signal + cap_depletion_adj
+
+insurer_ap_tp    = (1 − market_weight) × own_factor + market_weight × market_factor
+```
+
+`own_cr_ewma` is updated at each `YearEnd` (α = 1/3, 5-year EWMA span): `own_cr = total_claims/premium + expense_ratio`. This produces heterogeneous premiums across insurers: a capital-depleted insurer quotes above the market signal while a well-capitalised new entrant follows it closely. The premium CV across insurers is measurably above zero in all post-warmup years.
+
+**Design tension — 30% floor and credibility ramp:** Two further elements encode equilibria rather than producing them:
+
+- **`MARKET_FLOOR_WEIGHT = 0.30`** — prevents any insurer from becoming fully autonomous of the market signal. This is architecturally necessary to maintain price coordination but encodes the herding *outcome* rather than producing it. In the real market, syndicates that deviated systematically from market pricing were selected against over decades; the 30% floor is the surviving equilibrium bootstrapped as an initial condition. Herding should emerge from the observation structure (syndicates observe competitor quotes in the open market) and from selection pressure, not from a designer-specified floor.
+
+- **`credibility = min(own_years / 5.0, 1.0)`** — ignores experience quality. Five benign years generates the same credibility as five volatile years, despite the volatile years containing far more information about the tail. A proper Bühlmann-Straub estimator would derive credibility from the ratio of within-insurer to between-insurer loss ratio variance. The linear ramp also assumes the optimal blending ratio is reached at exactly year 5 — a calibration choice with no empirical derivation.
 
 **Inputs:**
 - Current market cycle indicator (coordinator-published annually; derived from aggregate premium movement — see §8).
@@ -391,6 +422,45 @@ For canonical Pareto(scale=0.04, shape=2.5, λ=0.5): `0.04 × 100^0.4 ≈ 0.252`
 - `solvency_capital_fraction: Option<f64>` — canonical `Some(0.30)`; `None` = unlimited (tests only).
 
 The hard-decline at limit is realistic — Lloyd's Franchise Guidelines are regulatory hard floors requiring a dispensation to exceed. As capital is depleted post-loss, both limits tighten proportionally; as premiums accumulate, they relax. This is the feedback loop that produces post-catastrophe capacity crunches and the subsequent premium hardening.
+
+---
+
+## 4.5 Path to Emergent Pricing Mechanics `[PLANNED]`
+
+The underwriter channel (§4.2) contains four elements that encode learned market equilibria as fixed parameters: the `capacity_uplift` step function, the outer clamp bounds, `MARKET_FLOOR_WEIGHT`, and the 5-year credibility ramp. Replacing them with mechanisms from which the target behaviours emerge endogenously requires four sequential phases. Each phase is independently deployable and falsifiable.
+
+### Phase A — Individual capacity reasoning replaces coordinator injection
+
+Remove `capacity_uplift` from the coordinator formula. Add `capacity_sensitivity: f64` to each `InsurerConfig`. Each insurer observes its own utilisation ratio (`cat_aggregate / effective_cat_limit`) and applies a self-computed adjustment when utilisation is high. The coordinator continues publishing `dropped_count` and `avg_3yr_CR` as observable statistics; each insurer independently decides how much weight to give them.
+
+**Falsification criterion:** the hard-market price response (elevated premiums after capacity depletion) should emerge from individual responses without coordinator injection. Run the simulation with `capacity_uplift = 0` and uniform `capacity_sensitivity`; confirm that premium hardening still follows high-dropped-count years. If it does not, the individual mechanism is insufficient and the coordinator injection was doing essential work — which would itself be a finding worth recording.
+
+### Phase B — Heterogeneous sensitivity parameters under selection pressure
+
+Replace the current uniform formula with per-insurer sensitivity parameters — `cr_sensitivity: f64` (response to market CR signal) and `capacity_sensitivity: f64` (response to own utilisation). At syndicate entry, draw these from distributions centred on the current calibrated values. Over long simulations (200+ years), selection pressure — insurers with miscalibrated sensitivity go insolvent or fail to attract business — drives the parameter distributions toward a natural equilibrium.
+
+The currently hardcoded values (`1 + cr_signal + capacity_uplift` at their present magnitudes) are then hypotheses about the long-run convergence point of those distributions, not axioms. If the converged distributions match the current calibration, the calibration is validated; if they diverge, the calibration is corrected.
+
+This phase requires extending the canonical simulation to at least 200 years and tracking the evolution of the `cr_sensitivity` and `capacity_sensitivity` distributions across the active syndicate population.
+
+### Phase C — Bühlmann-Straub credibility
+
+Replace `credibility = min(own_years / 5.0, 1.0)` with a proper Bühlmann-Straub estimator computed from the simulated population. The coordinator tracks between-insurer variance of annual loss ratios (`σ²_between`) across the active population; each insurer tracks within-insurer variance (`σ²_within`):
+
+```
+k           = σ²_within / σ²_between
+credibility = own_n_policies / (own_n_policies + k)
+```
+
+Credibility becomes a function of information content: a syndicate with five volatile years earns more credibility than one with five benign years. The 5-year linear ramp and its implicit quality-blindness disappear. A new entrant with a single catastrophically bad year can earn more credibility than an incumbent with ten quiet years if market variance is low — which is the actuarially correct result.
+
+### Phase D — Observable market signal replacing coordinator broadcast
+
+Replace the coordinator-broadcast `market_ap_tp_factor` with per-insurer inference from observable signals. In Lloyd's open market, syndicates observe competitor quoted premiums. Model this as each insurer computing its own market inference as a weighted average of the quotes it observes — weighted by relationship score (trusting high-relationship counterparts more).
+
+`MARKET_FLOOR_WEIGHT` then disappears as a hardcoded parameter: the effective market weight emerges from the observation network topology. Insurers with broad relationship networks observe richer market signals and rationally weight them more; new entrants with few relationships have sparse observations and rely more heavily on their own estimate. This phase requires lead-follow mode (§5) to be active so that follow insurers observe the lead quote explicitly.
+
+**Sequencing:** Phases A and B can proceed independently. Phase C can begin in parallel with B. Phase D depends on Phase B (heterogeneous weights) and §5 (lead-follow mode).
 
 ---
 

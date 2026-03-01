@@ -18,6 +18,7 @@ This is a living document. Phenomena are added as the literature review progress
 | 9 | Experience Rating and Insured Risk Quality | PLANNED |
 | 10 | Layer-Position Premium Gradient | PLANNED |
 | 11 | Reinsurance Contagion Cascade | TBD |
+| 12 | Pricing Rule Evolution Under Selection Pressure | PLANNED |
 
 ---
 
@@ -69,9 +70,28 @@ Steps 1 and 2 are now mechanically represented: the `market_ap_tp_factor` (AP/TP
 **Remaining mechanisms for full cycle oscillation:**
 - Soft-market supply contraction (market-mechanics.md §7.4, intentionally deferred) — binary exit/re-entry was removed as an unrealistic abstraction; supply contraction will emerge from variable line sizes once implemented.
 - Demand elasticity — buyers must be able to adjust coverage quantity (limit, deductible, self-insurance) so demand responds to price and amplifies both the hard and soft phases.
-- Competitive individual pricing — distributed price-setting rather than a single coordinator signal would allow rate differentials between capital-rich and capital-poor insurers, sustaining the hard market while capital recovers.
+- Competitive individual pricing — per-insurer blending (Phase 1) is active; but the coordinator formula still supplies the common market signal. Until the market signal is itself derived from observable competitor quotes (§4.5 Phase D), the coordinator injects a coordinating function that cannot distinguish itself from emergent herding.
 
-*AP/TP mechanism active (step 1). Capital entry active (step 4). Cycle signal present in both directions. Full oscillatory cycle requires demand elasticity, soft-market exit, and competitive individual pricing. Phased implementation plan with falsifiable hypotheses per phase: `docs/roadmap.md`.*
+**Hardcoded vs. emergent cycle elements:**
+
+The mechanisms above partially *produce* the cycle and partially *encode* it. The distinction matters for validation: a truly emergent phenomenon can be compared against empirical calibration targets as an independent test; a parameterized one is tautologically consistent with its parameters.
+
+*Truly emergent (arise from first principles):*
+- Capital depletion via cat claims → exposure limit tightening → reduced capacity → `Dropped#` rising (the capacity crunch follows mechanically from capital-linked limits, not from a hardcoded scarcity signal).
+- New insurer entry triggered by `market_ap_tp_factor > 1.10` → gradual score-building → delayed capacity restoration (the timing lag emerges from relationship dynamics, not from a hardcoded delay parameter).
+- Per-insurer EWMA attritional ELF updating → individual ATP movements in response to own experience.
+- Capital depletion adjustment in `own_ap_tp_factor` → depleted insurers individually quote above the market signal without coordinator instruction.
+
+*Currently parameterized (not emergent — encoded learned equilibria):*
+- `capacity_uplift = 0.05 if dropped_count > 10` — the coordinator injects a fixed price increase when supply is tight. This is the capacity-scarcity pricing response pre-specified rather than derived; it pre-empts the individual reasoning that should produce it (see market-mechanics.md §4.5 Phase A).
+- `clamp(factor, 0.90, 1.40)` — cycle amplitude is designer-bounded. The simulation cannot discover its own natural amplitude; these bounds enforce an assumption about it.
+- `MARKET_FLOOR_WEIGHT = 0.30` — herding intensity is fixed. The coordination outcome is hardcoded rather than emerging from information structure and selection pressure (see market-mechanics.md §4.5 Phase D).
+- 3-year CR lookback — effective pricing memory is a designer choice, not a learned result.
+- `credibility = min(own_years / 5.0, 1.0)` — quality-blind credibility ramp; a mature insurer with five benign years is as credible as one with five volatile years (see market-mechanics.md §4.5 Phase C).
+
+The path from parameterized to emergent is described in market-mechanics.md §4.5. Until those phases are complete, cycle dynamics should be interpreted with the caveat that amplitude, memory, and herding intensity are calibration inputs, not outputs.
+
+*AP/TP mechanism active (step 1). Per-insurer blending active (Phase 1). Capital entry active (step 4). Cycle signal present in both directions. Full oscillatory cycle with emergent amplitude requires §4.5 Phases A–D.*
 
 ---
 
@@ -212,6 +232,27 @@ Geographic routing is now active: each cat event targets one territory, and ~33%
 **Conditions for emergence:** the cascade requires two structural elements: (a) reinsurers are not infinitely capitalised — they have finite balance sheets subject to the same cat event risk as primaries; (b) multiple primaries share a common reinsurer — concentration of cessions with a single reinsurer creates network fragility. Both are realistic: reinsurance markets are concentrated (Swiss Re, Munich Re, Hannover Re together hold a large fraction of industry capacity), and large catastrophes are the same events that deplete both primary and reinsurance capital simultaneously.
 
 *Requires: reinsurer agents (market-mechanics.md §10). Not yet designed; tracked here as a target phenomenon.*
+
+---
+
+## 12. Pricing Rule Evolution Under Selection Pressure `[PLANNED]`
+
+**What it is:** Over many simulation years (200+), syndicates with miscalibrated pricing sensitivities — too soft in hard markets, too rigid in soft markets, too credulous of own experience, too slavish to the market signal — underperform, lose business, or go insolvent. Surviving syndicates accumulate capital and broker relationships. The distribution of pricing parameters across the active population converges toward a natural equilibrium that is the empirically observed market behaviour.
+
+**Why it matters:** The current underwriter channel (market-mechanics.md §4.2) hardcodes the equilibrium outcome as initial conditions: `capacity_uplift = 0.05`, `MARKET_FLOOR_WEIGHT = 0.30`, a 5-year credibility ramp, clamp bounds of [0.90, 1.40]. These produce realistic-looking output but are epistemically closed — the simulation cannot challenge or falsify its own pricing assumptions. A model in which these parameters are free and selection pressure converges them treats the market equilibrium as a *finding*, not an assumption. If the converged values match the current calibration, the calibration is validated. If they diverge, the calibration is corrected.
+
+**Expected mechanism:** Syndicates enter with pricing sensitivity parameters drawn from distributions (`cr_sensitivity`, `capacity_sensitivity`, `market_weight`). A syndicate that discounts the market signal too heavily prices idiosyncratically; if its own model is wrong it accumulates losses. One that follows the market signal too mechanically cannot respond faster than the market's 3-year CR lag. Selection pressure — operating through capital depletion, insolvency, and relationship-score attrition — eliminates the worst-calibrated syndicates. The distribution of surviving parameters narrows over time, and the central tendency of that distribution is the endogenous answer to "what should the 30% floor be?" and "how long should the pricing memory be?"
+
+**Connection to §1 (Underwriting Cycle):** The cycle amplitude, period, and asymmetry that emerge from this selection process are the calibration targets for §1. Until §12 is running, the §1 cycle dynamics depend on the hardcoded parameters, which is the tension documented in §1 above. §12 resolves that tension by making the parameters endogenous.
+
+**Requirements:**
+- Per-insurer heterogeneous pricing sensitivity parameters (`cr_sensitivity`, `capacity_sensitivity`, `market_weight`).
+- Parameter variation at syndicate entry (draw from distribution, or mutate from a parent syndicate's parameters — representing the institutional learning that new capital brings).
+- Extended simulation horizon: 200+ years for meaningful distributional convergence.
+- Bühlmann-Straub credibility replacing linear ramp (§4.5 Phase C).
+- Observable market signal replacing coordinator broadcast (§4.5 Phase D).
+
+*Requires: §4.5 Phases A–D (market-mechanics.md). Long-run target; not in current development cycle.*
 
 ---
 
