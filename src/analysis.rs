@@ -39,6 +39,17 @@ pub struct YearStats {
     /// Gini coefficient of bound-policy count across active insurers in this year.
     /// 0.0 = perfectly equal share; 1.0 = one insurer writes everything.
     pub gini_market_share: f64,
+    /// Mean CR sensitivity of active (non-insolvent) insurers at year-end.
+    /// Converges as selection operates over 200+ years.
+    pub cr_sensitivity_mean: f64,
+    /// Sample std-dev of CR sensitivity across active insurers at year-end.
+    pub cr_sensitivity_std: f64,
+    /// Mean capacity sensitivity of active insurers at year-end.
+    pub capacity_sensitivity_mean: f64,
+    /// Sample std-dev of capacity sensitivity across active insurers at year-end.
+    pub capacity_sensitivity_std: f64,
+    /// Mean market weight floor of active insurers at year-end.
+    pub market_weight_floor_mean: f64,
 }
 
 impl YearStats {
@@ -59,6 +70,11 @@ impl YearStats {
             insurer_count: 0,
             ap_tp_factor: 0.0,
             gini_market_share: 0.0,
+            cr_sensitivity_mean: 0.0,
+            cr_sensitivity_std: 0.0,
+            capacity_sensitivity_mean: 0.0,
+            capacity_sensitivity_std: 0.0,
+            market_weight_floor_mean: 0.0,
         }
     }
 
@@ -1239,6 +1255,8 @@ mod tests {
                     pml_damage_fraction_override: None,
                     depletion_sensitivity: 0.0,
                     capacity_sensitivity: 0.0,
+                    cr_sensitivity: 1.0,
+                    market_weight_floor: 0.30,
                 })
                 .collect(),
             n_insureds: 20,

@@ -137,7 +137,7 @@ fn main() {
 
         if !quiet {
             println!("Events fired: {}", sim.log.len());
-            print_analysis(&sim.log, &initial_capitals, expense_ratio);
+            print_analysis(&sim.log, &initial_capitals, expense_ratio, &sim.sensitivity_by_year);
         }
     }
 }
@@ -146,6 +146,7 @@ fn print_analysis(
     log: &[rins::events::SimEvent],
     initial_capitals: &HashMap<InsurerId, u64>,
     expense_ratio: f64,
+    sensitivity_by_year: &std::collections::HashMap<u32, (f64, f64, f64, f64, f64)>,
 ) {
     // ── Mechanics invariants ──────────────────────────────────────────────────
     let violations = analysis::verify_mechanics(log);
@@ -208,10 +209,10 @@ fn print_analysis(
         warmup + 1
     );
     println!(
-        "{:>4} | {:>9} | {:>8} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>6} | {:>10} | {:>6}",
-        "Year", "Assets(B)", "GUL(B)", "CatGUL%", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers", "Gini"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>6} | {:>10} | {:>6} | {:>7} | {:>7}",
+        "Year", "Assets(B)", "GUL(B)", "CatGUL%", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers", "Gini", "CrSens", "CapSens"
     );
-    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6 + 3 + 7 + 3 + 7));
 
     const CENTS_PER_BUSD: f64 = 100_000_000_000.0; // cents per billion USD
 
@@ -254,8 +255,10 @@ fn print_analysis(
                 (false, false) => base,
             }
         };
+        let (cr_mean, _cr_std, cap_mean, _cap_std, _mwf_mean) =
+            sensitivity_by_year.get(&s.year).copied().unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
         println!(
-            "{:>4} | {:>9.2} | {:>8.2} | {:>7.1}% | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>8} | {} | {} | {:>6.3}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>7.1}% | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>8} | {} | {} | {:>6.3} | {:>7.2} | {:>7.2}",
             s.year,
             assets_b,
             gul_b,
@@ -272,6 +275,8 @@ fn print_analysis(
             ap_tp_str,
             insurer_str,
             s.gini_market_share,
+            cr_mean,
+            cap_mean,
         );
     }
 }

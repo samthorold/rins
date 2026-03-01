@@ -67,6 +67,8 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
                 pml_damage_fraction_override: None,
                 depletion_sensitivity: 0.0,
                 capacity_sensitivity: 0.0,
+                cr_sensitivity: 1.0,
+                market_weight_floor: 0.30,
             })
             .collect(),
         n_insureds: scenario.n_insureds,

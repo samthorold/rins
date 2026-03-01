@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -72,6 +72,9 @@ pub struct Simulation {
     /// Computed at YearEnd from trailing combined ratios + capacity pressure.
     /// Mirrors the MS3 AvT (Actual vs Technical) signal.
     market_ap_tp_factor: f64,
+    /// Sensitivity distribution snapshots per year-end: (cr_sens_mean, cr_sens_std,
+    /// cap_sens_mean, cap_sens_std, mwf_mean) across active (non-insolvent) insurers.
+    pub sensitivity_by_year: HashMap<u32, (f64, f64, f64, f64, f64)>,
 }
 
 impl Simulation {
@@ -102,6 +105,8 @@ impl Simulation {
                     pml,
                     c.depletion_sensitivity,
                     c.capacity_sensitivity,
+                    c.cr_sensitivity,
+                    c.market_weight_floor,
                 )
             })
             .collect();
@@ -156,6 +161,7 @@ impl Simulation {
             next_insurer_id,
             last_entry_year: None,
             market_ap_tp_factor: 1.0,
+            sensitivity_by_year: HashMap::new(),
         }
     }
 
@@ -568,6 +574,28 @@ impl Simulation {
             }
         }
 
+        // ── Sensitivity distribution snapshot ─────────────────────────────────
+        // Compute mean/std of sensitivity parameters across active (non-insolvent) insurers.
+        // Stored in sensitivity_by_year for post-simulation reporting.
+        {
+            let active: Vec<_> = self.insurers.iter().filter(|i| !i.insolvent).collect();
+            if !active.is_empty() {
+                let n = active.len() as f64;
+                let cr_mean  = active.iter().map(|i| i.cr_sensitivity()).sum::<f64>()  / n;
+                let cap_mean = active.iter().map(|i| i.capacity_sensitivity()).sum::<f64>() / n;
+                let mwf_mean = active.iter().map(|i| i.market_weight_floor()).sum::<f64>() / n;
+                let cr_std = if active.len() > 1 {
+                    let var = active.iter().map(|i| (i.cr_sensitivity() - cr_mean).powi(2)).sum::<f64>() / (n - 1.0);
+                    var.sqrt()
+                } else { 0.0 };
+                let cap_std = if active.len() > 1 {
+                    let var = active.iter().map(|i| (i.capacity_sensitivity() - cap_mean).powi(2)).sum::<f64>() / (n - 1.0);
+                    var.sqrt()
+                } else { 0.0 };
+                self.sensitivity_by_year.insert(year.0, (cr_mean, cr_std, cap_mean, cap_std, mwf_mean));
+            }
+        }
+
         // Schedule next year if within simulation horizon.
         let total_years = self.config.warmup_years + self.config.years;
         if year.0 < total_years {
@@ -576,32 +604,39 @@ impl Simulation {
         }
     }
 
-    fn spawn_new_insurer(&mut self, day: Day, year: Year) {
+    pub(crate) fn spawn_new_insurer(&mut self, day: Day, year: Year) {
+        use rand::Rng as _;
+
         let id = InsurerId(self.next_insurer_id);
         self.next_insurer_id += 1;
 
-        // Clone params from the first (representative) insurer config.
+        // Clone structural params from the first (representative) insurer config.
         let pml_200 = self.pml_200;
         let n_territories = self.config.catastrophe.territories.len().max(1);
         let territory_factor = 1.0 / n_territories as f64;
         let (initial_capital, cat_elf, target_loss_ratio, profit_loading, pml_frac,
              attritional_elf, ewma_credibility, expense_ratio, net_line_capacity, scf,
-             depletion_sensitivity, capacity_sensitivity) =
+             depletion_sensitivity) =
             self.config.insurers.first()
                 .map(|t| {
                     let pml = t.pml_damage_fraction_override.unwrap_or(pml_200) * territory_factor;
                     (t.initial_capital, t.cat_elf, t.target_loss_ratio, t.profit_loading, pml,
                      t.attritional_elf, t.ewma_credibility, t.expense_ratio,
-                     t.net_line_capacity, t.solvency_capital_fraction, t.depletion_sensitivity,
-                     t.capacity_sensitivity)
+                     t.net_line_capacity, t.solvency_capital_fraction, t.depletion_sensitivity)
                 })
                 .unwrap_or((15_000_000_000i64, 0.030, 0.62, 0.05, pml_200 * territory_factor,
-                            0.030, 0.3, 0.344, Some(0.30), Some(0.30), 1.0, 0.10));
+                            0.030, 0.3, 0.344, Some(0.30), Some(0.30), 1.0));
+
+        // Draw sensitivity parameters from wide uniform distributions.
+        // Maximum heterogeneity at entry → selection pressure filters toward equilibrium.
+        let cr_sensitivity       = self.rng.random_range(0.0_f64..2.5);   // U(0.0, 2.5); canonical=1.0
+        let capacity_sensitivity = self.rng.random_range(0.0_f64..0.25);  // U(0.0, 0.25); canonical=0.10
+        let market_weight_floor  = self.rng.random_range(0.0_f64..0.60);  // U(0.0, 0.60); canonical=0.30
 
         let insurer = Insurer::new(
             id, initial_capital, attritional_elf, cat_elf, target_loss_ratio,
             ewma_credibility, expense_ratio, profit_loading, net_line_capacity, scf, pml_frac,
-            depletion_sensitivity, capacity_sensitivity,
+            depletion_sensitivity, capacity_sensitivity, cr_sensitivity, market_weight_floor,
         );
         let initial_capital_u64 = initial_capital.max(0) as u64;
 
@@ -641,6 +676,8 @@ mod tests {
                 pml_damage_fraction_override: None,
                 depletion_sensitivity: 0.0,
                 capacity_sensitivity: 0.0,
+                cr_sensitivity: 1.0,
+                market_weight_floor: 0.30,
             }],
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -945,6 +982,8 @@ mod tests {
                 pml_damage_fraction_override: None,
                 depletion_sensitivity: 0.0,
                 capacity_sensitivity: 0.0,
+                cr_sensitivity: 1.0,
+                market_weight_floor: 0.30,
             })
             .collect();
         let sim = run_sim(config);
@@ -1048,6 +1087,8 @@ mod tests {
             pml_damage_fraction_override: None,
             depletion_sensitivity: 0.0,
             capacity_sensitivity: 0.0,
+            cr_sensitivity: 1.0,
+            market_weight_floor: 0.30,
         }];
         let sim = run_sim(config);
 
@@ -1236,6 +1277,8 @@ mod tests {
                 pml_damage_fraction_override: None,
                 depletion_sensitivity: 0.0,
                 capacity_sensitivity: 0.0,
+                cr_sensitivity: 1.0,
+                market_weight_floor: 0.30,
             },
             InsurerConfig {
                 id: InsurerId(2),
@@ -1251,6 +1294,8 @@ mod tests {
                 pml_damage_fraction_override: None,
                 depletion_sensitivity: 0.0,
                 capacity_sensitivity: 0.0,
+                cr_sensitivity: 1.0,
+                market_weight_floor: 0.30,
             },
         ];
 
@@ -1359,6 +1404,8 @@ mod tests {
                 pml,
                 0.0,            // depletion_sensitivity=0 (not tested here)
                 0.0,            // capacity_sensitivity=0 (not tested here)
+                1.0,            // cr_sensitivity=canonical
+                0.30,           // market_weight_floor=canonical
             )
         };
 
@@ -1398,6 +1445,75 @@ mod tests {
         assert!(
             matches!(opt_event, Event::LeadQuoteIssued { .. }),
             "optimistic insurer (pml=0.126) should issue 12th policy: {opt_event:?}"
+        );
+    }
+
+    // ── Phase B: entry parameter randomisation ────────────────────────────────
+
+    #[test]
+    fn spawn_new_insurer_draws_different_cr_sensitivity() {
+        // Two successive spawn_new_insurer calls with the same seeded rng must produce
+        // insurers with different cr_sensitivity values — confirming draws, not cloning.
+        //
+        // Use a config that triggers entry: market hard enough (cr_ewma > threshold).
+        // We directly call spawn_new_insurer twice via a synthetic simulation.
+        use crate::config::{AttritionalConfig, CatConfig, CatEventClass, InsurerConfig, SimulationConfig};
+
+        let config = SimulationConfig {
+            seed: 1,
+            years: 1,
+            warmup_years: 0,
+            insurers: vec![InsurerConfig {
+                id: InsurerId(1),
+                initial_capital: 100_000_000_000,
+                attritional_elf: 0.030,
+                cat_elf: 0.030,
+                target_loss_ratio: 0.62,
+                ewma_credibility: 0.3,
+                expense_ratio: 0.344,
+                profit_loading: 0.05,
+                net_line_capacity: None,
+                solvency_capital_fraction: None,
+                pml_damage_fraction_override: None,
+                depletion_sensitivity: 1.0,
+                capacity_sensitivity: 0.10,
+                cr_sensitivity: 1.0,
+                market_weight_floor: 0.30,
+            }],
+            n_insureds: 5,
+            attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
+            catastrophe: CatConfig {
+                event_classes: vec![CatEventClass {
+                    label: "test".to_string(),
+                    annual_frequency: 0.5,
+                    pareto_scale: 0.05,
+                    pareto_shape: 1.5,
+                    max_damage_fraction: 1.0,
+                }],
+                territories: vec!["US-SE".to_string()],
+            },
+            quotes_per_submission: None,
+            max_rate_on_line: 1.0,
+            disable_cats: false,
+        };
+
+        let day = Day(360);
+        let year = Year(1);
+
+        let mut sim = Simulation::from_config(config);
+        // Call spawn_new_insurer twice to get two entrants with different random draws.
+        sim.spawn_new_insurer(day, year);
+        sim.spawn_new_insurer(day, year);
+
+        // The last two insurers are the entrants.
+        let n = sim.insurers.len();
+        assert!(n >= 2, "must have at least 2 insurers after spawning");
+        let cr1 = sim.insurers[n - 2].cr_sensitivity();
+        let cr2 = sim.insurers[n - 1].cr_sensitivity();
+        assert_ne!(
+            (cr1 * 1e9).round() as i64,
+            (cr2 * 1e9).round() as i64,
+            "successive spawns must draw different cr_sensitivity values: cr1={cr1}, cr2={cr2}"
         );
     }
 }

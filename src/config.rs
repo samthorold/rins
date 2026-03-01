@@ -48,6 +48,14 @@ pub struct InsurerConfig {
     /// where utilisation = cat_aggregate / effective_cat_limit.
     /// 0.0 = no utilisation-based pricing (tests); canonical = 0.10.
     pub capacity_sensitivity: f64,
+    /// Multiplier applied to own_cr_signal before adding to own_factor.
+    /// cr_sensitivity=1.0 is neutral; >1.0 amplifies the own-CR reaction; 0.0 disables it.
+    /// Randomised at entry [U(0.0, 2.5)]; canonical = 1.0.
+    pub cr_sensitivity: f64,
+    /// Per-insurer floor on market blend weight; replaces hardcoded MARKET_FLOOR_WEIGHT=0.30.
+    /// Ensures even experienced insurers retain some market anchor (Lloyd's PMD benchmarking).
+    /// Randomised at entry [U(0.0, 0.60)]; canonical = 0.30.
+    pub market_weight_floor: f64,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -128,7 +136,7 @@ impl SimulationConfig {
     pub fn canonical() -> Self {
         SimulationConfig {
             seed: 42,
-            years: 50,
+            years: 200,
             warmup_years: 5,
             // 8 homogeneous established insurers, each 150M USD capital.
             //
@@ -153,6 +161,8 @@ impl SimulationConfig {
                     pml_damage_fraction_override: None,
                     depletion_sensitivity: 1.0,
                     capacity_sensitivity: 0.10,
+                    cr_sensitivity: 1.0,
+                    market_weight_floor: 0.30,
                 })
                 .collect(),
             n_insureds: 100,

@@ -232,10 +232,10 @@ fn main() {
 
     println!("=== Tier 2 — Year Character Table ===");
     println!(
-        "{:>4} | {:>9} | {:>8} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>6} | {:>10} | {:>6}",
-        "Year", "Assets(B)", "GUL(B)", "CatGUL%", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers", "Gini"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>6} | {:>10} | {:>6} | {:>7} | {:>7}",
+        "Year", "Assets(B)", "GUL(B)", "CatGUL%", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers", "Gini", "CrSens", "CapSens"
     );
-    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6 + 3 + 7 + 3 + 7));
 
     const CR_EWMA_ALPHA: f64 = 1.0 / 3.0;
     let mut cr_ewma: Option<f64> = None;
@@ -281,7 +281,7 @@ fn main() {
             }
         };
         println!(
-            "{:>4} | {:>9.2} | {:>8.2} | {:>7.1}% | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>8} | {} | {} | {:>6.3}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>7.1}% | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>8} | {} | {} | {:>6.3} | {:>7.2} | {:>7.2}",
             s.year,
             assets_b,
             gul_b,
@@ -298,6 +298,8 @@ fn main() {
             ap_tp_str,
             insurer_str,
             s.gini_market_share,
+            s.cr_sensitivity_mean,
+            s.capacity_sensitivity_mean,
         );
     }
     println!();
