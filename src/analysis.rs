@@ -1238,6 +1238,7 @@ mod tests {
                     solvency_capital_fraction: None,
                     pml_damage_fraction_override: None,
                     depletion_sensitivity: 0.0,
+                    capacity_sensitivity: 0.0,
                 })
                 .collect(),
             n_insureds: 20,

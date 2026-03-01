@@ -43,6 +43,11 @@ pub struct InsurerConfig {
     /// Canonical: 1.0 — a fully depleted insurer adds the maximum 0.30 loading.
     /// Set to 0.0 in tests to disable the effect and preserve prior behaviour.
     pub depletion_sensitivity: f64,
+    /// Sensitivity of cat-aggregate utilisation adjustment.
+    /// capacity_adj = clamp(utilisation × capacity_sensitivity, 0.0, 0.20)
+    /// where utilisation = cat_aggregate / effective_cat_limit.
+    /// 0.0 = no utilisation-based pricing (tests); canonical = 0.10.
+    pub capacity_sensitivity: f64,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -147,6 +152,7 @@ impl SimulationConfig {
                     solvency_capital_fraction: Some(0.30),
                     pml_damage_fraction_override: None,
                     depletion_sensitivity: 1.0,
+                    capacity_sensitivity: 0.10,
                 })
                 .collect(),
             n_insureds: 100,
