@@ -289,8 +289,8 @@ impl Simulation {
                 }
             }
 
-            Event::LeadQuoteDeclined { submission_id, .. } => {
-                for (d, e) in self.broker.on_lead_quote_declined(day, submission_id) {
+            Event::LeadQuoteDeclined { submission_id, insurer_id, .. } => {
+                for (d, e) in self.broker.on_lead_quote_declined(day, submission_id, insurer_id) {
                     self.schedule(d, e);
                 }
             }

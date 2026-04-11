@@ -8,6 +8,10 @@ use crate::types::{Day, InsuredId, InsurerId, SubmissionId};
 /// A score of 1.0 halves in ~3.1 years (0.80^3.1 ≈ 0.50).
 const SCORE_DECAY: f64 = 0.80;
 
+/// Decline counts are reset to zero at each YearEnd (not decayed).
+/// Cat-agg capacity resets naturally as old policies expire across the year boundary,
+/// so an insurer that was full last year may have room again this year.
+
 /// Transient state while a submission is in flight.
 /// All solicited insurers are contacted upfront; the cheapest accepted quote wins.
 struct PendingQuote {
@@ -32,13 +36,19 @@ pub struct Broker {
     /// Accumulated relationship score per insurer. +1.0 per PolicyBound, ×0.80 per YearEnd.
     /// Re-entrants retain their decayed score; new IDs start at 0.0.
     pub relationship_scores: HashMap<InsurerId, f64>,
+    /// Count of declines received from each insurer since the last YearEnd.
+    /// Used as a secondary sort key to route away from capacity-constrained insurers.
+    /// Reset to 0.0 at each YearEnd.
+    decline_counts: HashMap<InsurerId, f64>,
 }
 
 impl Broker {
     pub fn new(insureds: Vec<Insured>, insurer_ids: Vec<InsurerId>, quotes_per_submission: usize) -> Self {
         let mut relationship_scores = HashMap::new();
+        let mut decline_counts = HashMap::new();
         for &id in &insurer_ids {
             relationship_scores.insert(id, 0.0);
+            decline_counts.insert(id, 0.0);
         }
         Broker {
             insureds,
@@ -48,6 +58,7 @@ impl Broker {
             pending: HashMap::new(),
             quotes_per_submission,
             relationship_scores,
+            decline_counts,
         }
     }
 
@@ -57,6 +68,7 @@ impl Broker {
     pub fn add_insurer(&mut self, id: InsurerId) {
         self.insurer_ids.push(id);
         self.relationship_scores.entry(id).or_insert(0.0);
+        self.decline_counts.entry(id).or_insert(0.0);
     }
 
     /// A policy was bound with this insurer. Increment their relationship score by 1.0.
@@ -64,10 +76,13 @@ impl Broker {
         *self.relationship_scores.entry(insurer_id).or_insert(0.0) += 1.0;
     }
 
-    /// Year ended. Decay all relationship scores by SCORE_DECAY.
+    /// Year ended. Decay all relationship scores by SCORE_DECAY and reset decline counts.
     pub fn on_year_end(&mut self) {
         for score in self.relationship_scores.values_mut() {
             *score *= SCORE_DECAY;
+        }
+        for count in self.decline_counts.values_mut() {
+            *count = 0.0;
         }
     }
 
@@ -93,18 +108,24 @@ impl Broker {
         let start_idx = self.next_insurer_idx % n;
         self.next_insurer_idx += 1;
 
-        // Sort pool indices by (score DESC, cyclic_distance_from_start_idx ASC).
-        // When all scores are equal this degenerates to round-robin (cyclic order from start_idx).
+        // Sort pool indices by (net_score DESC, cyclic_distance_from_start_idx ASC) where
+        //   net_score = relationship_score − decline_count
+        // Relationship score rewards incumbents; subtracting decline_count deprioritises
+        // capacity-constrained insurers even when they have high relationship scores.
+        // Cyclic distance breaks exact ties (round-robin fallback).
         let mut indices: Vec<usize> = (0..n).collect();
         let scores = &self.relationship_scores;
+        let declines = &self.decline_counts;
         let insurer_ids = &self.insurer_ids;
         indices.sort_by(|&a, &b| {
-            let sa = scores.get(&insurer_ids[a]).copied().unwrap_or(0.0);
-            let sb = scores.get(&insurer_ids[b]).copied().unwrap_or(0.0);
-            // Primary: higher score first.
-            let score_ord = sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal);
-            if score_ord != std::cmp::Ordering::Equal {
-                return score_ord;
+            let net_a = scores.get(&insurer_ids[a]).copied().unwrap_or(0.0)
+                - declines.get(&insurer_ids[a]).copied().unwrap_or(0.0);
+            let net_b = scores.get(&insurer_ids[b]).copied().unwrap_or(0.0)
+                - declines.get(&insurer_ids[b]).copied().unwrap_or(0.0);
+            // Primary: higher net score first.
+            let net_ord = net_b.partial_cmp(&net_a).unwrap_or(std::cmp::Ordering::Equal);
+            if net_ord != std::cmp::Ordering::Equal {
+                return net_ord;
             }
             // Tiebreaker: smaller cyclic distance from start_idx first (round-robin).
             let da = (a + n - start_idx) % n;
@@ -179,14 +200,16 @@ impl Broker {
         }
     }
 
-    /// An insurer declined. Decrement outstanding count.
+    /// An insurer declined. Record the decline, decrement outstanding count.
     /// When all solicited insurers have responded, emit `QuotePresented` with the best
     /// accepted quote — or drop the submission silently if all declined.
     pub fn on_lead_quote_declined(
         &mut self,
         day: Day,
         submission_id: SubmissionId,
+        insurer_id: InsurerId,
     ) -> Vec<(Day, Event)> {
+        *self.decline_counts.entry(insurer_id).or_insert(0.0) += 1.0;
         let pq = match self.pending.get_mut(&submission_id) {
             Some(pq) => pq,
             None => return vec![],
@@ -479,7 +502,7 @@ mod tests {
         // 2 insurers; first declines → still 1 outstanding → no event.
         let mut broker = broker_with_insurers(1, vec![1, 2]);
         broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
-        let events = broker.on_lead_quote_declined(Day(1), SubmissionId(0));
+        let events = broker.on_lead_quote_declined(Day(1), SubmissionId(0), InsurerId(1));
         assert!(events.is_empty(), "still 1 outstanding → must return empty");
     }
 
@@ -489,7 +512,7 @@ mod tests {
         let mut broker = broker_with_insurers(1, vec![1, 2]);
         broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
 
-        let ev_declined = broker.on_lead_quote_declined(Day(1), SubmissionId(0));
+        let ev_declined = broker.on_lead_quote_declined(Day(1), SubmissionId(0), InsurerId(1));
         assert!(ev_declined.is_empty(), "1 outstanding remaining → no event");
 
         let ev_issued = broker.on_lead_quote_issued(
@@ -510,10 +533,10 @@ mod tests {
         let mut broker = broker_with_insurers(1, vec![1, 2]);
         broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
 
-        let ev1 = broker.on_lead_quote_declined(Day(1), SubmissionId(0));
+        let ev1 = broker.on_lead_quote_declined(Day(1), SubmissionId(0), InsurerId(1));
         assert!(ev1.is_empty(), "still 1 outstanding → must return empty");
 
-        let ev2 = broker.on_lead_quote_declined(Day(1), SubmissionId(0));
+        let ev2 = broker.on_lead_quote_declined(Day(1), SubmissionId(0), InsurerId(2));
         assert_eq!(ev2.len(), 1, "all declined → SubmissionDropped must be emitted");
         assert!(
             matches!(ev2[0].1, Event::SubmissionDropped { insured_id: InsuredId(1), .. }),
@@ -579,6 +602,51 @@ mod tests {
                 panic!("expected LeadQuoteRequested");
             }
         }
+    }
+
+    #[test]
+    fn low_decline_insurer_preferred_when_k_lt_n() {
+        // 2 insurers, equal relationship scores (both 0.0).
+        // Insurer 1 accumulates 5 declines; insurer 2 has none.
+        // k=1 → every submission must route to insurer 2 (fewer declines).
+        let mut broker = broker_with_qps(3, vec![1, 2], 1);
+        // Decline counts increment even for unknown submission IDs (count is recorded first,
+        // then the pending lookup fails and returns empty). Use this to directly inject
+        // decline history for insurer 1 without running a full quoting flow.
+        for i in 0..5u64 {
+            let result = broker.on_lead_quote_declined(Day(0), SubmissionId(1000 + i), InsurerId(1));
+            assert!(result.is_empty(), "unknown submission → no events");
+        }
+        // Insurer 1 now has decline_count=5, insurer 2 has 0.
+
+        let events = broker.on_coverage_requested(Day(10), InsuredId(1), small_risk());
+        assert_eq!(events.len(), 1);
+        if let Event::LeadQuoteRequested { insurer_id, .. } = events[0].1 {
+            assert_eq!(insurer_id, InsurerId(2), "low-decline insurer must be preferred");
+        } else {
+            panic!("expected LeadQuoteRequested");
+        }
+    }
+
+    #[test]
+    fn decline_counts_reset_at_year_end() {
+        // After on_year_end, decline counts clear so the previously-penalised insurer
+        // is no longer deprioritised (equal scores → round-robin resumes).
+        let mut broker = broker_with_qps(1, vec![1, 2], 1);
+
+        // Give insurer 1 a decline penalty.
+        broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
+        broker.on_lead_quote_declined(Day(1), SubmissionId(0), InsurerId(1));
+
+        broker.on_year_end(); // resets decline_counts
+
+        // With counts reset and equal scores, round-robin picks insurer 1 first again.
+        let ev1 = broker.on_coverage_requested(Day(360), InsuredId(1), small_risk());
+        let ev2 = broker.on_coverage_requested(Day(360), InsuredId(1), small_risk());
+        let id1 = if let Event::LeadQuoteRequested { insurer_id, .. } = ev1[0].1 { insurer_id } else { panic!() };
+        let id2 = if let Event::LeadQuoteRequested { insurer_id, .. } = ev2[0].1 { insurer_id } else { panic!() };
+        // After reset, both insurers should appear (round-robin, not stuck on insurer 2).
+        assert_ne!(id1, id2, "after year-end reset, round-robin must cycle both insurers");
     }
 
 }
