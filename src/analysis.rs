@@ -343,6 +343,9 @@ pub fn analyse(
     let mut active_insurer_count = initial_capitals.len() as u32;
     // Bound-policy count per (year, insurer_id) — used to compute the Gini coefficient.
     let mut bound_by_insurer: HashMap<u32, HashMap<InsurerId, u32>> = HashMap::new();
+    // Sensitivity parameters per active insurer: (cr_sensitivity, capacity_sensitivity, market_weight_floor).
+    // Populated from InsurerEntered (including day-0 initial insurers); pruned on InsurerInsolvent.
+    let mut insurer_sensitivity: HashMap<InsurerId, (f64, f64, f64)> = HashMap::new();
 
     for sim_event in events {
         let year = sim_event.day.year().0;
@@ -367,8 +370,9 @@ pub fn analyse(
                     Peril::WindstormAtlantic => s.cat_gul += ground_up_loss,
                 }
             }
-            Event::InsurerInsolvent { .. } => {
+            Event::InsurerInsolvent { insurer_id, .. } => {
                 active_insurer_count = active_insurer_count.saturating_sub(1);
+                insurer_sensitivity.remove(insurer_id);
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.insolvent_count += 1;
             }
@@ -384,11 +388,21 @@ pub fn analyse(
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.cat_event_count += 1;
             }
-            Event::InsurerEntered { insurer_id, initial_capital, .. } => {
+            Event::InsurerEntered {
+                insurer_id,
+                initial_capital,
+                cr_sensitivity,
+                capacity_sensitivity,
+                market_weight_floor,
+            } => {
                 last_capital.insert(*insurer_id, *initial_capital);
-                active_insurer_count += 1;
-                let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
-                s.entrant_count += 1;
+                insurer_sensitivity.insert(*insurer_id, (*cr_sensitivity, *capacity_sensitivity, *market_weight_floor));
+                // Day(0) events are the initial insurers logged by `start()` — not market entrants.
+                if sim_event.day.0 > 0 {
+                    active_insurer_count += 1;
+                    let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
+                    s.entrant_count += 1;
+                }
             }
             Event::CoverageRequested { insured_id, risk } => {
                 let seen = assets_seen.entry(year).or_default();
@@ -406,6 +420,27 @@ pub fn analyse(
                 // Gini coefficient of bound-policy count across active writers this year.
                 if let Some(counts) = bound_by_insurer.get(&y.0) {
                     s.gini_market_share = gini_from_counts(counts);
+                }
+                // Sensitivity distribution snapshot across active insurers.
+                let n = insurer_sensitivity.len();
+                if n > 0 {
+                    let nf = n as f64;
+                    let cr_mean  = insurer_sensitivity.values().map(|v| v.0).sum::<f64>() / nf;
+                    let cap_mean = insurer_sensitivity.values().map(|v| v.1).sum::<f64>() / nf;
+                    let mwf_mean = insurer_sensitivity.values().map(|v| v.2).sum::<f64>() / nf;
+                    let cr_std = if n > 1 {
+                        let var = insurer_sensitivity.values().map(|v| (v.0 - cr_mean).powi(2)).sum::<f64>() / (nf - 1.0);
+                        var.sqrt()
+                    } else { 0.0 };
+                    let cap_std = if n > 1 {
+                        let var = insurer_sensitivity.values().map(|v| (v.1 - cap_mean).powi(2)).sum::<f64>() / (nf - 1.0);
+                        var.sqrt()
+                    } else { 0.0 };
+                    s.cr_sensitivity_mean       = cr_mean;
+                    s.cr_sensitivity_std        = cr_std;
+                    s.capacity_sensitivity_mean = cap_mean;
+                    s.capacity_sensitivity_std  = cap_std;
+                    s.market_weight_floor_mean  = mwf_mean;
                 }
             }
             _ => {}
@@ -1495,5 +1530,52 @@ mod tests {
             let integ = verify_integrity(&sim.log);
             assert!(integ.is_empty(), "seed {seed}: integrity violations: {integ:?}");
         }
+    }
+
+    #[test]
+    fn analyse_populates_sensitivity_means_from_event_stream() {
+        // InsurerEntered at day 0 carries known sensitivity params.
+        // YearEnd at day 359 should reflect those params in YearStats.
+        let insurer_id = InsurerId(1);
+        let events = vec![
+            sim_ev(
+                0,
+                Event::SimulationStart { year_start: Year(1), warmup_years: 0, analysis_years: 1 },
+            ),
+            sim_ev(
+                0,
+                Event::InsurerEntered {
+                    insurer_id,
+                    initial_capital: 1_000_000,
+                    cr_sensitivity: 1.5,
+                    capacity_sensitivity: 0.12,
+                    market_weight_floor: 0.25,
+                },
+            ),
+            sim_ev(359, Event::YearEnd { year: Year(1) }),
+        ];
+        let (_, stats) = analyse(&events, &empty_capitals(), 0.344);
+        assert_eq!(stats.len(), 1);
+        let s = &stats[0];
+        assert!(
+            (s.cr_sensitivity_mean - 1.5).abs() < 1e-10,
+            "cr_sensitivity_mean: expected 1.5, got {}",
+            s.cr_sensitivity_mean
+        );
+        assert!(
+            (s.capacity_sensitivity_mean - 0.12).abs() < 1e-10,
+            "capacity_sensitivity_mean: expected 0.12, got {}",
+            s.capacity_sensitivity_mean
+        );
+        assert!(
+            (s.market_weight_floor_mean - 0.25).abs() < 1e-10,
+            "market_weight_floor_mean: expected 0.25, got {}",
+            s.market_weight_floor_mean
+        );
+        // Single insurer: std should be 0
+        assert!((s.cr_sensitivity_std - 0.0).abs() < 1e-10);
+        assert!((s.capacity_sensitivity_std - 0.0).abs() < 1e-10);
+        // entrant_count must NOT increment for day-0 events
+        assert_eq!(s.entrant_count, 0, "initial insurers must not count as entrants");
     }
 }

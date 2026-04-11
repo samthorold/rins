@@ -207,6 +207,20 @@ impl Simulation {
                 analysis_years: self.config.years,
             },
         );
+        // Emit InsurerEntered for each initial insurer so the event stream is self-contained.
+        // Day(0) distinguishes these from dynamically-spawned entrants (day > 0).
+        for insurer in &self.insurers {
+            self.log.push(SimEvent {
+                day: Day(0),
+                event: Event::InsurerEntered {
+                    insurer_id: insurer.id,
+                    initial_capital: insurer.capital.max(0) as u64,
+                    cr_sensitivity: insurer.cr_sensitivity(),
+                    capacity_sensitivity: insurer.capacity_sensitivity(),
+                    market_weight_floor: insurer.market_weight_floor(),
+                },
+            });
+        }
     }
 
     /// Run the simulation until a stopping condition is met.
@@ -658,7 +672,13 @@ impl Simulation {
 
         self.log.push(SimEvent {
             day,
-            event: Event::InsurerEntered { insurer_id: id, initial_capital: initial_capital_u64 },
+            event: Event::InsurerEntered {
+                insurer_id: id,
+                initial_capital: initial_capital_u64,
+                cr_sensitivity,
+                capacity_sensitivity,
+                market_weight_floor,
+            },
         });
     }
 }
@@ -1350,10 +1370,11 @@ mod tests {
         let mut config = minimal_config(10, 7);
         config.attritional.annual_rate = 10.0;
         let sim = run_sim(config);
+        // Filter to day > 0 to exclude initial-insurer InsurerEntered events (logged by start()).
         let entered = sim
             .log
             .iter()
-            .filter(|e| matches!(e.event, Event::InsurerEntered { .. }))
+            .filter(|e| e.day.0 > 0 && matches!(e.event, Event::InsurerEntered { .. }))
             .count();
         assert!(entered > 0, "expected entry when AP/TP > 1.10 (high-loss scenario)");
     }
@@ -1366,10 +1387,11 @@ mod tests {
         config.catastrophe.event_classes[0].annual_frequency = 0.0;
         config.attritional.annual_rate = 0.0;
         let sim = run_sim(config);
+        // Filter to day > 0 to exclude initial-insurer InsurerEntered events (logged by start()).
         let entered = sim
             .log
             .iter()
-            .filter(|e| matches!(e.event, Event::InsurerEntered { .. }))
+            .filter(|e| e.day.0 > 0 && matches!(e.event, Event::InsurerEntered { .. }))
             .count();
         assert_eq!(entered, 0, "entry must not fire when AP/TP stays below threshold");
     }

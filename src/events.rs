@@ -128,9 +128,13 @@ pub enum Event {
     InsurerInsolvent { insurer_id: InsurerId },
     /// A new insurer has entered the market, spawned by the coordinator after observing
     /// sustained market profitability. Logged at the YearEnd day that triggered entry.
+    /// Also emitted at Day(0) for the initial insurers so the event stream is self-contained.
     InsurerEntered {
         insurer_id: InsurerId,
         initial_capital: u64,
+        cr_sensitivity: f64,
+        capacity_sensitivity: f64,
+        market_weight_floor: f64,
     },
 }
 
