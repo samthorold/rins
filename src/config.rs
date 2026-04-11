@@ -119,11 +119,14 @@ pub struct SimulationConfig {
     pub catastrophe: CatConfig,
     /// Number of insurers solicited per submission. None = all insurers.
     pub quotes_per_submission: Option<usize>,
-    /// Maximum rate on line an insured will accept (premium / sum_insured).
-    /// Quotes above this threshold are rejected; the insured retries at next renewal.
-    /// Canonical: 0.15 — well above current 6–8% rate band; becomes binding once
-    /// capital-linked pricing raises rates post-cat.
-    pub max_rate_on_line: f64,
+    /// Log-space mean of the log-normal distribution of insured reservation prices
+    /// (base_max_rate_on_line ~ LogNormal(mu, sigma)); median = exp(mu).
+    /// Set sigma == 0.0 for a homogeneous population: every insured gets exp(mu) exactly.
+    /// Canonical: mu = ln(0.25) ≈ -1.386, sigma = 0.40.
+    ///   At 11% RoL: ~2% reject. At 14%: ~7.5%. At 18%: ~21%. At 21%: ~33%.
+    pub max_rol_mu: f64,
+    /// Log-space std-dev of the reservation price distribution. 0.0 = homogeneous (tests).
+    pub max_rol_sigma: f64,
     /// When true, no cat `LossEvent`s are scheduled. Attritional losses still run.
     /// Useful for isolating attritional dynamics without cat noise.
     pub disable_cats: bool,
@@ -202,7 +205,10 @@ impl SimulationConfig {
                 ],
             },
             quotes_per_submission: Some(4), // solicit top-4 (by relationship score) per submission
-            max_rate_on_line: 0.30, // 30% RoL ceiling — allows market recovery after cat-driven EWMA spikes
+            // LogNormal(ln(0.25), 0.40): median reservation price = 25% RoL.
+            // At 14% (normal hard market): ~7.5% reject. At 18%: ~21%. At 21%: ~33%.
+            max_rol_mu: f64::ln(0.25),  // ≈ -1.386; median = 0.25
+            max_rol_sigma: 0.40,
             disable_cats: false,
         }
     }

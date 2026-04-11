@@ -85,23 +85,17 @@ Primary hypothesis — *partially confirmed.* Gini values in the year table are 
 
 ---
 
-## Phase 4 — Demand elasticity (heterogeneous reservation prices)
+## Phase 4 — Demand elasticity (heterogeneous reservation prices) `[ACTIVE]`
 
-**Sequencing note.** Demand elasticity was originally Phase 3, but its cycle contribution is indirect: it moderates amplitude and separates supply-constrained from demand-constrained non-placements, but does not introduce new cycle mechanisms. Phase 3 (relationship routing) directly affects which insurers win business and at what price, producing competitive dynamics — market share concentration, new-entrant undercutting, winner-take-more soft markets — that are cycle-relevant in isolation and unlock Phase 5. Demand elasticity is more valuable once those competitive dynamics are visible, because price-sensitive buyers exiting in hard markets interact with relationship scores to shape who retains the residual pool.
+**Mechanism.** Each insured draws a `base_max_rate_on_line` at construction from `LogNormal(max_rol_mu, max_rol_sigma)`. Canonical: `LogNormal(ln(0.25), 0.40)` — median reservation price 25% RoL. `Insured::on_quote_presented` compares `premium / sum_insured` against `effective_max_rol() = base_max_rate_on_line + rol_uplift` and emits `QuoteRejected` if the threshold is exceeded. The degenerate case `sigma == 0.0` → every insured gets `exp(mu)` exactly (no RNG consumed; used in tests).
 
-**Mechanism.** Replace the single uniform `max_rate_on_line = 0.15` with a distribution across insureds. The simplest parametric form: `max_rol ~ Uniform(low, high)` or `LogNormal(mu, sigma)`, calibrated so that at the canonical 6–8% rate band nearly all insureds participate, but above 10–12% a measurable fraction opt out (raising retentions, self-insuring, or placing with lower-quality markets not modelled).
+`QuoteRejected` (demand-driven) is distinguished from `SubmissionDropped` (supply-driven) by the `Reject#` column in the year table. The two columns together diagnose whether a capacity crunch is insurer-constrained or price-constrained.
 
-The `Dropped#` column then measures a mix of supply-constrained and demand-constrained non-placements. When rates spike, some insureds voluntarily withdraw; when rates soften, they return. The in-force policy count becomes a function of both capacity and price.
+**Observed results (canonical run, 205 years, seed=42).** 46 demand-side rejections over the full run vs thousands of `SubmissionDropped` — demand-side pressure is active but modest at normal rate levels. At year 30 (Rate% ≈ 22.76%, the sharpest hard-market spike in the run), 6 rejections occur in a single year, confirming the elasticity activates precisely when rates breach the central mass of the LogNormal. At normal rates (12–13%), 1–2 spurious rejections per year appear from the left tail (a small number of insureds with base_max_rol ≈ 0.10–0.12 encountering a slightly expensive per-insurer quote). These are real demand behaviour, not artefacts.
 
-A richer extension: buyers with above-average GUL history have lower reservation prices (they've seen what losses cost and value coverage more), while low-loss-history buyers are more price-sensitive. This connects to phenomenon 9 (Experience Rating) and makes the insured pool quality endogenous.
+**Calibration.** At 14% (hard market): ~7.5% of insureds reject. At 18%: ~21%. At 21%: ~33%. At 6–8% (normal): <2%. The curve is well-separated from the normal operating range.
 
-**Primary hypothesis.** In hard-market years (Rate% > 9%), in-force policy count falls as marginal buyers price out. In soft-market years (Rate% < 6.5%), in-force count rises toward the full 100. The effective demand curve is downward-sloping rather than vertical, absorbing some of the capacity movement and moderating rate swings. Cycle period lengthens slightly; amplitude is lower than Phase 2 alone.
-
-**Secondary hypotheses.**
-- `QuoteRejected` (demand-driven) is distinguishable from `SubmissionDropped` (supply-driven) in hard markets; the mix shifts toward demand rejection as rates spike.
-- The insured pool in hard markets is adversely selected toward high-loss-history buyers (low-risk buyers price out first), mildly elevating the loss ratio above ATP expectations.
-
-**Diagnostics.** Track `QuoteRejected` vs `SubmissionDropped` separately. Plot in-force policy count vs Rate% across years — a downward slope confirms demand elasticity is active.
+**What this did not fix.** No quantity adjustment: buyers who do purchase still buy at full `sum_insured` with zero attachment. New capital still competes for the same per-policy premium volume once the marginal buyers exit. Rate collapse in post-cat soft markets remains faster than empirical Lloyd's cycles. The two remaining structural gaps are: (1) programme restructuring (limit/deductible adjustment), and (2) competitive individual pricing replacing the coordinator-broadcast `market_ap_tp_factor`.
 
 ---
 

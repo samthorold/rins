@@ -23,8 +23,10 @@ pub struct YearStats {
     pub total_capital: u64,
     /// Count of InsurerInsolvent events in the year.
     pub insolvent_count: u32,
-    /// Count of SubmissionDropped events in the year (all insurers declined).
+    /// Count of SubmissionDropped events in the year (supply-side: all insurers declined).
     pub dropped_count: u32,
+    /// Count of QuoteRejected events in the year (demand-side: insured's reservation price breached).
+    pub rejected_count: u32,
     /// Sum of unique-insured sum_insured from CoverageRequested in the year (cents).
     pub total_assets: u64,
     /// Count of WindstormAtlantic LossEvent firings in the year.
@@ -64,6 +66,7 @@ impl YearStats {
             total_capital: 0,
             insolvent_count: 0,
             dropped_count: 0,
+            rejected_count: 0,
             total_assets: 0,
             cat_event_count: 0,
             entrant_count: 0,
@@ -372,6 +375,10 @@ pub fn analyse(
             Event::SubmissionDropped { .. } => {
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.dropped_count += 1;
+            }
+            Event::QuoteRejected { .. } => {
+                let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
+                s.rejected_count += 1;
             }
             Event::LossEvent { peril: Peril::WindstormAtlantic, .. } => {
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
@@ -1272,7 +1279,8 @@ mod tests {
                 territories: vec!["US-SE".to_string()],
             },
             quotes_per_submission: None,
-            max_rate_on_line: 1.0,
+            max_rol_mu: 0.0,
+            max_rol_sigma: 0.0,
             disable_cats: false,
         }
     }

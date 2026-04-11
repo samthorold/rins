@@ -115,17 +115,29 @@ impl Simulation {
 
         let territories = &config.catastrophe.territories;
         let mut insureds = Vec::new();
+        // Sample each insured's reservation price from LogNormal(max_rol_mu, max_rol_sigma).
+        // Uses a local RNG seeded from config.seed — fully independent of Simulation.rng,
+        // which is also seeded from config.seed but constructed separately below.
+        let mut insured_rng = ChaCha20Rng::seed_from_u64(config.seed);
         for i in 0..config.n_insureds {
             let territory = if territories.is_empty() {
                 "US-SE".to_string()
             } else {
                 territories[i % territories.len()].clone()
             };
+            let base_rol = if config.max_rol_sigma == 0.0 {
+                config.max_rol_mu.exp()
+            } else {
+                use rand_distr::{Distribution as _, LogNormal};
+                let dist = LogNormal::new(config.max_rol_mu, config.max_rol_sigma)
+                    .expect("invalid LogNormal params for max_rol");
+                dist.sample(&mut insured_rng)
+            };
             insureds.push(Insured::new(
                 InsuredId(i as u64 + 1),
                 territory,
                 vec![Peril::WindstormAtlantic, Peril::Attritional],
-                config.max_rate_on_line,
+                base_rol,
             ));
         }
         let qps = config
@@ -692,7 +704,8 @@ mod tests {
                 territories: vec!["US-SE".to_string()], // single territory: all insureds hit
             },
             quotes_per_submission: None,
-            max_rate_on_line: 1.0, // unlimited — tests accept all quotes by default
+            max_rol_mu: 0.0,    // exp(0) = 1.0: all insureds accept all quotes (tests)
+            max_rol_sigma: 0.0, // sigma=0: degenerate — everyone gets exp(mu) exactly
             disable_cats: false,
         }
     }
@@ -1045,7 +1058,9 @@ mod tests {
         // max_rate_on_line=0.0 rejects every quote (any positive premium > 0%).
         // The simulation must schedule CoverageRequested at QuoteRejected.day + 358.
         let mut config = minimal_config(2, 1);
-        config.max_rate_on_line = 0.0;
+        // exp(-f64::INFINITY) = 0.0 → all quotes rejected; sigma=0 for determinism.
+        config.max_rol_mu = f64::NEG_INFINITY;
+        config.max_rol_sigma = 0.0;
         let sim = run_sim(config);
 
         let qr_day = sim
@@ -1493,7 +1508,8 @@ mod tests {
                 territories: vec!["US-SE".to_string()],
             },
             quotes_per_submission: None,
-            max_rate_on_line: 1.0,
+            max_rol_mu: 0.0,
+            max_rol_sigma: 0.0,
             disable_cats: false,
         };
 
@@ -1514,6 +1530,40 @@ mod tests {
             (cr1 * 1e9).round() as i64,
             (cr2 * 1e9).round() as i64,
             "successive spawns must draw different cr_sensitivity values: cr1={cr1}, cr2={cr2}"
+        );
+    }
+
+    #[test]
+    fn insured_reservation_prices_are_heterogeneous() {
+        // With sigma > 0, insureds must receive distinct LogNormal draws.
+        let config = SimulationConfig {
+            n_insureds: 20,
+            max_rol_mu: f64::ln(0.25), // median = 0.25
+            max_rol_sigma: 0.40,
+            ..minimal_config(1, 20)
+        };
+        let sim = Simulation::from_config(config);
+        let rols: Vec<f64> = sim.broker.insureds.iter().map(|i| i.base_max_rol()).collect();
+        assert!(rols.iter().all(|&r| r > 0.0), "all draws must be positive: {rols:?}");
+        let first = rols[0];
+        assert!(
+            rols.iter().any(|&r| (r - first).abs() > 1e-9),
+            "expected heterogeneous reservation prices across 20 insureds, all got {first}"
+        );
+    }
+
+    #[test]
+    fn insured_reservation_prices_degenerate_homogeneous() {
+        // sigma=0: every insured gets exactly exp(mu); no RNG consumed.
+        let config = SimulationConfig {
+            max_rol_mu: f64::ln(0.25), // exp(ln(0.25)) = 0.25
+            max_rol_sigma: 0.0,
+            ..minimal_config(1, 5)
+        };
+        let sim = Simulation::from_config(config);
+        assert!(
+            sim.broker.insureds.iter().all(|i| (i.base_max_rol() - 0.25).abs() < 1e-9),
+            "sigma=0 must assign exp(mu)=0.25 to every insured"
         );
     }
 }

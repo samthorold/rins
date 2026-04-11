@@ -33,6 +33,11 @@ impl Insured {
         self.risk.sum_insured
     }
 
+    /// The insured's baseline reservation price (set at construction, never mutated).
+    pub fn base_max_rol(&self) -> f64 {
+        self.base_max_rate_on_line
+    }
+
     /// Effective acceptance threshold: base + accumulated uplift from recent losses.
     pub fn effective_max_rol(&self) -> f64 {
         self.base_max_rate_on_line + self.rol_uplift

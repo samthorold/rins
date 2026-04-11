@@ -84,7 +84,8 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
             territories: vec!["US-SE".to_string()],
         },
         quotes_per_submission: None,
-        max_rate_on_line: 1.0,
+        max_rol_mu: 0.0,
+        max_rol_sigma: 0.0,
         disable_cats: false,
     };
     let mut sim = Simulation::from_config(config);
