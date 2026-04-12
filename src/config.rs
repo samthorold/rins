@@ -56,6 +56,11 @@ pub struct InsurerConfig {
     /// Ensures even experienced insurers retain some market anchor (Lloyd's PMD benchmarking).
     /// Randomised at entry [U(0.0, 0.60)]; canonical = 0.30.
     pub market_weight_floor: f64,
+    /// Minimum own_ap_tp_factor at which the insurer writes a full line (pricing_line = 1.0).
+    /// pricing_line = clamp((own_factor - floor_factor) / (1 - floor_factor), 0, 1).
+    /// Canonical: 0.85 — insurer begins reducing line when its AP/TP blended factor falls below 85%.
+    /// Set to 0.0 in tests to always produce line_size = 1.0 (backward-compatible behaviour).
+    pub floor_factor: f64,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -166,6 +171,7 @@ impl SimulationConfig {
                     capacity_sensitivity: 0.10,
                     cr_sensitivity: 1.0,
                     market_weight_floor: 0.30,
+                    floor_factor: 0.85,
                 })
                 .collect(),
             n_insureds: 100,

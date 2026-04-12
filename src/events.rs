@@ -61,19 +61,31 @@ pub enum Event {
         atp: u64,                  // actuarial technical price (break-even floor)
         premium: u64,              // final quoted premium (underwriter decision)
         cat_exposure_at_quote: u64, // insurer's WindstormAtlantic aggregate before this risk is added (0 if risk doesn't cover cat)
+        /// Fraction of the risk this insurer is willing to write [0.0, 1.0].
+        /// Derived from capital headroom and pricing adequacy; see Phase 5 formula.
+        line_size: f64,
     },
-    /// Broker presents the quote to the insured.
+    /// Broker presents the assembled panel quote to the insured.
     QuotePresented {
         submission_id: SubmissionId,
         insured_id: InsuredId,
-        insurer_id: InsurerId,
+        /// The insurer with the highest relationship score in the solicited set.
+        /// Sets terms; followers fill remaining capacity in score order.
+        leader_id: InsurerId,
+        /// Assembled panel: (insurer_id, line_share) ordered leader-first.
+        /// Shares sum to 1.0.
+        panel: Vec<(InsurerId, f64)>,
+        /// Blended premium: Σ line_share_i × premium_i.
         premium: u64,
     },
-    /// Insured accepts the quote. Market creates the policy record.
+    /// Insured accepts the quote. Panel is passed through unchanged.
     QuoteAccepted {
         submission_id: SubmissionId,
         insured_id: InsuredId,
-        insurer_id: InsurerId,
+        /// Leader insurer (passed through from QuotePresented).
+        leader_id: InsurerId,
+        /// Panel: (insurer_id, line_share) summing to 1.0.
+        panel: Vec<(InsurerId, f64)>,
         premium: u64,
     },
     /// Insured rejects the quote (rate on line exceeds max_rate_on_line).
@@ -87,12 +99,10 @@ pub enum Event {
         policy_id: PolicyId,
         submission_id: SubmissionId,
         insured_id: InsuredId,
-        insurer_id: InsurerId,
+        /// Panel of insurers writing this policy: (insurer_id, line_share), shares sum to 1.0.
+        panel: Vec<(InsurerId, f64)>,
         premium: u64,
         sum_insured: u64, // makes the event self-contained for exposure analysis
-        /// Insurer's total WindstormAtlantic aggregate after this policy is added.
-        /// Zero for risks that do not cover WindstormAtlantic.
-        total_cat_exposure: u64,
     },
     PolicyExpired {
         policy_id: PolicyId,
@@ -270,19 +280,17 @@ mod tests {
                 policy_id: PolicyId(0),
                 submission_id: SubmissionId(1),
                 insured_id: InsuredId(5),
-                insurer_id: InsurerId(2),
+                panel: vec![(InsurerId(2), 1.0)],
                 premium: 50_000,
                 sum_insured: 5_000_000_000,
-                total_cat_exposure: 7_000_000_000,
             },
         };
         let value = serde_json::to_value(&ev).unwrap();
         assert_eq!(value["event"]["PolicyBound"]["policy_id"], 0);
-        assert_eq!(value["event"]["PolicyBound"]["insurer_id"], 2);
         assert_eq!(value["event"]["PolicyBound"]["insured_id"], 5);
         assert_eq!(value["event"]["PolicyBound"]["premium"], 50_000);
         assert_eq!(value["event"]["PolicyBound"]["sum_insured"], 5_000_000_000u64);
-        assert_eq!(value["event"]["PolicyBound"]["total_cat_exposure"], 7_000_000_000u64);
+        assert!(value["event"]["PolicyBound"]["panel"].is_array());
     }
 
     #[test]

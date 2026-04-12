@@ -107,6 +107,7 @@ impl Simulation {
                     c.capacity_sensitivity,
                     c.cr_sensitivity,
                     c.market_weight_floor,
+                    c.floor_factor,
                 )
             })
             .collect();
@@ -309,20 +310,21 @@ impl Simulation {
                 }
             }
 
-            Event::LeadQuoteIssued { submission_id, insured_id, insurer_id, atp: _, premium, cat_exposure_at_quote: _ } => {
+            Event::LeadQuoteIssued { submission_id, insured_id, insurer_id, atp: _, premium, line_size, cat_exposure_at_quote: _ } => {
                 let events =
-                    self.broker.on_lead_quote_issued(day, submission_id, insured_id, insurer_id, premium);
+                    self.broker.on_lead_quote_issued(day, submission_id, insured_id, insurer_id, premium, line_size);
                 for (d, e) in events {
                     self.schedule(d, e);
                 }
             }
 
-            Event::QuotePresented { submission_id, insured_id, insurer_id, premium } => {
-                // Insured decides whether to accept. Currently always accepts.
+            Event::QuotePresented { submission_id, insured_id, leader_id, ref panel, premium } => {
+                // Insured decides whether to accept.
+                let panel = panel.clone();
                 for insured in &self.broker.insureds {
                     if insured.id == insured_id {
                         let events =
-                            insured.on_quote_presented(day, submission_id, insurer_id, premium);
+                            insured.on_quote_presented(day, submission_id, leader_id, panel, premium);
                         for (d, e) in events {
                             self.schedule(d, e);
                         }
@@ -331,8 +333,9 @@ impl Simulation {
                 }
             }
 
-            Event::QuoteAccepted { submission_id, insured_id, insurer_id, premium } => {
+            Event::QuoteAccepted { submission_id, insured_id, leader_id: _, ref panel, premium } => {
                 let year = day.year();
+                let panel = panel.clone();
                 let risk = self
                     .broker
                     .insureds
@@ -349,7 +352,7 @@ impl Simulation {
                         day,
                         submission_id,
                         insured_id,
-                        insurer_id,
+                        panel,
                         premium,
                         risk,
                         year,
@@ -394,35 +397,30 @@ impl Simulation {
                 // attritional exposure regardless of policy status.
 
                 if let Some(policy) = self.market.policies.get(&policy_id) {
-                    let insurer_id = policy.insurer_id;
+                    let panel = policy.panel.clone();
                     let sum_insured = policy.risk.sum_insured;
                     let perils = policy.risk.perils_covered.clone();
-                    if let Some(ins) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
-                        ins.on_policy_bound(policy_id, sum_insured, premium, &perils);
-                        // Back-fill total_cat_exposure now that the insurer aggregate is updated.
-                        let total_cat_exposure = ins.cat_aggregate;
-                        if let Some(last) = self.log.last_mut() {
-                            if let Event::PolicyBound { total_cat_exposure: ref mut tce, .. } =
-                                last.event
-                            {
-                                *tce = total_cat_exposure;
-                            }
+                    for (insurer_id, line_share) in &panel {
+                        if let Some(ins) = self.insurers.iter_mut().find(|i| i.id == *insurer_id) {
+                            ins.on_policy_bound(policy_id, sum_insured, premium, &perils, *line_share);
                         }
+                        // Update broker relationship score per panel member.
+                        self.broker.on_policy_bound(*insurer_id);
                     }
-                    // Update broker relationship score: incumbent gets +1 for each bound policy.
-                    self.broker.on_policy_bound(insurer_id);
                 }
 
                 self.year_premium_written += premium;
             }
 
             Event::PolicyExpired { policy_id } => {
-                // Read insurer_id before market removes the policy record.
-                let insurer_id = self.market.policies.get(&policy_id).map(|p| p.insurer_id);
-                if let Some(ins_id) = insurer_id
-                    && let Some(ins) = self.insurers.iter_mut().find(|i| i.id == ins_id)
-                {
-                    ins.on_policy_expired(policy_id);
+                // Read panel before market removes the policy record.
+                let panel = self.market.policies.get(&policy_id).map(|p| p.panel.clone());
+                if let Some(panel) = panel {
+                    for (ins_id, _) in &panel {
+                        if let Some(ins) = self.insurers.iter_mut().find(|i| i.id == *ins_id) {
+                            ins.on_policy_expired(policy_id);
+                        }
+                    }
                 }
                 self.market.on_policy_expired(policy_id);
             }
@@ -659,10 +657,12 @@ impl Simulation {
         let capacity_sensitivity = self.rng.random_range(0.0_f64..0.25);  // U(0.0, 0.25); canonical=0.10
         let market_weight_floor  = self.rng.random_range(0.0_f64..0.60);  // U(0.0, 0.60); canonical=0.30
 
+        let floor_factor = self.config.insurers.first().map(|t| t.floor_factor).unwrap_or(0.85);
         let insurer = Insurer::new(
             id, initial_capital, attritional_elf, cat_elf, target_loss_ratio,
             ewma_credibility, expense_ratio, profit_loading, net_line_capacity, scf, pml_frac,
             depletion_sensitivity, capacity_sensitivity, cr_sensitivity, market_weight_floor,
+            floor_factor,
         );
         let initial_capital_u64 = initial_capital.max(0) as u64;
 
@@ -710,6 +710,7 @@ mod tests {
                 capacity_sensitivity: 0.0,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
             }],
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -1017,6 +1018,7 @@ mod tests {
                 capacity_sensitivity: 0.0,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
             })
             .collect();
         let sim = run_sim(config);
@@ -1124,6 +1126,7 @@ mod tests {
             capacity_sensitivity: 0.0,
             cr_sensitivity: 1.0,
             market_weight_floor: 0.30,
+            floor_factor: 0.0,
         }];
         let sim = run_sim(config);
 
@@ -1242,26 +1245,26 @@ mod tests {
     // ── New enriched fields ───────────────────────────────────────────────────
 
     #[test]
-    fn policy_bound_total_cat_exposure_increases_with_each_binding() {
-        // Single insurer, 3 insureds, 1 year. All risks cover WindstormAtlantic.
-        // Each successive PolicyBound must show total_cat_exposure growing by ASSET_VALUE.
-        use crate::config::ASSET_VALUE;
+    fn policy_bound_panel_contains_insurer() {
+        // Single insurer, 3 insureds, 1 year. All PolicyBound events must have panel = [(InsurerId(1), 1.0)].
         let sim = run_sim(minimal_config(1, 3));
-        let exposures: Vec<u64> = sim
+        let bound_events: Vec<_> = sim
             .log
             .iter()
             .filter_map(|e| {
-                if let Event::PolicyBound { total_cat_exposure, .. } = &e.event {
-                    Some(*total_cat_exposure)
+                if let Event::PolicyBound { panel, .. } = &e.event {
+                    Some(panel.clone())
                 } else {
                     None
                 }
             })
             .collect();
-        assert!(exposures.len() >= 3, "need at least 3 PolicyBound events");
-        assert_eq!(exposures[0], ASSET_VALUE, "1st PolicyBound: total_cat_exposure must equal ASSET_VALUE");
-        assert_eq!(exposures[1], 2 * ASSET_VALUE, "2nd PolicyBound: total_cat_exposure must equal 2×ASSET_VALUE");
-        assert_eq!(exposures[2], 3 * ASSET_VALUE, "3rd PolicyBound: total_cat_exposure must equal 3×ASSET_VALUE");
+        assert!(!bound_events.is_empty(), "need at least one PolicyBound event");
+        for panel in &bound_events {
+            assert_eq!(panel.len(), 1, "single insurer → panel must have 1 member");
+            assert_eq!(panel[0].0, InsurerId(1), "InsurerId(1) must be panel member");
+            assert!((panel[0].1 - 1.0).abs() < 1e-9, "line share must be 1.0");
+        }
     }
 
     #[test]
@@ -1314,6 +1317,7 @@ mod tests {
                 capacity_sensitivity: 0.0,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
             },
             InsurerConfig {
                 id: InsurerId(2),
@@ -1331,6 +1335,7 @@ mod tests {
                 capacity_sensitivity: 0.0,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
             },
         ];
 
@@ -1338,11 +1343,10 @@ mod tests {
 
         // Every PolicyBound must be with insurer 2.
         for e in &sim.log {
-            if let Event::PolicyBound { insurer_id, .. } = &e.event {
-                assert_eq!(
-                    *insurer_id,
-                    InsurerId(2),
-                    "all policies must bind with insurer 2 (insurer 1 always declines)"
+            if let Event::PolicyBound { panel, .. } = &e.event {
+                assert!(
+                    panel.iter().all(|(id, _)| *id == InsurerId(2)),
+                    "all policies must bind with insurer 2 (insurer 1 always declines), got panel {:?}", panel
                 );
             }
         }
@@ -1443,6 +1447,7 @@ mod tests {
                 0.0,            // capacity_sensitivity=0 (not tested here)
                 1.0,            // cr_sensitivity=canonical
                 0.30,           // market_weight_floor=canonical
+                0.0,            // floor_factor=0 (test: always line_size=1.0)
             )
         };
 
@@ -1457,7 +1462,7 @@ mod tests {
         let try_12th_quote = |mut ins: Insurer| {
             use crate::types::SubmissionId;
             for pid in 0..11u64 {
-                ins.on_policy_bound(PolicyId(pid), sum_insured, 0, &[crate::events::Peril::WindstormAtlantic]);
+                ins.on_policy_bound(PolicyId(pid), sum_insured, 0, &[crate::events::Peril::WindstormAtlantic], 1.0);
             }
             let events = ins.on_lead_quote_requested(
                 Day(0),
@@ -1516,6 +1521,7 @@ mod tests {
                 capacity_sensitivity: 0.10,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
             }],
             n_insureds: 5,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },

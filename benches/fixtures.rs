@@ -32,7 +32,7 @@ pub fn prepopulate_policies(market: &mut Market, policy_count: usize) {
             Day(0),
             sid,
             iid,
-            InsurerId(1),
+            vec![(InsurerId(1), 1.0)],
             100_000,
             default_risk(),
             Year(1),
@@ -69,6 +69,7 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
                 capacity_sensitivity: 0.0,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
             })
             .collect(),
         n_insureds: scenario.n_insureds,

@@ -60,7 +60,8 @@ impl Insured {
         &self,
         day: Day,
         submission_id: SubmissionId,
-        insurer_id: InsurerId,
+        leader_id: InsurerId,
+        panel: Vec<(InsurerId, f64)>,
         premium: u64,
     ) -> Vec<(Day, Event)> {
         let rate = premium as f64 / self.risk.sum_insured as f64;
@@ -72,7 +73,8 @@ impl Insured {
                 Event::QuoteAccepted {
                     submission_id,
                     insured_id: self.id,
-                    insurer_id,
+                    leader_id,
+                    panel,
                     premium,
                 },
             )]
@@ -160,7 +162,7 @@ mod tests {
         );
         insured.on_asset_damage(0.50); // uplift = 0.25
         let premium = (ASSET_VALUE as f64 * 0.18) as u64;
-        let events = insured.on_quote_presented(Day(1), SubmissionId(1), InsurerId(1), premium);
+        let events = insured.on_quote_presented(Day(1), SubmissionId(1), InsurerId(1), vec![(InsurerId(1), 1.0)], premium);
         assert!(matches!(events[0].1, Event::QuoteAccepted { .. }),
             "quote at 18% RoL should be accepted after uplift to 35%, got {:?}", events[0].1);
     }
@@ -174,7 +176,7 @@ mod tests {
         );
         insured.on_asset_damage(0.04); // uplift = 0.5 × 0.04 = 0.02
         let premium = (ASSET_VALUE as f64 * 0.13) as u64;
-        let events = insured.on_quote_presented(Day(1), SubmissionId(2), InsurerId(1), premium);
+        let events = insured.on_quote_presented(Day(1), SubmissionId(2), InsurerId(1), vec![(InsurerId(1), 1.0)], premium);
         assert!(matches!(events[0].1, Event::QuoteRejected { .. }),
             "quote at 13% should be rejected when effective threshold is 12%");
     }
@@ -206,7 +208,7 @@ mod tests {
             vec![Peril::WindstormAtlantic, Peril::Attritional], 0.10,
         );
         let premium = (ASSET_VALUE as f64 * 0.08) as u64; // 8% RoL < 10%
-        let events = insured.on_quote_presented(Day(3), SubmissionId(1), InsurerId(1), premium);
+        let events = insured.on_quote_presented(Day(3), SubmissionId(1), InsurerId(1), vec![(InsurerId(1), 1.0)], premium);
         assert_eq!(events.len(), 1);
         assert!(
             matches!(events[0].1, Event::QuoteAccepted { .. }),
@@ -222,7 +224,7 @@ mod tests {
             vec![Peril::WindstormAtlantic, Peril::Attritional], 0.10,
         );
         let premium = (ASSET_VALUE as f64 * 0.10) as u64;
-        let events = insured.on_quote_presented(Day(3), SubmissionId(1), InsurerId(1), premium);
+        let events = insured.on_quote_presented(Day(3), SubmissionId(1), InsurerId(1), vec![(InsurerId(1), 1.0)], premium);
         assert!(matches!(events[0].1, Event::QuoteAccepted { .. }), "at-threshold quote must be accepted");
     }
 
@@ -234,7 +236,7 @@ mod tests {
             vec![Peril::WindstormAtlantic, Peril::Attritional], 0.05,
         );
         let premium = (ASSET_VALUE as f64 * 0.06) as u64; // 6% RoL > 5%
-        let events = insured.on_quote_presented(Day(3), SubmissionId(10), InsurerId(2), premium);
+        let events = insured.on_quote_presented(Day(3), SubmissionId(10), InsurerId(2), vec![(InsurerId(2), 1.0)], premium);
         assert_eq!(events.len(), 1);
         assert!(
             matches!(events[0].1, Event::QuoteRejected { .. }),
@@ -249,7 +251,7 @@ mod tests {
             vec![Peril::WindstormAtlantic, Peril::Attritional], 0.01,
         );
         let premium = ASSET_VALUE; // 100% RoL — always rejected
-        let events = insured.on_quote_presented(Day(5), SubmissionId(99), InsurerId(3), premium);
+        let events = insured.on_quote_presented(Day(5), SubmissionId(99), InsurerId(3), vec![(InsurerId(3), 1.0)], premium);
         if let Event::QuoteRejected { submission_id, insured_id } = events[0].1 {
             assert_eq!(submission_id, SubmissionId(99));
             assert_eq!(insured_id, InsuredId(42));
@@ -262,21 +264,24 @@ mod tests {
     fn on_quote_presented_accepted_same_day() {
         let insured = make_insured(1);
         let day = Day(7);
-        let events = insured.on_quote_presented(day, SubmissionId(1), InsurerId(1), 1_000);
+        let events = insured.on_quote_presented(day, SubmissionId(1), InsurerId(1), vec![(InsurerId(1), 1.0)], 1_000);
         assert_eq!(events[0].0, day, "QuoteAccepted must fire on the same day as QuotePresented");
     }
 
     #[test]
     fn on_quote_presented_carries_correct_fields() {
         let insured = make_insured(42);
+        let panel = vec![(InsurerId(3), 1.0)];
         let events =
-            insured.on_quote_presented(Day(5), SubmissionId(99), InsurerId(3), 75_000);
-        if let Event::QuoteAccepted { submission_id, insured_id, insurer_id, premium } =
-            events[0].1
+            insured.on_quote_presented(Day(5), SubmissionId(99), InsurerId(3), panel, 75_000);
+        if let Event::QuoteAccepted { submission_id, insured_id, leader_id, panel, premium } =
+            events[0].1.clone()
         {
             assert_eq!(submission_id, SubmissionId(99));
             assert_eq!(insured_id, InsuredId(42));
-            assert_eq!(insurer_id, InsurerId(3));
+            assert_eq!(leader_id, InsurerId(3));
+            assert_eq!(panel.len(), 1);
+            assert_eq!(panel[0].0, InsurerId(3));
             assert_eq!(premium, 75_000);
         } else {
             panic!("expected QuoteAccepted");

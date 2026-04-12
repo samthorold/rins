@@ -298,8 +298,8 @@ impl std::fmt::Display for MechanicsViolation {
 /// Compute the Gini coefficient over a map of bound-policy counts per insurer.
 /// Uses the sorted-array formula: G = 2Σ(i × x_i) / (n × Σx_i) − (n+1)/n.
 /// Returns 0.0 for empty or all-zero inputs.
-fn gini_from_counts(counts: &HashMap<InsurerId, u32>) -> f64 {
-    let mut xs: Vec<f64> = counts.values().map(|&c| c as f64).collect();
+fn gini_from_counts(counts: &HashMap<InsurerId, f64>) -> f64 {
+    let mut xs: Vec<f64> = counts.values().copied().collect();
     if xs.is_empty() {
         return 0.0;
     }
@@ -341,8 +341,8 @@ pub fn analyse(
     let mut last_capital: HashMap<InsurerId, u64> = initial_capitals.clone();
     let mut assets_seen: HashMap<u32, HashSet<InsuredId>> = HashMap::new();
     let mut active_insurer_count = initial_capitals.len() as u32;
-    // Bound-policy count per (year, insurer_id) — used to compute the Gini coefficient.
-    let mut bound_by_insurer: HashMap<u32, HashMap<InsurerId, u32>> = HashMap::new();
+    // Bound-policy line share per (year, insurer_id) — used to compute the Gini coefficient.
+    let mut bound_by_insurer: HashMap<u32, HashMap<InsurerId, f64>> = HashMap::new();
     // Sensitivity parameters per active insurer: (cr_sensitivity, capacity_sensitivity, market_weight_floor).
     // Populated from InsurerEntered (including day-0 initial insurers); pruned on InsurerInsolvent.
     let mut insurer_sensitivity: HashMap<InsurerId, (f64, f64, f64)> = HashMap::new();
@@ -351,12 +351,15 @@ pub fn analyse(
         let year = sim_event.day.year().0;
 
         match &sim_event.event {
-            Event::PolicyBound { insurer_id, premium, sum_insured, .. } => {
+            Event::PolicyBound { panel, premium, sum_insured, .. } => {
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.bound_premium += premium;
                 s.sum_insured += sum_insured;
-                // Track per-insurer bound count for Gini computation.
-                *bound_by_insurer.entry(year).or_default().entry(*insurer_id).or_insert(0) += 1;
+                // Track per-insurer line share for Gini computation.
+                let year_map = bound_by_insurer.entry(year).or_default();
+                for (insurer_id, line_share) in panel {
+                    *year_map.entry(*insurer_id).or_insert(0.0) += line_share;
+                }
             }
             Event::ClaimSettled { insurer_id, amount, remaining_capital, .. } => {
                 last_capital.insert(*insurer_id, *remaining_capital);
@@ -665,6 +668,7 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
     let mut max_day: u64 = 0;
     let mut policy_sum_insured: HashMap<PolicyId, u64> = HashMap::new();
     let mut policy_insurer: HashMap<PolicyId, InsurerId> = HashMap::new();
+    let mut policy_panel_insurers: HashMap<PolicyId, HashSet<InsurerId>> = HashMap::new();
     let mut policy_insured: HashMap<PolicyId, InsuredId> = HashMap::new();
     let mut insured_sum_insured: HashMap<InsuredId, u64> = HashMap::new();
     let mut sub_insurer_quoted: HashMap<SubmissionId, InsurerId> = HashMap::new();
@@ -689,17 +693,21 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
             Event::CoverageRequested { insured_id, risk } => {
                 insured_sum_insured.entry(*insured_id).or_insert(risk.sum_insured);
             }
-            Event::QuoteAccepted { submission_id, insurer_id, .. } => {
+            Event::QuoteAccepted { submission_id, leader_id, .. } => {
                 sub_accepted_day.insert(*submission_id, day);
-                // Track the insurer whose quote was accepted — this is the correct reference for
-                // PolicyBoundInsurerMismatch. With multi-insurer solicitation, multiple
-                // LeadQuoteIssued events share a submission_id; only QuoteAccepted identifies the
-                // selected insurer unambiguously.
-                sub_insurer_quoted.insert(*submission_id, *insurer_id);
+                // Track the leader whose terms were accepted — this is the reference for
+                // PolicyBoundInsurerMismatch. QuoteAccepted.leader_id is always the first
+                // panel member (highest relationship score).
+                sub_insurer_quoted.insert(*submission_id, *leader_id);
             }
-            Event::PolicyBound { policy_id, submission_id, insurer_id, insured_id, sum_insured, .. } => {
+            Event::PolicyBound { policy_id, submission_id, panel, insured_id, sum_insured, .. } => {
                 policy_sum_insured.insert(*policy_id, *sum_insured);
-                policy_insurer.insert(*policy_id, *insurer_id);
+                // leader is the first panel member; used for PolicyBoundInsurerMismatch check.
+                if let Some((leader_id, _)) = panel.first() {
+                    policy_insurer.insert(*policy_id, *leader_id);
+                }
+                // All panel members: used for ClaimInsurerMismatch check.
+                policy_panel_insurers.insert(*policy_id, panel.iter().map(|(id, _)| *id).collect());
                 policy_insured.insert(*policy_id, *insured_id);
                 sub_policy.insert(*submission_id, *policy_id);
                 *policy_bind_count.entry(*policy_id).or_insert(0) += 1;
@@ -788,9 +796,10 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
                 day,
             });
         }
-        // ClaimInsurerMismatch: claim must be paid by the insurer who bound the policy.
-        if let Some(&bound_insurer) = policy_insurer.get(&policy_id) {
-            if insurer_id != bound_insurer {
+        // ClaimInsurerMismatch: claim must be paid by an insurer in the policy panel.
+        if let Some(panel_set) = policy_panel_insurers.get(&policy_id) {
+            if !panel_set.contains(&insurer_id) {
+                let bound_insurer = policy_insurer.get(&policy_id).copied().unwrap_or(InsurerId(0));
                 violations.push(IntegrityViolation::ClaimInsurerMismatch {
                     policy_id: policy_id.0,
                     day,
@@ -926,10 +935,9 @@ mod tests {
                     policy_id: PolicyId(1),
                     submission_id: SubmissionId(1),
                     insured_id: InsuredId(1),
-                    insurer_id: InsurerId(1),
+                    panel: vec![(InsurerId(1), 1.0)],
                     premium: 100,
                     sum_insured: 1_000,
-                    total_cat_exposure: 1_000,
                 },
             ),
             sim_ev(359, Event::YearEnd { year: Year(1) }),
@@ -951,10 +959,9 @@ mod tests {
                     policy_id: PolicyId(1),
                     submission_id: SubmissionId(1),
                     insured_id: InsuredId(1),
-                    insurer_id: InsurerId(1),
+                    panel: vec![(InsurerId(1), 1.0)],
                     premium: 100,
                     sum_insured: 1_000,
-                    total_cat_exposure: 1_000,
                 },
             ),
             sim_ev(
@@ -984,10 +991,9 @@ mod tests {
                     policy_id: PolicyId(1),
                     submission_id: SubmissionId(1),
                     insured_id: InsuredId(1),
-                    insurer_id: InsurerId(1),
+                    panel: vec![(InsurerId(1), 1.0)],
                     premium: 100,
                     sum_insured: 1_000,
-                    total_cat_exposure: 1_000,
                 },
             ),
             sim_ev(359, Event::YearEnd { year: Year(1) }),
@@ -1088,10 +1094,9 @@ mod tests {
                     policy_id: PolicyId(1),
                     submission_id: SubmissionId(1),
                     insured_id: InsuredId(1),
-                    insurer_id: InsurerId(1),
+                    panel: vec![(InsurerId(1), 1.0)],
                     premium: 100,
                     sum_insured: 1_000,
-                    total_cat_exposure: 1_000,
                 },
             ),
             sim_ev(1079, Event::YearEnd { year: Year(3) }),
@@ -1133,6 +1138,7 @@ mod tests {
                     atp: 100,
                     premium: 105,
                     cat_exposure_at_quote: 0,
+                    line_size: 1.0,
                 },
             ),
             sim_ev(
@@ -1140,7 +1146,8 @@ mod tests {
                 Event::QuotePresented {
                     submission_id,
                     insured_id: InsuredId(1),
-                    insurer_id: InsurerId(1),
+                    leader_id: InsurerId(1),
+                    panel: vec![(InsurerId(1), 1.0)],
                     premium: 105,
                 },
             ),
@@ -1149,7 +1156,8 @@ mod tests {
                 Event::QuoteAccepted {
                     submission_id,
                     insured_id: InsuredId(1),
-                    insurer_id: InsurerId(1),
+                    leader_id: InsurerId(1),
+                    panel: vec![(InsurerId(1), 1.0)],
                     premium: 105,
                 },
             ),
@@ -1159,10 +1167,9 @@ mod tests {
                     policy_id,
                     submission_id,
                     insured_id: InsuredId(1),
-                    insurer_id: InsurerId(1),
+                    panel: vec![(InsurerId(1), 1.0)],
                     premium: 105,
                     sum_insured: 1_000,
-                    total_cat_exposure: 1_000,
                 },
             ),
             // PolicyExpired = QuoteAccepted_day + 361 = (base+2) + 361 = base+363
@@ -1197,10 +1204,9 @@ mod tests {
             policy_id,
             submission_id,
             insured_id: InsuredId(1),
-            insurer_id: InsurerId(1),
+            panel: vec![(InsurerId(1), 1.0)],
             premium: 105,
             sum_insured: 1_000,
-            total_cat_exposure: 1_000,
         };
         events[pb_idx] = sim_ev(base_day + 2, early_bound); // one day early
 
@@ -1299,6 +1305,7 @@ mod tests {
                     capacity_sensitivity: 0.0,
                     cr_sensitivity: 1.0,
                     market_weight_floor: 0.30,
+                    floor_factor: 0.0,
                 })
                 .collect(),
             n_insureds: 20,
@@ -1378,6 +1385,7 @@ mod tests {
                     atp: 100,
                     premium: 105,
                     cat_exposure_at_quote: 0,
+                    line_size: 1.0,
                 },
             ),
             sim_ev(
@@ -1389,6 +1397,7 @@ mod tests {
                     atp: 100,
                     premium: 105,
                     cat_exposure_at_quote: 0,
+                    line_size: 1.0,
                 },
             ),
         ];
@@ -1411,6 +1420,7 @@ mod tests {
                 atp: 100,
                 premium: 105,
                 cat_exposure_at_quote: 0,
+                line_size: 1.0,
             },
         )];
         let violations = verify_integrity(&events);

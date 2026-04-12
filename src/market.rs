@@ -8,7 +8,8 @@ pub struct BoundPolicy {
     pub policy_id: PolicyId,
     pub submission_id: SubmissionId,
     pub insured_id: InsuredId,
-    pub insurer_id: InsurerId,
+    /// Panel of insurers writing this policy: (insurer_id, line_share), shares sum to 1.0.
+    pub panel: Vec<(InsurerId, f64)>,
     pub risk: Risk,
     pub premium: u64,
     pub bound_year: Year,
@@ -65,7 +66,7 @@ impl Market {
         day: Day,
         submission_id: SubmissionId,
         insured_id: InsuredId,
-        insurer_id: InsurerId,
+        panel: Vec<(InsurerId, f64)>,
         premium: u64,
         risk: Risk,
         year: Year,
@@ -83,7 +84,7 @@ impl Market {
                 policy_id,
                 submission_id,
                 insured_id,
-                insurer_id,
+                panel: panel.clone(),
                 risk,
                 premium,
                 bound_year: year,
@@ -98,10 +99,9 @@ impl Market {
                     policy_id,
                     submission_id,
                     insured_id,
-                    insurer_id,
+                    panel,
                     premium,
                     sum_insured,
-                    total_cat_exposure: 0, // back-filled by simulation after insurer.on_policy_bound
                 },
             ),
             (expire_day, Event::PolicyExpired { policy_id }),
@@ -181,8 +181,8 @@ impl Market {
         if !policy.risk.perils_covered.contains(&peril) {
             return vec![];
         }
-        let insurer_id = policy.insurer_id;
         let sum_insured = policy.risk.sum_insured;
+        let panel = policy.panel.clone();
 
         let year = day.year();
         let remaining = self
@@ -196,16 +196,23 @@ impl Market {
             return vec![];
         }
 
-        vec![(
-            day,
-            Event::ClaimSettled {
-                policy_id,
-                insurer_id,
-                amount: effective_gul,
-                peril,
-                remaining_capital: 0, // back-filled by simulation after insurer.on_claim_settled
-            },
-        )]
+        // Emit one ClaimSettled per panel member with amount proportional to line_share.
+        panel
+            .into_iter()
+            .map(|(insurer_id, line_share)| {
+                let amount = (effective_gul as f64 * line_share).round() as u64;
+                (
+                    day,
+                    Event::ClaimSettled {
+                        policy_id,
+                        insurer_id,
+                        amount,
+                        peril,
+                        remaining_capital: 0, // back-filled by simulation
+                    },
+                )
+            })
+            .collect()
     }
 
 }
@@ -227,14 +234,13 @@ mod tests {
     fn bind_policy(market: &mut Market, submission_id: u64, insured_id: u64) -> PolicyId {
         let sid = SubmissionId(submission_id);
         let iid = InsuredId(insured_id);
-        let insurer_id = InsurerId(1);
         // Register insured so on_loss_event emits AssetDamage for them.
         market.register_insured(iid, "US-SE", ASSET_VALUE);
         let events = market.on_quote_accepted(
             Day(0),
             sid,
             iid,
-            insurer_id,
+            vec![(InsurerId(1), 1.0)],
             100_000,
             small_risk(),
             Year(1),
@@ -259,7 +265,7 @@ mod tests {
             Day(0),
             SubmissionId(1),
             InsuredId(1),
-            InsurerId(1),
+            vec![(InsurerId(1), 1.0)],
             50_000,
             small_risk(),
             Year(1),
@@ -282,7 +288,7 @@ mod tests {
             Day(10),
             SubmissionId(1),
             InsuredId(1),
-            InsurerId(1),
+            vec![(InsurerId(1), 1.0)],
             50_000,
             small_risk(),
             Year(1),
@@ -301,7 +307,7 @@ mod tests {
             Day(10),
             SubmissionId(1),
             InsuredId(1),
-            InsurerId(1),
+            vec![(InsurerId(1), 1.0)],
             50_000,
             small_risk(),
             Year(1),
@@ -330,7 +336,7 @@ mod tests {
             Day(0),
             SubmissionId(1),
             InsuredId(1),
-            InsurerId(1),
+            vec![(InsurerId(1), 1.0)],
             50_000,
             small_risk(),
             Year(1),
@@ -454,7 +460,7 @@ mod tests {
             Day(0),
             SubmissionId(1),
             InsuredId(1),
-            InsurerId(1),
+            vec![(InsurerId(1), 1.0)],
             50_000,
             small_risk(),
             Year(1),
@@ -645,7 +651,7 @@ mod tests {
             perils_covered: vec![Peril::WindstormAtlantic],
         };
         let events = market.on_quote_accepted(
-            Day(0), SubmissionId(1), iid, InsurerId(1), 100_000, cat_only_risk, Year(1),
+            Day(0), SubmissionId(1), iid, vec![(InsurerId(1), 1.0)], 100_000, cat_only_risk, Year(1),
         );
         let pid = events
             .iter()
@@ -663,5 +669,47 @@ mod tests {
         let mut market = Market::new();
         market.on_quote_rejected(SubmissionId(99)); // must not panic
         assert!(market.policies.is_empty());
+    }
+
+    // ── Phase 5: panel claim split ────────────────────────────────────────────
+
+    #[test]
+    fn panel_claim_split_two_insurers() {
+        // Bind a policy with panel = [(A, 0.6), (B, 0.4)].
+        // Fire a loss of 100_000. Expect two ClaimSettled events: 60_000 and 40_000.
+        use crate::events::Peril;
+        use crate::types::{InsurerId, InsuredId, SubmissionId, Year};
+        let mut market = Market::new();
+        let iid = InsuredId(1);
+        let sid = SubmissionId(1);
+        let panel = vec![(InsurerId(1), 0.6), (InsurerId(2), 0.4)];
+        let risk = Risk {
+            sum_insured: 1_000_000,
+            territory: "US-SE".to_string(),
+            perils_covered: vec![Peril::WindstormAtlantic],
+        };
+        let bound_events = market.on_quote_accepted(Day(0), sid, iid, panel, 10_000, risk, Year(1));
+        let policy_id = bound_events.iter().find_map(|(_, e)| {
+            if let Event::PolicyBound { policy_id, .. } = e { Some(*policy_id) } else { None }
+        }).expect("PolicyBound missing");
+        market.on_policy_bound(policy_id);
+
+        let claims = market.on_asset_damage(Day(5), iid, 100_000, Peril::WindstormAtlantic);
+
+        let amounts: Vec<(InsurerId, u64)> = claims.iter().filter_map(|(_, e)| {
+            if let Event::ClaimSettled { insurer_id, amount, .. } = e {
+                Some((*insurer_id, *amount))
+            } else {
+                None
+            }
+        }).collect();
+
+        assert_eq!(amounts.len(), 2, "expected 2 ClaimSettled events, got {amounts:?}");
+        let find_amount = |id: InsurerId| amounts.iter().find(|(i, _)| *i == id).map(|(_, a)| *a);
+        let a_amount = find_amount(InsurerId(1)).expect("no ClaimSettled for InsurerId(1)");
+        let b_amount = find_amount(InsurerId(2)).expect("no ClaimSettled for InsurerId(2)");
+        assert_eq!(a_amount, 60_000, "InsurerId(1) share=0.6 → 60_000");
+        assert_eq!(b_amount, 40_000, "InsurerId(2) share=0.4 → 40_000");
+        assert_eq!(a_amount + b_amount, 100_000, "amounts must sum to total loss");
     }
 }

@@ -58,6 +58,10 @@ pub struct Insurer {
     /// Per-insurer floor on market blend weight; replaces the hardcoded MARKET_FLOOR_WEIGHT.
     /// 0.30 = canonical. Randomised at entry U(0, 0.60).
     market_weight_floor: f64,
+    /// Minimum own_ap_tp_factor at which this insurer writes a full line (pricing_line = 1.0).
+    /// pricing_line = clamp((own_factor - floor_factor) / (1 - floor_factor), 0, 1).
+    /// 0.0 = always full line (tests); 0.85 = canonical.
+    floor_factor: f64,
 }
 
 /// EWMA smoothing factor for the per-insurer combined-ratio signal.
@@ -81,6 +85,7 @@ impl Insurer {
         capacity_sensitivity: f64,
         cr_sensitivity: f64,
         market_weight_floor: f64,
+        floor_factor: f64,
     ) -> Self {
         Insurer {
             id,
@@ -105,6 +110,7 @@ impl Insurer {
             own_years: 0,
             cr_sensitivity,
             market_weight_floor,
+            floor_factor,
         }
     }
 
@@ -180,6 +186,7 @@ impl Insurer {
         } else {
             0
         };
+        let line_size = self.compute_line_size(risk, market_ap_tp_factor);
         vec![(
             day,
             Event::LeadQuoteIssued {
@@ -189,25 +196,55 @@ impl Insurer {
                 atp,
                 premium,
                 cat_exposure_at_quote,
+                line_size,
             },
         )]
     }
 
-    /// A policy has been bound. Credit net premium to capital, accumulate written exposure for EWMA; update cat aggregate.
+    /// Compute the fractional line this insurer will write on a risk.
+    ///
+    /// ```text
+    /// capacity_line = min(net_line_capacity * capital / sum_insured, 1.0)   (or 1.0 if no limit)
+    /// pricing_line  = clamp((own_ap_tp_factor - floor_factor) / (1 - floor_factor), 0.0, 1.0)
+    /// line_size     = min(capacity_line, pricing_line)
+    /// ```
+    fn compute_line_size(&self, risk: &Risk, market_ap_tp_factor: f64) -> f64 {
+        let capacity_line = if let Some(nlc) = self.net_line_capacity {
+            let dollar_limit = nlc * self.capital.max(0) as f64;
+            (dollar_limit / risk.sum_insured as f64).min(1.0).max(0.0)
+        } else {
+            1.0
+        };
+
+        let own_factor = self.own_ap_tp_factor(market_ap_tp_factor);
+        let pricing_line = if self.floor_factor >= 1.0 {
+            0.0 // floor_factor = 1.0 would cause division by zero; treat as always-zero
+        } else {
+            ((own_factor - self.floor_factor) / (1.0 - self.floor_factor)).clamp(0.0, 1.0)
+        };
+
+        capacity_line.min(pricing_line)
+    }
+
+    /// A policy has been bound. Credit this insurer's share of the net premium to capital,
+    /// accumulate written exposure for EWMA; update cat aggregate scaled by line_share.
     pub fn on_policy_bound(
         &mut self,
         policy_id: PolicyId,
         sum_insured: u64,
         premium: u64,
         perils: &[Peril],
+        line_share: f64,
     ) {
-        let net_premium = (premium as f64 * (1.0 - self.expense_ratio)).round() as i64;
+        let premium_share = (premium as f64 * line_share).round() as u64;
+        let net_premium = (premium_share as f64 * (1.0 - self.expense_ratio)).round() as i64;
         self.capital += net_premium;
-        self.ytd.exposure += sum_insured;
-        self.ytd.premium += premium;
+        let exposure_share = (sum_insured as f64 * line_share).round() as u64;
+        self.ytd.exposure += exposure_share;
+        self.ytd.premium += premium_share;
         if perils.contains(&Peril::WindstormAtlantic) {
-            self.cat_aggregate += sum_insured;
-            self.cat_policy_map.insert(policy_id, sum_insured);
+            self.cat_aggregate += exposure_share;
+            self.cat_policy_map.insert(policy_id, exposure_share);
         }
     }
 
@@ -353,7 +390,7 @@ mod tests {
         // depletion_sensitivity=0.0 → no depletion effect; preserves all existing test behaviour.
         // runoff_cr_threshold=2.0 → never triggers exit in single-year tests.
         // capital_exit_floor=0.0 → floor always passes.
-        Insurer::new(id, capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30)
+        Insurer::new(id, capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30, 0.0)
     }
 
     /// Helper: quote and return the ATP for a standard small_risk().
@@ -403,9 +440,9 @@ mod tests {
         let initial_capital = 1_000_000i64;
         let gross_premium = 200_000u64;
         // expense_ratio=0.0 → net premium = gross premium
-        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.55, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
-        ins.on_policy_bound(PolicyId(2), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
+        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.55, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30, 0.0);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional], 1.0);
+        ins.on_policy_bound(PolicyId(2), ASSET_VALUE, gross_premium, &[Peril::Attritional], 1.0);
         let total_net_premiums = (gross_premium * 2) as i64;
         let total_available = initial_capital + total_net_premiums;
         // Two claims that together exceed total available funds
@@ -547,14 +584,14 @@ mod tests {
     #[test]
     fn on_policy_bound_increments_cat_aggregate() {
         let mut ins = make_insurer(InsurerId(1), 0);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic], 1.0);
         assert_eq!(ins.cat_aggregate, ASSET_VALUE, "cat_aggregate must equal sum_insured after binding one cat policy");
     }
 
     #[test]
     fn on_policy_expired_releases_cat_aggregate() {
         let mut ins = make_insurer(InsurerId(1), 0);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic], 1.0);
         assert_eq!(ins.cat_aggregate, ASSET_VALUE);
         ins.on_policy_expired(PolicyId(1));
         assert_eq!(ins.cat_aggregate, 0, "cat_aggregate must return to 0 after policy expiry");
@@ -563,7 +600,7 @@ mod tests {
     #[test]
     fn non_cat_policy_does_not_affect_cat_aggregate() {
         let mut ins = make_insurer(InsurerId(1), 0);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional], 1.0);
         assert_eq!(ins.cat_aggregate, 0, "attritional-only policy must not affect cat_aggregate");
     }
 
@@ -571,7 +608,7 @@ mod tests {
     fn cat_exposure_at_quote_reflects_aggregate() {
         let mut ins = make_insurer(InsurerId(1), 0);
         // Bind a cat policy first.
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic], 1.0);
 
         // Quote a second cat risk — exposure_at_quote should reflect the already-bound aggregate.
         let risk = cat_risk();
@@ -589,7 +626,7 @@ mod tests {
     #[test]
     fn cat_exposure_at_quote_is_zero_for_non_cat_risk() {
         let mut ins = make_insurer(InsurerId(1), 0);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic], 1.0);
 
         let risk = att_only_risk();
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk, 1.0));
@@ -608,7 +645,7 @@ mod tests {
     #[test]
     fn max_line_size_exceeded_emits_declined() {
         // capital=0 → effective_line = 0.30 × 0 = 0 < ASSET_VALUE → declines MaxLineSizeExceeded.
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0, 0.0, 1.0, 0.30);
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0, 0.0, 1.0, 0.30, 0.0);
         let risk = cat_risk(); // sum_insured = ASSET_VALUE > effective_line_limit (0)
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         assert!(
@@ -620,7 +657,7 @@ mod tests {
     #[test]
     fn max_cat_aggregate_breached_emits_declined() {
         // net_line_capacity=None skips the line check; capital=0 → effective_cat = 0 → declines MaxCatAggregateBreached.
-        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0, 0.0, 1.0, 0.30);
+        let ins = Insurer::new(InsurerId(1), 0, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0, 0.0, 1.0, 0.30, 0.0);
         let risk = cat_risk(); // cat_aggregate(0) + sum_insured > effective_cat_limit(0)
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(1), InsuredId(1), &risk, 1.0));
         assert!(
@@ -632,8 +669,8 @@ mod tests {
     #[test]
     fn within_limits_after_partial_fill_emits_quote_issued() {
         // capital=200M USD; effective_cat = 0.30 × 20B / 0.252 ≈ 23.8B > 2×ASSET_VALUE=10B → room for second policy.
-        let mut ins = Insurer::new(InsurerId(1), 20_000_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0, 0.0, 1.0, 0.30);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
+        let mut ins = Insurer::new(InsurerId(1), 20_000_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, Some(0.30), 0.252, 0.0, 0.0, 1.0, 0.30, 0.0);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic], 1.0);
         // cat_aggregate = ASSET_VALUE; effective_cat ≈ 23.8B → still room for one more
         let risk = cat_risk();
         let (_, event) = first_event(ins.on_lead_quote_requested(Day(0), SubmissionId(2), InsuredId(2), &risk, 1.0));
@@ -651,7 +688,7 @@ mod tests {
         // Realized LF = 1.0 >> prior ELF = 0.239 → ATP must increase.
         let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
         let atp_before = quote_atp(&ins);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional], 1.0);
         let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
         let _ = ins.on_year_end(Day(0), ASSET_VALUE);
         let atp_after = quote_atp(&ins);
@@ -663,7 +700,7 @@ mod tests {
         // Bind one policy; no claims. Realized LF = 0 < prior ELF = 0.239 → ATP must fall.
         let mut ins = make_insurer(InsurerId(1), 0);
         let atp_before = quote_atp(&ins);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional], 1.0);
         // no claims
         let _ = ins.on_year_end(Day(0), ASSET_VALUE);
         let atp_after = quote_atp(&ins);
@@ -675,7 +712,7 @@ mod tests {
         // α=0.3, realized LF = 0.5 (claim = ASSET_VALUE/2, exposure = ASSET_VALUE).
         // New ELF = 0.3 × 0.5 + 0.7 × 0.239 = 0.15 + 0.1673 = 0.3173.
         let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional], 1.0);
         let _ = ins.on_claim_settled(Day(0), ASSET_VALUE / 2, Peril::Attritional);
         let _ = ins.on_year_end(Day(0), ASSET_VALUE);
         let expected_elf = 0.3 * 0.5 + 0.7 * 0.239;
@@ -696,7 +733,7 @@ mod tests {
         // After on_year_end resets counters, a second on_year_end with no new
         // policies or claims must leave ATP unchanged.
         let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional], 1.0);
         let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
         let _ = ins.on_year_end(Day(0), ASSET_VALUE); // ELF updated, counters reset
         let atp_year1 = quote_atp(&ins);
@@ -708,12 +745,12 @@ mod tests {
     fn ewma_compounds_over_multiple_years() {
         // Two consecutive high-loss years should push ELF higher than one.
         let mut ins = make_insurer(InsurerId(1), ASSET_VALUE as i64 * 10);
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional], 1.0);
         let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
         let _ = ins.on_year_end(Day(0), ASSET_VALUE);
         let atp_after_year1 = quote_atp(&ins);
 
-        ins.on_policy_bound(PolicyId(2), ASSET_VALUE, 0, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(2), ASSET_VALUE, 0, &[Peril::Attritional], 1.0);
         let _ = ins.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
         let _ = ins.on_year_end(Day(0), ASSET_VALUE);
         let atp_after_year2 = quote_atp(&ins);
@@ -724,9 +761,9 @@ mod tests {
     #[test]
     fn on_policy_bound_credits_net_premium_to_capital() {
         // expense_ratio=0.25 → net = 75% of gross premium.
-        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.55, 0.3, 0.25, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30);
+        let mut ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.55, 0.3, 0.25, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30, 0.0);
         let gross_premium = 400_000u64;
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, gross_premium, &[Peril::Attritional], 1.0);
         let expected_net = (gross_premium as f64 * 0.75).round() as i64;
         assert_eq!(
             ins.capital,
@@ -744,7 +781,7 @@ mod tests {
         let mut ins = Insurer::new(
             InsurerId(1), capital_cents,
             0.239, 0.0, 0.70, 0.3, 0.0, 0.0,
-            Some(0.30), None, 0.252, 0.0, 0.0, 1.0, 0.30,
+            Some(0.30), None, 0.252, 0.0, 0.0, 1.0, 0.30, 0.0,
         );
         let events = ins.on_year_end(Day(360), ASSET_VALUE);
         assert!(ins.insolvent, "zombie insurer must be marked insolvent");
@@ -762,7 +799,7 @@ mod tests {
         let mut ins = Insurer::new(
             InsurerId(1), capital_cents,
             0.239, 0.0, 0.70, 0.3, 0.0, 0.0,
-            Some(0.30), None, 0.252, 0.0, 0.0, 1.0, 0.30,
+            Some(0.30), None, 0.252, 0.0, 0.0, 1.0, 0.30, 0.0,
         );
         let events = ins.on_year_end(Day(360), ASSET_VALUE);
         assert!(!ins.insolvent, "insurer at threshold must not be marked insolvent");
@@ -779,8 +816,8 @@ mod tests {
         let mut ins_a = make_insurer(InsurerId(1), capital);
         let mut ins_b = make_insurer(InsurerId(2), capital);
 
-        ins_a.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional]);
-        ins_b.on_policy_bound(PolicyId(2), ASSET_VALUE, 0, &[Peril::Attritional]);
+        ins_a.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::Attritional], 1.0);
+        ins_b.on_policy_bound(PolicyId(2), ASSET_VALUE, 0, &[Peril::Attritional], 1.0);
 
         // ins_a: 100% loss; ins_b: no claims
         let _ = ins_a.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
@@ -807,10 +844,10 @@ mod tests {
         let capital_b = 10_000_000_000i64; // 100M USD in cents
         let capital_a = 10_000_000_000i64;
 
-        let mut ins_a = Insurer::new(InsurerId(1), capital_a, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0, 0.0, 1.0, 0.30);
-        let ins_b = Insurer::new(InsurerId(2), capital_b, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0, 0.0, 1.0, 0.30);
+        let mut ins_a = Insurer::new(InsurerId(1), capital_a, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0, 0.0, 1.0, 0.30, 0.0);
+        let ins_b = Insurer::new(InsurerId(2), capital_b, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, Some(0.30), Some(0.30), 0.252, 0.0, 0.0, 1.0, 0.30, 0.0);
 
-        ins_a.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic]);
+        ins_a.on_policy_bound(PolicyId(1), ASSET_VALUE, 0, &[Peril::WindstormAtlantic], 1.0);
 
         // Drain ins_a to ~5M USD (500_000_000 cents) via cat claims
         let drain = capital_a - 500_000_000;
@@ -846,8 +883,8 @@ mod tests {
             let pid_a = PolicyId(year * 2 + 1);
             let pid_b = PolicyId(year * 2 + 2);
 
-            ins_a.on_policy_bound(pid_a, ASSET_VALUE, 0, &[Peril::Attritional]);
-            ins_b.on_policy_bound(pid_b, ASSET_VALUE, 0, &[Peril::Attritional]);
+            ins_a.on_policy_bound(pid_a, ASSET_VALUE, 0, &[Peril::Attritional], 1.0);
+            ins_b.on_policy_bound(pid_b, ASSET_VALUE, 0, &[Peril::Attritional], 1.0);
 
             let _ = ins_a.on_claim_settled(Day(0), ASSET_VALUE, Peril::Attritional);
             // ins_b: no claims
@@ -889,7 +926,7 @@ mod tests {
     fn new_insurer_uses_market_factor_when_no_experience() {
         // own_years=0 → credibility=0 → insurer_ap_tp = market_factor exactly.
         // depletion_sensitivity=1.0; capital=initial → no depletion adj.
-        let ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 0.0, 1.0, 0.30);
+        let ins = Insurer::new(InsurerId(1), 1_000_000, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 0.0, 1.0, 0.30, 0.0);
         let market_factor = 1.20;
         let premium = quote_premium(&ins, market_factor);
 
@@ -909,7 +946,7 @@ mod tests {
         // insurer_ap_tp = 0.70 × 1.30 + 0.30 × 1.0 = 0.91 + 0.30 = 1.21
         let initial_capital = 1_000_000i64;
         let current_capital = 700_000i64; // 30% depletion
-        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 0.0, 1.0, 0.30);
+        let mut ins = Insurer::new(InsurerId(1), initial_capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 0.0, 1.0, 0.30, 0.0);
         ins.capital = current_capital;
         ins.own_years = 5; // full credibility
 
@@ -928,12 +965,12 @@ mod tests {
         // own_factor = 1.0 + 0.80 + 0.0 = 1.80
         // insurer_ap_tp > neutral market_factor=1.0
         let capital = 100_000_000i64;
-        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 0.0, 1.0, 0.30);
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 0.0, 1.0, 0.30, 0.0);
         ins.own_years = 5;
 
         // Record a very high-loss year: premium=P, claims=2P → LR=2.0
         let premium = 1_000_000u64;
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, premium, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, premium, &[Peril::Attritional], 1.0);
         let _ = ins.on_claim_settled(Day(10), premium * 2, Peril::Attritional);
         let _ = ins.on_year_end(Day(360), ASSET_VALUE);
 
@@ -953,14 +990,14 @@ mod tests {
         // A new insurer with own_years=0 follows market exactly;
         // after YearEnd (own_years=1, credibility=0.2), the blend shifts toward own_factor.
         let capital = 100_000_000i64;
-        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 0.0, 1.0, 0.30);
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 1.0, 0.0, 1.0, 0.30, 0.0);
 
         // Before YearEnd: own_years=0
         assert_eq!(ins.own_years, 0);
 
         // Bind and push a high-loss year so own_factor will differ from market
         let premium = 1_000_000u64;
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, premium, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, premium, &[Peril::Attritional], 1.0);
         let _ = ins.on_claim_settled(Day(10), premium * 4, Peril::Attritional);
         let _ = ins.on_year_end(Day(360), ASSET_VALUE);
 
@@ -983,12 +1020,12 @@ mod tests {
         // market_factor = 0.90
         // insurer_ap_tp = 0.4 × 1.80 + 0.6 × 0.90 = 0.72 + 0.54 = 1.26
         let capital = 100_000_000i64;
-        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30);
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30, 0.0);
         ins.own_years = 2;
 
         // Record one high-loss year: LR=2.0
         let premium = 1_000_000u64;
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, premium, &[Peril::Attritional]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE, premium, &[Peril::Attritional], 1.0);
         let _ = ins.on_claim_settled(Day(10), premium * 2, Peril::Attritional);
         // Manually push LR into buffer without triggering another on_year_end increment
         // Use on_year_end which also increments own_years; compensate by pre-setting own_years=1
@@ -1014,10 +1051,10 @@ mod tests {
         let capital = 10_000_000_000i64; // 100M USD
         let mut ins = Insurer::new(
             InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0,
-            None, None, 0.252, 0.0, 1.0, 1.0, 0.30, // capacity_sensitivity=1.0 but scf=None → no adj
+            None, None, 0.252, 0.0, 1.0, 1.0, 0.30, 0.0, // capacity_sensitivity=1.0 but scf=None → no adj
         );
         // Simulate high cat load
-        ins.on_policy_bound(PolicyId(1), ASSET_VALUE * 10, 0, &[Peril::WindstormAtlantic]);
+        ins.on_policy_bound(PolicyId(1), ASSET_VALUE * 10, 0, &[Peril::WindstormAtlantic], 1.0);
         ins.own_years = 5;
 
         // Premium must equal TP (ATP × 1.0 × blend factor with capacity_adj=0)
@@ -1050,12 +1087,12 @@ mod tests {
         let pml = 0.30_f64; // calibrated so effective_cat_limit = capital
         let mut ins = Insurer::new(
             InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0,
-            None, Some(0.30), pml, 0.0, 0.10, 1.0, 0.30,
+            None, Some(0.30), pml, 0.0, 0.10, 1.0, 0.30, 0.0,
         );
         ins.own_years = 5;
 
         // Bind cat_aggregate = 8B (80% of effective limit = 10B)
-        ins.on_policy_bound(PolicyId(1), 8_000_000_000, 0, &[Peril::WindstormAtlantic]);
+        ins.on_policy_bound(PolicyId(1), 8_000_000_000, 0, &[Peril::WindstormAtlantic], 1.0);
         assert_eq!(ins.cat_aggregate, 8_000_000_000);
 
         let risk = Risk {
@@ -1081,11 +1118,11 @@ mod tests {
         let pml = 0.30_f64;
         let mut ins = Insurer::new(
             InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0,
-            None, Some(0.30), pml, 0.0, 0.0, 1.0, 0.30, // capacity_sensitivity=0.0
+            None, Some(0.30), pml, 0.0, 0.0, 1.0, 0.30, 0.0, // capacity_sensitivity=0.0
         );
         ins.own_years = 5;
         // Load to 100% utilisation
-        ins.on_policy_bound(PolicyId(1), capital as u64, 0, &[Peril::WindstormAtlantic]);
+        ins.on_policy_bound(PolicyId(1), capital as u64, 0, &[Peril::WindstormAtlantic], 1.0);
 
         let risk = Risk {
             sum_insured: ASSET_VALUE,
@@ -1112,15 +1149,15 @@ mod tests {
         let capital = 100_000_000i64;
         // depletion_sensitivity=0.0, capacity_sensitivity=0.0 → isolate cr_sensitivity effect.
         // own_years pre-set to 5 → full credibility → market_weight = market_weight_floor.
-        let mut ins_hi = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 2.0, 0.30);
-        let mut ins_lo = Insurer::new(InsurerId(2), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 0.5, 0.30);
+        let mut ins_hi = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 2.0, 0.30, 0.0);
+        let mut ins_lo = Insurer::new(InsurerId(2), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 0.5, 0.30, 0.0);
         ins_hi.own_years = 5;
         ins_lo.own_years = 5;
 
         // Record a high-loss year: LR = 2.0 (claims = 2 × premium)
         let prem = 1_000_000u64;
-        ins_hi.on_policy_bound(PolicyId(1), ASSET_VALUE, prem, &[Peril::Attritional]);
-        ins_lo.on_policy_bound(PolicyId(2), ASSET_VALUE, prem, &[Peril::Attritional]);
+        ins_hi.on_policy_bound(PolicyId(1), ASSET_VALUE, prem, &[Peril::Attritional], 1.0);
+        ins_lo.on_policy_bound(PolicyId(2), ASSET_VALUE, prem, &[Peril::Attritional], 1.0);
         let _ = ins_hi.on_claim_settled(Day(10), prem * 2, Peril::Attritional);
         let _ = ins_lo.on_claim_settled(Day(10), prem * 2, Peril::Attritional);
         // own_years will increment from 5 → 6 for both
@@ -1143,7 +1180,7 @@ mod tests {
         // own_factor = 1.0; insurer_ap_tp = 0.40 × 1.0 + 0.60 × market_factor.
         // market_factor = 1.40 → expected = 0.40 × 1.0 + 0.60 × 1.40 = 0.40 + 0.84 = 1.24.
         let capital = 100_000_000i64;
-        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.60);
+        let mut ins = Insurer::new(InsurerId(1), capital, 0.239, 0.0, 0.70, 0.3, 0.0, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.60, 0.0);
         ins.own_years = 5; // full credibility
 
         let atp = (0.239 * ASSET_VALUE as f64 / 0.70).round() as u64;
@@ -1153,6 +1190,119 @@ mod tests {
             premium, expected,
             "market_weight_floor=0.60: blend = 0.40×1.0 + 0.60×1.40 = 1.24; got {premium}, expected {expected}"
         );
+    }
+
+    // ── Phase 5: line_size computation ────────────────────────────────────────
+
+    #[test]
+    fn line_size_soft_market() {
+        // With no own history (own_years=0), market_weight=1.0, so insurer_ap_tp = market_factor.
+        // market_factor = 0.90, floor_factor = 0.85 →
+        //   pricing_line = (0.90 - 0.85) / (1.0 - 0.85) = 0.05 / 0.15 ≈ 0.333
+        // No capacity limit → capacity_line = 1.0; line_size = 0.333.
+        let ins = Insurer::new(
+            InsurerId(1), 10_000_000_000, 0.0, 0.0, 1.0, 0.3,
+            0.0, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30, 0.85,
+        );
+        use crate::types::SubmissionId;
+        let risk = Risk {
+            sum_insured: ASSET_VALUE,
+            territory: "US-SE".to_string(),
+            perils_covered: vec![],
+        };
+        let events = ins.on_lead_quote_requested(Day(1), SubmissionId(1), InsuredId(1), &risk, 0.90);
+        let line_size = events.iter().find_map(|(_, e)| {
+            if let Event::LeadQuoteIssued { line_size, .. } = e { Some(*line_size) } else { None }
+        });
+        let expected = (0.90_f64 - 0.85) / (1.0 - 0.85); // ≈ 0.333
+        match line_size {
+            Some(ls) => assert!(
+                (ls - expected).abs() < 1e-9,
+                "soft market: expected pricing_line ≈ {expected:.4}, got {ls:.4}"
+            ),
+            None => panic!("expected LeadQuoteIssued, got: {events:?}"),
+        }
+    }
+
+    #[test]
+    fn line_size_hard_market() {
+        // own_ap_tp_factor >= 1.0 (market_factor = 1.10) → pricing_line = 1.0
+        let ins = Insurer::new(
+            InsurerId(1), 10_000_000_000, 0.0, 0.0, 1.0, 0.3,
+            0.0, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30, 0.85,
+        );
+        use crate::types::SubmissionId;
+        let risk = Risk {
+            sum_insured: ASSET_VALUE,
+            territory: "US-SE".to_string(),
+            perils_covered: vec![],
+        };
+        let events = ins.on_lead_quote_requested(Day(1), SubmissionId(1), InsuredId(1), &risk, 1.10);
+        let line_size = events.iter().find_map(|(_, e)| {
+            if let Event::LeadQuoteIssued { line_size, .. } = e { Some(*line_size) } else { None }
+        });
+        match line_size {
+            Some(ls) => assert!(
+                (ls - 1.0).abs() < 1e-9,
+                "hard market: expected line_size = 1.0, got {ls}"
+            ),
+            None => panic!("expected LeadQuoteIssued, got: {events:?}"),
+        }
+    }
+
+    #[test]
+    fn insurer_books_line_share() {
+        // on_policy_bound with line_share=0.5: cat_aggregate += sum_insured * 0.5
+        // and capital increases by premium * 0.5 * (1 - expense_ratio).
+        let expense_ratio = 0.30;
+        let mut ins = Insurer::new(
+            InsurerId(1), 10_000_000_000, 0.0, 0.0, 1.0, 0.3,
+            expense_ratio, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30, 0.0,
+        );
+        let sum_insured = 100_00u64; // 100 cents
+        let premium = 20_00u64;      // 20 cents
+        let initial_capital = ins.capital;
+        ins.on_policy_bound(
+            crate::types::PolicyId(1), sum_insured, premium,
+            &[crate::events::Peril::WindstormAtlantic], 0.5,
+        );
+        let premium_share = (premium as f64 * 0.5).round() as i64;
+        let net_premium = (premium_share as f64 * (1.0 - expense_ratio)).round() as i64;
+        assert_eq!(
+            ins.capital, initial_capital + net_premium,
+            "capital must increase by net premium share"
+        );
+        assert_eq!(
+            ins.cat_aggregate, (sum_insured as f64 * 0.5).round() as u64,
+            "cat_aggregate must be scaled by line_share"
+        );
+    }
+
+    #[test]
+    fn floor_factor_zero_gives_full_line() {
+        // floor_factor=0.0 → pricing_line = (factor - 0) / (1 - 0) = factor → clamp to 1.0
+        // At any market_factor >= 1.0, line_size = 1.0.
+        let ins = Insurer::new(
+            InsurerId(1), 10_000_000_000, 0.0, 0.0, 1.0, 0.3,
+            0.0, 0.0, None, None, 0.252, 0.0, 0.0, 1.0, 0.30, 0.0,
+        );
+        use crate::types::SubmissionId;
+        let risk = Risk {
+            sum_insured: ASSET_VALUE,
+            territory: "US-SE".to_string(),
+            perils_covered: vec![],
+        };
+        let events = ins.on_lead_quote_requested(Day(1), SubmissionId(1), InsuredId(1), &risk, 1.0);
+        let line_size = events.iter().find_map(|(_, e)| {
+            if let Event::LeadQuoteIssued { line_size, .. } = e { Some(*line_size) } else { None }
+        });
+        match line_size {
+            Some(ls) => assert!(
+                (ls - 1.0).abs() < 1e-9,
+                "floor_factor=0.0 must yield line_size=1.0 at market_factor=1.0, got {ls}"
+            ),
+            None => panic!("expected LeadQuoteIssued, got: {events:?}"),
+        }
     }
 
 }

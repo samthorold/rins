@@ -13,18 +13,22 @@ const SCORE_DECAY: f64 = 0.80;
 /// so an insurer that was full last year may have room again this year.
 
 /// Transient state while a submission is in flight.
-/// All solicited insurers are contacted upfront; the cheapest accepted quote wins.
+/// Lines are accumulated greedily in solicitation (score) order.
 struct PendingQuote {
     insured_id: InsuredId,
+    /// The highest-scored solicited insurer — sets terms; identified at request time.
+    leader_id: InsurerId,
     /// How many solicited insurers have not yet responded (issued or declined).
     quotes_outstanding: usize,
-    /// Best (cheapest) quote received so far: (winner_insurer_id, premium).
-    best_quote: Option<(InsurerId, u64)>,
+    /// Lines received so far: (insurer_id, premium, offered_line_size).
+    panel_lines: Vec<(InsurerId, u64, f64)>,
+    /// Sum of offered line sizes received so far.
+    accumulated_line: f64,
 }
 
 /// Single broker that services all insureds.
 /// Routes coverage requests to score-ranked insurers (incumbents get first look);
-/// presents the cheapest accepted quote back to the insured.
+/// assembles a panel of fractional lines, normalised to sum to 1.0.
 pub struct Broker {
     pub insureds: Vec<Insured>,
     insurer_ids: Vec<InsurerId>,
@@ -135,9 +139,18 @@ impl Broker {
 
         let submission_id = SubmissionId(self.next_submission_id);
         self.next_submission_id += 1;
+
+        // Leader is the highest-scored insurer in the solicited set.
+        let leader_id = self.insurer_ids[indices[0]];
         self.pending.insert(
             submission_id,
-            PendingQuote { insured_id, quotes_outstanding: k, best_quote: None },
+            PendingQuote {
+                insured_id,
+                leader_id,
+                quotes_outstanding: k,
+                panel_lines: vec![],
+                accumulated_line: 0.0,
+            },
         );
 
         indices[..k]
@@ -157,8 +170,9 @@ impl Broker {
             .collect()
     }
 
-    /// An insurer issued a quote. Record it if it beats the current best.
-    /// When all solicited insurers have responded, emit `QuotePresented` with the winner.
+    /// An insurer issued a quote with a line_size. Accumulate into the panel.
+    /// If accumulated_line ≥ 1.0 or all solicited insurers have responded,
+    /// finalise the panel and emit `QuotePresented`.
     pub fn on_lead_quote_issued(
         &mut self,
         day: Day,
@@ -166,43 +180,28 @@ impl Broker {
         _insured_id: InsuredId,
         insurer_id: InsurerId,
         premium: u64,
+        line_size: f64,
     ) -> Vec<(Day, Event)> {
         let pq = match self.pending.get_mut(&submission_id) {
             Some(pq) => pq,
             None => return vec![],
         };
 
-        // Update best quote if this is cheaper (or the first offer).
-        match pq.best_quote {
-            None => pq.best_quote = Some((insurer_id, premium)),
-            Some((_, best_premium)) if premium < best_premium => {
-                pq.best_quote = Some((insurer_id, premium));
-            }
-            _ => {}
-        }
-
+        pq.panel_lines.push((insurer_id, premium, line_size));
+        pq.accumulated_line += line_size;
         pq.quotes_outstanding -= 1;
 
-        if pq.quotes_outstanding == 0 {
+        if pq.accumulated_line >= 1.0 || pq.quotes_outstanding == 0 {
             let pq = self.pending.remove(&submission_id).unwrap();
-            let (winner_id, winner_premium) = pq.best_quote.unwrap();
-            vec![(
-                day.offset(1),
-                Event::QuotePresented {
-                    submission_id,
-                    insured_id: pq.insured_id,
-                    insurer_id: winner_id,
-                    premium: winner_premium,
-                },
-            )]
+            self.finalise_panel(day, submission_id, pq)
         } else {
             vec![]
         }
     }
 
     /// An insurer declined. Record the decline, decrement outstanding count.
-    /// When all solicited insurers have responded, emit `QuotePresented` with the best
-    /// accepted quote — or drop the submission silently if all declined.
+    /// When all solicited insurers have responded, finalise the panel with whatever
+    /// accepted quotes were received — or drop the submission if none accepted.
     pub fn on_lead_quote_declined(
         &mut self,
         day: Day,
@@ -219,22 +218,70 @@ impl Broker {
 
         if pq.quotes_outstanding == 0 {
             let pq = self.pending.remove(&submission_id).unwrap();
-            if let Some((winner_id, winner_premium)) = pq.best_quote {
-                vec![(
-                    day.offset(1),
-                    Event::QuotePresented {
-                        submission_id,
-                        insured_id: pq.insured_id,
-                        insurer_id: winner_id,
-                        premium: winner_premium,
-                    },
-                )]
-            } else {
-                vec![(day, Event::SubmissionDropped { submission_id, insured_id: pq.insured_id })]
-            }
+            self.finalise_panel(day, submission_id, pq)
         } else {
             vec![]
         }
+    }
+
+    /// Trim panel lines to fill exactly 1.0, scale to normalise, then emit
+    /// `QuotePresented` with blended premium — or `SubmissionDropped` if no lines.
+    fn finalise_panel(
+        &self,
+        day: Day,
+        submission_id: SubmissionId,
+        pq: PendingQuote,
+    ) -> Vec<(Day, Event)> {
+        if pq.panel_lines.is_empty() || pq.accumulated_line == 0.0 {
+            return vec![(day, Event::SubmissionDropped { submission_id, insured_id: pq.insured_id })];
+        }
+
+        // Reorder so the leader is always first; remaining in response-arrival order.
+        let mut ordered = pq.panel_lines.clone();
+        if let Some(leader_pos) = ordered.iter().position(|&(id, _, _)| id == pq.leader_id) {
+            if leader_pos != 0 {
+                ordered.swap(0, leader_pos);
+            }
+        }
+
+        // Greedily include lines up to a total of 1.0; cap the last line if it would overflow.
+        let mut running = 0.0f64;
+        let mut included: Vec<(InsurerId, u64, f64)> = vec![];
+        for &(ins_id, prem, line) in &ordered {
+            let room = 1.0 - running;
+            if room <= 0.0 { break; }
+            let take = line.min(room);
+            included.push((ins_id, prem, take));
+            running += take;
+        }
+
+        // Normalise so shares sum to exactly 1.0 (handles floating-point imprecision).
+        let actual_total: f64 = included.iter().map(|&(_, _, l)| l).sum();
+        let panel: Vec<(InsurerId, f64)> = included.iter()
+            .map(|&(id, _, l)| (id, l / actual_total))
+            .collect();
+
+        // Blended premium = Σ share_i × premium_i (rounded to nearest cent).
+        let blended_premium = included.iter()
+            .map(|&(_, prem, l)| prem as f64 * l / actual_total)
+            .sum::<f64>()
+            .round() as u64;
+
+        // Effective leader = first insurer in the assembled panel.
+        // If the original leader provided a line they are first (reordered above);
+        // otherwise the first responding insurer takes the lead role.
+        let effective_leader = panel[0].0;
+
+        vec![(
+            day.offset(1),
+            Event::QuotePresented {
+                submission_id,
+                insured_id: pq.insured_id,
+                leader_id: effective_leader,
+                panel,
+                premium: blended_premium,
+            },
+        )]
     }
 }
 
@@ -387,11 +434,7 @@ mod tests {
         let mut broker = broker_with_insurers(1, vec![1]);
         broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
         let events = broker.on_lead_quote_issued(
-            Day(1),
-            SubmissionId(0),
-            InsuredId(1),
-            InsurerId(1),
-            50_000,
+            Day(1), SubmissionId(0), InsuredId(1), InsurerId(1), 50_000, 1.0,
         );
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0].1, Event::QuotePresented { .. }));
@@ -402,11 +445,7 @@ mod tests {
         let mut broker = broker_with_insurers(1, vec![1]);
         broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
         let events = broker.on_lead_quote_issued(
-            Day(1),
-            SubmissionId(0),
-            InsuredId(1),
-            InsurerId(1),
-            50_000,
+            Day(1), SubmissionId(0), InsuredId(1), InsurerId(1), 50_000, 1.0,
         );
         assert_eq!(events[0].0, Day(2), "QuotePresented must fire at day+1 from LeadQuoteIssued");
     }
@@ -416,23 +455,23 @@ mod tests {
         let mut broker = broker_with_insurers(1, vec![5]);
         broker.on_coverage_requested(Day(0), InsuredId(10), small_risk());
         let events = broker.on_lead_quote_issued(
-            Day(1),
-            SubmissionId(0),
-            InsuredId(10),
-            InsurerId(5),
-            99_000,
+            Day(1), SubmissionId(0), InsuredId(10), InsurerId(5), 99_000, 1.0,
         );
         if let Event::QuotePresented {
             submission_id,
             insured_id,
-            insurer_id,
+            leader_id,
+            panel,
             premium,
-        } = events[0].1
+        } = &events[0].1
         {
-            assert_eq!(submission_id, SubmissionId(0));
-            assert_eq!(insured_id, InsuredId(10));
-            assert_eq!(insurer_id, InsurerId(5));
-            assert_eq!(premium, 99_000);
+            assert_eq!(*submission_id, SubmissionId(0));
+            assert_eq!(*insured_id, InsuredId(10));
+            assert_eq!(*leader_id, InsurerId(5));
+            assert_eq!(panel.len(), 1);
+            assert_eq!(panel[0].0, InsurerId(5));
+            assert!((panel[0].1 - 1.0).abs() < 1e-9);
+            assert_eq!(*premium, 99_000);
         } else {
             panic!("expected QuotePresented");
         }
@@ -442,54 +481,78 @@ mod tests {
     fn on_lead_quote_issued_unknown_submission_returns_empty() {
         let mut broker = broker_with_insurers(1, vec![1]);
         let events = broker.on_lead_quote_issued(
-            Day(1),
-            SubmissionId(999),
-            InsuredId(1),
-            InsurerId(1),
-            50_000,
+            Day(1), SubmissionId(999), InsuredId(1), InsurerId(1), 50_000, 1.0,
         );
         assert!(events.is_empty(), "unknown submission_id must produce no events");
     }
 
     #[test]
-    fn best_price_wins() {
-        // 2 insurers, qps=2. Insurer 1 quotes 100, insurer 2 quotes 80 → winner is insurer 2.
+    fn panel_fills_from_two_insurers_with_large_lines() {
+        // 2 insurers both offering line_size=0.7 → accumulated=1.4 ≥ 1.0 after first response.
+        // First response (insurer 1, line=0.7): accumulated=0.7 < 1.0, wait.
+        // Second response (insurer 2, line=0.7): accumulated=1.4 ≥ 1.0 → finalise.
+        // Trim: take 0.7 from insurer 1, then room=0.3 from insurer 2. Normalise: 0.7+0.3=1.0.
         let mut broker = broker_with_insurers(1, vec![1, 2]);
         broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
 
-        // Insurer 1 responds first (premium=100); still 1 outstanding → no event yet.
         let ev1 = broker.on_lead_quote_issued(
-            Day(1), SubmissionId(0), InsuredId(1), InsurerId(1), 100,
+            Day(1), SubmissionId(0), InsuredId(1), InsurerId(1), 100, 0.7,
         );
         assert!(ev1.is_empty(), "still 1 outstanding → no QuotePresented yet");
 
-        // Insurer 2 responds (premium=80); outstanding hits 0 → QuotePresented with winner.
         let ev2 = broker.on_lead_quote_issued(
-            Day(1), SubmissionId(0), InsuredId(1), InsurerId(2), 80,
+            Day(1), SubmissionId(0), InsuredId(1), InsurerId(2), 100, 0.7,
         );
         assert_eq!(ev2.len(), 1);
-        if let Event::QuotePresented { insurer_id, premium, .. } = ev2[0].1 {
-            assert_eq!(insurer_id, InsurerId(2), "cheaper insurer must win");
-            assert_eq!(premium, 80);
+        if let Event::QuotePresented { panel, .. } = &ev2[0].1 {
+            let total: f64 = panel.iter().map(|(_, s)| s).sum();
+            assert!((total - 1.0).abs() < 1e-9, "panel shares must sum to 1.0: {total}");
+            assert_eq!(panel.len(), 2);
         } else {
             panic!("expected QuotePresented");
         }
     }
 
     #[test]
-    fn first_price_wins_on_tie() {
-        // 2 insurers, same premium → first received (insurer 1) wins.
+    fn panel_assembled_when_all_responded_undersubscribed() {
+        // 2 insurers both offering line_size=0.4 → total=0.8 < 1.0; normalise to 0.5 each.
         let mut broker = broker_with_insurers(1, vec![1, 2]);
         broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
 
-        broker.on_lead_quote_issued(
-            Day(1), SubmissionId(0), InsuredId(1), InsurerId(1), 100,
+        let ev1 = broker.on_lead_quote_issued(
+            Day(1), SubmissionId(0), InsuredId(1), InsurerId(1), 100, 0.4,
         );
-        let ev = broker.on_lead_quote_issued(
-            Day(1), SubmissionId(0), InsuredId(1), InsurerId(2), 100,
+        assert!(ev1.is_empty(), "still 1 outstanding → no QuotePresented yet");
+
+        let ev2 = broker.on_lead_quote_issued(
+            Day(1), SubmissionId(0), InsuredId(1), InsurerId(2), 100, 0.4,
         );
-        if let Event::QuotePresented { insurer_id, .. } = ev[0].1 {
-            assert_eq!(insurer_id, InsurerId(1), "first received wins on equal premium");
+        assert_eq!(ev2.len(), 1);
+        if let Event::QuotePresented { panel, .. } = &ev2[0].1 {
+            let total: f64 = panel.iter().map(|(_, s)| s).sum();
+            assert!((total - 1.0).abs() < 1e-9, "shares must sum to 1.0 after normalisation");
+            for &(_, share) in panel {
+                assert!((share - 0.5).abs() < 1e-9, "each share must be 0.5 after normalisation");
+            }
+        } else {
+            panic!("expected QuotePresented");
+        }
+    }
+
+    #[test]
+    fn single_insurer_full_line_degenerates_to_old_behaviour() {
+        // 1 insurer, line_size=1.0 → panel=[(InsurerId(1), 1.0)], premium passes through.
+        let mut broker = broker_with_insurers(1, vec![1]);
+        broker.on_coverage_requested(Day(0), InsuredId(1), small_risk());
+        let events = broker.on_lead_quote_issued(
+            Day(1), SubmissionId(0), InsuredId(1), InsurerId(1), 50_000, 1.0,
+        );
+        if let Event::QuotePresented { leader_id, panel, premium, .. } = &events[0].1 {
+            assert_eq!(*leader_id, InsurerId(1));
+            assert_eq!(panel.len(), 1);
+            assert_eq!(panel[0].0, InsurerId(1));
+            assert!((panel[0].1 - 1.0).abs() < 1e-9);
+            assert_eq!(*premium, 50_000);
         } else {
             panic!("expected QuotePresented");
         }
@@ -516,12 +579,13 @@ mod tests {
         assert!(ev_declined.is_empty(), "1 outstanding remaining → no event");
 
         let ev_issued = broker.on_lead_quote_issued(
-            Day(1), SubmissionId(0), InsuredId(1), InsurerId(2), 50_000,
+            Day(1), SubmissionId(0), InsuredId(1), InsurerId(2), 50_000, 1.0,
         );
         assert_eq!(ev_issued.len(), 1);
-        if let Event::QuotePresented { insurer_id, premium, .. } = ev_issued[0].1 {
-            assert_eq!(insurer_id, InsurerId(2));
-            assert_eq!(premium, 50_000);
+        if let Event::QuotePresented { panel, premium, .. } = &ev_issued[0].1 {
+            assert_eq!(panel.len(), 1);
+            assert_eq!(panel[0].0, InsurerId(2));
+            assert_eq!(*premium, 50_000);
         } else {
             panic!("expected QuotePresented");
         }
@@ -648,5 +712,4 @@ mod tests {
         // After reset, both insurers should appear (round-robin, not stuck on insurer 2).
         assert_ne!(id1, id2, "after year-end reset, round-robin must cycle both insurers");
     }
-
 }
