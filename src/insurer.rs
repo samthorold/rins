@@ -387,6 +387,14 @@ impl Insurer {
             }
         }
 
+        events.push((day, Event::YearEndCapital {
+            insurer_id: self.id,
+            capital: self.capital.max(0) as u64,
+            initial_capital: self.initial_capital.max(0) as u64,
+            ytd_premium: self.ytd.premium,
+            ytd_claims: self.ytd.total_claims,
+        }));
+
         self.ytd.reset();
 
         // Zombie check: capital > 0 but max_line < min writeable policy size.
@@ -930,9 +938,10 @@ mod tests {
         );
         let events = ins.on_year_end(Day(360), ASSET_VALUE);
         assert!(ins.insolvent, "zombie insurer must be marked insolvent");
-        assert_eq!(events.len(), 1);
+        // YearEndCapital is always emitted, InsurerInsolvent is appended on zombie detection.
+        assert_eq!(events.len(), 2);
         assert!(matches!(
-            events[0].1,
+            events[1].1,
             Event::InsurerInsolvent { insurer_id } if insurer_id == InsurerId(1)
         ));
     }
@@ -948,7 +957,9 @@ mod tests {
         );
         let events = ins.on_year_end(Day(360), ASSET_VALUE);
         assert!(!ins.insolvent, "insurer at threshold must not be marked insolvent");
-        assert!(events.is_empty());
+        // YearEndCapital is always emitted; no InsurerInsolvent here.
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].1, Event::YearEndCapital { .. }));
     }
 
     // ── Heterogeneous experience divergence ───────────────────────────────────

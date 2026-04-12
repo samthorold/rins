@@ -488,6 +488,9 @@ impl Simulation {
 
             // CapitalDistributed is logged directly by the insurer in on_year_end — no further dispatch.
             Event::CapitalDistributed { .. } => {}
+
+            // YearEndCapital is logged directly by the insurer in on_year_end — no further dispatch.
+            Event::YearEndCapital { .. } => {}
         }
     }
 

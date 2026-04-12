@@ -54,6 +54,8 @@ pub struct YearStats {
     pub market_weight_floor_mean: f64,
     /// Sum of CapitalDistributed amounts for this year (cents).
     pub total_distributed: u64,
+    /// Count of active (bound but not yet expired) policies at year-end.
+    pub policies_in_force: u32,
 }
 
 impl YearStats {
@@ -81,6 +83,7 @@ impl YearStats {
             capacity_sensitivity_std: 0.0,
             market_weight_floor_mean: 0.0,
             total_distributed: 0,
+            policies_in_force: 0,
         }
     }
 
@@ -349,20 +352,26 @@ pub fn analyse(
     // Sensitivity parameters per active insurer: (cr_sensitivity, capacity_sensitivity, market_weight_floor).
     // Populated from InsurerEntered (including day-0 initial insurers); pruned on InsurerInsolvent.
     let mut insurer_sensitivity: HashMap<InsurerId, (f64, f64, f64)> = HashMap::new();
+    // Active policy set for policies_in_force snapshot at year-end.
+    let mut active_policies: HashSet<PolicyId> = HashSet::new();
 
     for sim_event in events {
         let year = sim_event.day.year().0;
 
         match &sim_event.event {
-            Event::PolicyBound { panel, premium, sum_insured, .. } => {
+            Event::PolicyBound { policy_id, panel, premium, sum_insured, .. } => {
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.bound_premium += premium;
                 s.sum_insured += sum_insured;
+                active_policies.insert(*policy_id);
                 // Track per-insurer line share for Gini computation.
                 let year_map = bound_by_insurer.entry(year).or_default();
                 for (insurer_id, line_share) in panel {
                     *year_map.entry(*insurer_id).or_insert(0.0) += line_share;
                 }
+            }
+            Event::PolicyExpired { policy_id } => {
+                active_policies.remove(policy_id);
             }
             Event::ClaimSettled { insurer_id, amount, remaining_capital, .. } => {
                 last_capital.insert(*insurer_id, *remaining_capital);
@@ -422,12 +431,17 @@ pub fn analyse(
                     s.total_assets += risk.sum_insured;
                 }
             }
+            Event::YearEndCapital { insurer_id, capital, .. } => {
+                // Keep last_capital current so YearEnd total is accurate even without ClaimSettled.
+                last_capital.insert(*insurer_id, *capital);
+            }
             Event::YearEnd { year: y } => {
                 // Snapshot total capital and active insurer count at year boundary.
                 let total_cap: u64 = last_capital.values().sum();
                 let s = stats.entry(y.0).or_insert_with(|| YearStats::zero(y.0));
                 s.total_capital = total_cap;
                 s.insurer_count = active_insurer_count;
+                s.policies_in_force = active_policies.len() as u32;
                 // Gini coefficient of bound-policy count across active writers this year.
                 if let Some(counts) = bound_by_insurer.get(&y.0) {
                     s.gini_market_share = gini_from_counts(counts);

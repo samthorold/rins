@@ -156,6 +156,20 @@ pub enum Event {
         /// Insurer's capital remaining after distribution.
         remaining_capital: u64,
     },
+    /// Per-insurer capital snapshot emitted at each YearEnd, after distributions but before
+    /// YTD accumulators are reset. Allows the analyse binary to reconcile capital movements:
+    /// `CapDelta ≈ ytd_premium × (1 − expense_ratio) − ytd_claims − distributions`.
+    YearEndCapital {
+        insurer_id: InsurerId,
+        /// Insurer capital after any distribution this year (cents).
+        capital: u64,
+        /// Capital at formation — the floor for distribution eligibility (cents).
+        initial_capital: u64,
+        /// Gross premium written this year by this insurer (cents).
+        ytd_premium: u64,
+        /// Claims paid this year by this insurer (cents).
+        ytd_claims: u64,
+    },
 }
 
 // Manual `Eq` impls: `f64` doesn't implement `Eq` due to NaN, but damage_fraction
