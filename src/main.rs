@@ -209,10 +209,10 @@ fn print_analysis(
         warmup + 1
     );
     println!(
-        "{:>4} | {:>9} | {:>8} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>8} | {:>6} | {:>10} | {:>6} | {:>7} | {:>7}",
-        "Year", "Assets(B)", "GUL(B)", "CatGUL%", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "Reject#", "ApTp", "Insurers", "Gini", "CrSens", "CapSens"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>10} | {:>8} | {:>8} | {:>6} | {:>10} | {:>6} | {:>7} | {:>7}",
+        "Year", "Assets(B)", "GUL(B)", "CatGUL%", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Distrib(B)", "Dropped#", "Reject#", "ApTp", "Insurers", "Gini", "CrSens", "CapSens"
     );
-    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6 + 3 + 7 + 3 + 7));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 12 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6 + 3 + 7 + 3 + 7));
 
     const CENTS_PER_BUSD: f64 = 100_000_000_000.0; // cents per billion USD
 
@@ -257,8 +257,9 @@ fn print_analysis(
         };
         let (cr_mean, _cr_std, cap_mean, _cap_std, _mwf_mean) =
             sensitivity_by_year.get(&s.year).copied().unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
+        let distrib_b = s.total_distributed as f64 / CENTS_PER_BUSD;
         println!(
-            "{:>4} | {:>9.2} | {:>8.2} | {:>7.1}% | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>8} | {:>8} | {} | {} | {:>6.3} | {:>7.2} | {:>7.2}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>7.1}% | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>10.2} | {:>8} | {:>8} | {} | {} | {:>6.3} | {:>7.2} | {:>7.2}",
             s.year,
             assets_b,
             gul_b,
@@ -271,6 +272,7 @@ fn print_analysis(
             s.rate_on_line() * 100.0,
             s.cat_event_count,
             s.total_capital as f64 / CENTS_PER_BUSD,
+            distrib_b,
             s.dropped_count,
             s.rejected_count,
             ap_tp_str,

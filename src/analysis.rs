@@ -52,6 +52,8 @@ pub struct YearStats {
     pub capacity_sensitivity_std: f64,
     /// Mean market weight floor of active insurers at year-end.
     pub market_weight_floor_mean: f64,
+    /// Sum of CapitalDistributed amounts for this year (cents).
+    pub total_distributed: u64,
 }
 
 impl YearStats {
@@ -78,6 +80,7 @@ impl YearStats {
             capacity_sensitivity_mean: 0.0,
             capacity_sensitivity_std: 0.0,
             market_weight_floor_mean: 0.0,
+            total_distributed: 0,
         }
     }
 
@@ -407,6 +410,11 @@ pub fn analyse(
                     s.entrant_count += 1;
                 }
             }
+            Event::CapitalDistributed { insurer_id, amount, remaining_capital } => {
+                last_capital.insert(*insurer_id, *remaining_capital);
+                let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
+                s.total_distributed += amount;
+            }
             Event::CoverageRequested { insured_id, risk } => {
                 let seen = assets_seen.entry(year).or_default();
                 if seen.insert(*insured_id) {
@@ -617,6 +625,8 @@ pub enum IntegrityViolation {
     LeadQuoteDuplicateResponse { submission_id: u64, insurer_id: u64, count: u32 },
     /// Inv 18 — LeadQuoteIssued or LeadQuoteDeclined without a prior LeadQuoteRequested.
     LeadQuoteOrphanResponse { submission_id: u64, insurer_id: u64, day: u64, kind: String },
+    /// Inv 20 — CapitalDistributed.amount must be > 0; zero amounts indicate a logic error.
+    DistributionAmountZero { insurer_id: u64, day: u64 },
 }
 
 impl std::fmt::Display for IntegrityViolation {
@@ -657,6 +667,9 @@ impl std::fmt::Display for IntegrityViolation {
             }
             Self::LeadQuoteOrphanResponse { submission_id, insurer_id, day, kind } => {
                 write!(f, "LeadQuoteOrphanResponse sub={submission_id} insurer={insurer_id} day={day} kind={kind}")
+            }
+            Self::DistributionAmountZero { insurer_id, day } => {
+                write!(f, "DistributionAmountZero insurer={insurer_id} day={day}")
             }
         }
     }
@@ -890,6 +903,18 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
             day: orphan_day,
             kind,
         });
+    }
+
+    // Inv 20: CapitalDistributed.amount must be > 0.
+    for ev in events {
+        if let Event::CapitalDistributed { insurer_id, amount, .. } = &ev.event {
+            if *amount == 0 {
+                violations.push(IntegrityViolation::DistributionAmountZero {
+                    insurer_id: insurer_id.0,
+                    day: ev.day.0,
+                });
+            }
+        }
     }
 
     violations
@@ -1306,6 +1331,7 @@ mod tests {
                     cr_sensitivity: 1.0,
                     market_weight_floor: 0.30,
                     floor_factor: 0.0,
+                    payout_ratio: 0.0,
                 })
                 .collect(),
             n_insureds: 20,

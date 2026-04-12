@@ -197,11 +197,15 @@ impl Market {
         }
 
         // Emit one ClaimSettled per panel member with amount proportional to line_share.
+        // Members whose share rounds to zero (tiny loss × small line) are skipped entirely.
         panel
             .into_iter()
-            .map(|(insurer_id, line_share)| {
+            .filter_map(|(insurer_id, line_share)| {
                 let amount = (effective_gul as f64 * line_share).round() as u64;
-                (
+                if amount == 0 {
+                    return None;
+                }
+                Some((
                     day,
                     Event::ClaimSettled {
                         policy_id,
@@ -210,7 +214,7 @@ impl Market {
                         peril,
                         remaining_capital: 0, // back-filled by simulation
                     },
-                )
+                ))
             })
             .collect()
     }

@@ -108,6 +108,7 @@ impl Simulation {
                     c.cr_sensitivity,
                     c.market_weight_floor,
                     c.floor_factor,
+                    c.payout_ratio,
                 )
             })
             .collect();
@@ -484,6 +485,9 @@ impl Simulation {
 
             // InsurerEntered is logged directly by spawn_new_insurer — no further dispatch.
             Event::InsurerEntered { .. } => {}
+
+            // CapitalDistributed is logged directly by the insurer in on_year_end — no further dispatch.
+            Event::CapitalDistributed { .. } => {}
         }
     }
 
@@ -658,11 +662,12 @@ impl Simulation {
         let market_weight_floor  = self.rng.random_range(0.0_f64..0.60);  // U(0.0, 0.60); canonical=0.30
 
         let floor_factor = self.config.insurers.first().map(|t| t.floor_factor).unwrap_or(0.85);
+        let payout_ratio = self.config.insurers.first().map(|t| t.payout_ratio).unwrap_or(0.70);
         let insurer = Insurer::new(
             id, initial_capital, attritional_elf, cat_elf, target_loss_ratio,
             ewma_credibility, expense_ratio, profit_loading, net_line_capacity, scf, pml_frac,
             depletion_sensitivity, capacity_sensitivity, cr_sensitivity, market_weight_floor,
-            floor_factor,
+            floor_factor, payout_ratio,
         );
         let initial_capital_u64 = initial_capital.max(0) as u64;
 
@@ -711,6 +716,7 @@ mod tests {
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
                 floor_factor: 0.0,
+                payout_ratio: 0.0,
             }],
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -1019,6 +1025,7 @@ mod tests {
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
                 floor_factor: 0.0,
+                payout_ratio: 0.0,
             })
             .collect();
         let sim = run_sim(config);
@@ -1127,6 +1134,7 @@ mod tests {
             cr_sensitivity: 1.0,
             market_weight_floor: 0.30,
             floor_factor: 0.0,
+            payout_ratio: 0.0,
         }];
         let sim = run_sim(config);
 
@@ -1318,6 +1326,7 @@ mod tests {
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
                 floor_factor: 0.0,
+                payout_ratio: 0.0,
             },
             InsurerConfig {
                 id: InsurerId(2),
@@ -1336,6 +1345,7 @@ mod tests {
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
                 floor_factor: 0.0,
+                payout_ratio: 0.0,
             },
         ];
 
@@ -1448,6 +1458,7 @@ mod tests {
                 1.0,            // cr_sensitivity=canonical
                 0.30,           // market_weight_floor=canonical
                 0.0,            // floor_factor=0 (test: always line_size=1.0)
+                0.0,            // payout_ratio=0 (test: no distributions)
             )
         };
 
@@ -1522,6 +1533,7 @@ mod tests {
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
                 floor_factor: 0.0,
+                payout_ratio: 0.0,
             }],
             n_insureds: 5,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },

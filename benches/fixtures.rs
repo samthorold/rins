@@ -70,6 +70,7 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
                 floor_factor: 0.0,
+                payout_ratio: 0.0,
             })
             .collect(),
         n_insureds: scenario.n_insureds,

@@ -17,6 +17,7 @@ flowchart TD
     YS -->|"perils::schedule_loss_events\nPoisson(λ) — cat only"| LE
     YS -->|"schedule day year*360−1"| YE
     YE -->|"Insurer::on_year_end\nEWMA update per insurer"| INS_YE
+    INS_YE -->|"if profitable & payout_ratio > 0"| CD["**CapitalDistributed**\n{insurer_id, amount, remaining_capital}\n(same day as YearEnd)"]
     YE -->|"schedule YearStart(year+1)\nif year < config.years"| YS
 
     %% ── Coverage request chain ──────────────────────────────────────────────
@@ -40,7 +41,7 @@ flowchart TD
         II["**InsurerInsolvent**\n{insurer_id}\n(same day as ClaimSettled)"]
         INS_PB["on_policy_bound(line_share)\nyear_exposure += sum_insured × line_share\ncat_aggregate += sum_insured × line_share"]
         INS_PE["on_policy_expired\ncat_aggregate −= stored_share × sum_insured"]
-        INS_YE["on_year_end\nEWMA: elf = α×realized_lf + (1-α)×elf\nreset year_claims, year_exposure"]
+        INS_YE["on_year_end\nEWMA: elf = α×realized_lf + (1-α)×elf\nreset year_claims, year_exposure\n→ CapitalDistributed if profitable\n→ InsurerInsolvent if capital < min_line after distribution"]
     end
 
     subgraph Market["Market (Coordinator)"]
@@ -104,6 +105,7 @@ flowchart TD
 | 14  | `ClaimSettled { policy_id, insurer_id, amount, peril }`                                          | `Market` (one per panel member; `amount = effective_gul × line_share`)                                                                                                | `Insurer::on_claim_settled` (capital deduction, floored at 0; emits `InsurerInsolvent` on first zero-crossing)                                                                        | same day as `AssetDamage`                             | §6 Loss Settlement, §7.2 Insolvency                                                                                                                                      |
 | 15  | `InsurerInsolvent { insurer_id }`                                                                | `Insurer::on_claim_settled`                                                                                                                                           | `Simulation::dispatch` (no-op — logged); insurer's `insolvent` flag set; future `LeadQuoteRequested` returns `LeadQuoteDeclined { reason: Insolvent }`                                | same day as triggering `ClaimSettled`                 | §7.2 Insolvency                                                                                                                                                          |
 | 16  | `InsurerEntered { insurer_id, initial_capital, is_aggressive }`                                  | `Simulation::spawn_new_insurer` (called from `handle_year_end`)                                                                                                       | Logged directly (not dispatched); insurer added to `self.insurers` and `Broker::add_insurer`; seeded into analysis `last_capital`; counted in `Entrants#` column                      | `YearEnd` day that triggered entry                    | §7 Capital & Solvency — entry criterion: trailing 2-year avg CR < 85%, 3-year cooldown, analysis years only; 1-in-3 chance `is_aggressive = true` (optimistic cat model) |
+| 17  | `CapitalDistributed { insurer_id, amount, remaining_capital }`                                   | `Insurer::on_year_end` (called from `Simulation::handle_year_end`)                                                                                                    | `Simulation::dispatch` (no-op — logged); `analysis.rs` `analyse()` updates `last_capital` and accumulates `YearStats.total_distributed`; `Distrib(B)` column in year tables          | same day as `YearEnd`                                 | §7.5 Capital Distributions — Lloyd's 3-year account; `payout_ratio=0.70`; only fires when `year_profit > 0` and `payout_ratio > 0`; Inv 20: `amount > 0`               |
 
 ## Day offsets
 
@@ -115,6 +117,7 @@ flowchart TD
 - Total `CoverageRequested` → `PolicyBound`: **3 days**
 - `QuoteAccepted` → `PolicyExpired`: **+361 days** (= 360 days of coverage from `PolicyBound`)
 - `QuoteRejected` / `SubmissionDropped` → renewal `CoverageRequested`: **+358 days** (= 361 − 3 QUOTING_CHAIN_DAYS; new `PolicyBound` aligns with the original `PolicyExpired` would-have-been date)
+- `YearEnd` → `CapitalDistributed` (if profitable): **same day**
 - `LossEvent` → `AssetDamage` → `ClaimSettled` (for covered insureds): **same day**
 - Attritional `AssetDamage`: Poisson-scheduled strictly after `CoverageRequested` day, within year
 

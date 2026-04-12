@@ -24,7 +24,7 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
 | Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE (PARTIAL — capital limits enforced, but line_size fixed at 1.0; variable pricing_line formula planned — see §7.4, roadmap Phase 5) | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
 | Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode; panel assembly requires Phase 5 variable line sizes first) | `src/broker.rs` |
-| Capital distributions (annual profit payout to Names) | PLANNED — Phase 6; `CapitalDistributed` event; see §7.5 | — |
+| Capital distributions (annual profit payout to Names) | ACTIVE — `CapitalDistributed` event; capital floor prevents distribution when capital depleted below `initial_capital`; see §7.5 | `src/insurer.rs::on_year_end` |
 | Underwriter channel / AP/TP ratio (MS3 AvT) | ACTIVE — three-level pricing: ATP → TP (× profit loading) → AP (× blended factor); coordinator broadcasts market factor (3yr CR + capacity pressure); each insurer blends own capital state and loss history against market signal via credibility weighting. Key hardcoded equilibria: capacity_uplift step function, clamp amplitude bounds, 30% market floor, 5yr credibility ramp — see §4.5. | `src/insurer.rs::underwriter_premium`, `src/insurer.rs::own_ap_tp_factor`, `src/simulation.rs::handle_year_end` |
 | Supply / demand balance (insured reservation price) | ACTIVE — heterogeneous LogNormal reservation prices produce a downward-sloping demand curve; `Reject#` diagnostic separates demand-constrained from supply-constrained non-placements; quantity adjustment (variable limits, deductibles, self-insurance) and demand response to loss experience not modelled | `src/insured.rs::on_quote_presented` |
 | Broker relationship scores | ACTIVE — +1.0 per PolicyBound, ×0.80 per YearEnd; routing sorted by score DESC + cyclic tiebreaker | `src/broker.rs` |
@@ -619,28 +619,38 @@ The interaction with phenomenon 1 (Underwriting Cycle) is direct: soft-market su
 
 ---
 
-### §7.5 Capital distributions `[PLANNED — Phase 6]`
+### §7.5 Capital distributions `[ACTIVE]`
 
-**Motivation.** The persistent capital model (§7.0) accumulates retained earnings indefinitely on a fixed exposure pool. A 200-year canonical run shows TotalCap growing 6.3× (1.26B → 8.01B) while total insured exposure stays fixed at 2.5B. The maximum conceivable single-year GUL is ~1.25B; with 8B capital the market becomes structurally crisis-proof regardless of cat severity. The ratio `max_GUL / TotalCap → 0` over time, and hard-market dynamics become cosmetic: pricing signals with no capacity constraint behind them.
+**Motivation.** The persistent capital model (§7.0) accumulates retained earnings indefinitely on a fixed exposure pool. Without distributions, a 200-year canonical run shows TotalCap growing 6.3× (1.26B → 8.01B) while total insured exposure stays fixed at 2.5B. The ratio `max_GUL / TotalCap → 0` over time: hard-market pricing signals fire correctly but there is no capacity constraint behind them.
 
-**Lloyd's context — Names distributions.** Lloyd's syndicates operate on a 3-year account. When an underwriting year closes, net profit is crystallised and distributable to Names. Names choose whether to recommit capital or withdraw. This is the drainage mechanism that prevents indefinite capital accumulation: profitable years see Names extract returns rather than compound them inside the syndicate. In aggregate, the Lloyd's market target solvency ratio (206% actual vs ~140% required) reflects approximately 1.5× excess capital — not the 6× excess that emerges without distributions.
+**Lloyd's context — Names distributions.** Lloyd's syndicates operate on a 3-year account. When an underwriting year closes, net profit is crystallised and distributable to Names. Names choose whether to recommit capital or withdraw. This prevents indefinite capital accumulation: the Lloyd's market target solvency ratio (206% actual vs ~140% required) reflects approximately 1.5× excess capital, not the 6× excess that emerges without distributions.
 
-**Planned mechanism.** At `YearEnd`, after computing year P&L, each insurer distributes a fraction of annual underwriting profit:
+**Capital floor — Solvency II constraint.** Under Solvency II, distributions are prohibited if they would breach the Solvency Capital Requirement (SCR). Tier 1 instruments explicitly block payments when an SCR breach has occurred or would result from the payment. In Lloyd's terms, profit release requires that all liabilities are fully reserved and that the member's Funds at Lloyd's remain above the Economic Capital Assessment (ECA = SCR × 1.35). An insurer whose capital has been eroded by losses must retain profits to rebuild rather than distribute them; Names facing a recovering syndicate do not extract further capital while the book is undercapitalised.
+
+**Implemented mechanism.** At `YearEnd`, after computing year P&L:
 
 ```
-year_profit  = ytd_premium − ytd_claims − ytd_expenses
-distributable = year_profit.max(0.0) × payout_ratio    // canonical: 0.70
-capital      −= distributable
-// emit CapitalDistributed { insurer_id, amount: distributable }
+net_written   = ytd.premium × (1 − expense_ratio)
+year_profit   = net_written − ytd.total_claims          // via saturating_sub; floored at 0
+distributable = year_profit × payout_ratio              // canonical: 0.70
+
+// Capital floor: only distribute if post-distribution capital ≥ initial_capital.
+// Proxy for Solvency II SCR floor — prevents distributions during capital depletion.
+if capital − distributable ≥ initial_capital:
+    capital −= distributable
+    emit CapitalDistributed { insurer_id, amount: distributable, remaining_capital }
 ```
 
-Loss years produce no distribution (Names are not automatically called in the base model — capital calls are a separate mechanism). Payout applies only when the year is profitable.
+Distribution is suppressed in three cases:
+1. **Loss year** — `year_profit = 0` (saturating_sub); no event emitted.
+2. **Capital depleted** — `capital − distributable < initial_capital`; the insurer retains profit to rebuild.
+3. **`payout_ratio = 0.0`** — distribution disabled (used in tests that do not require this mechanic).
 
-**Effect on dynamics.** With 70% payout, annual retained earnings become `year_profit × 0.30`. TotalCap plateaus rather than ramps: in benign years, `Distributions(B) ≈ 0.70 × market_profit`, offsetting retained earnings. After a cat year (no profit → no distribution), capital dips and takes several benign years to recover, keeping the market in the vulnerability regime. The capital level becomes mean-reverting around a stable equilibrium rather than drifting upward without bound. Crisis severity relative to capital remains approximately constant across century-scale runs.
+Loss years produce no cash call in the base model — Names are not automatically called to contribute capital. Capital calls are a separate mechanism deferred to a later phase.
 
-**Interaction with variable line sizes (Phase 5).** With variable lines, a larger capital base writes proportionally larger lines and earns proportionally more premium — but also suffers proportionally larger losses. The absolute exposure scales with capital. Capital distributions then prevent the absolute capital level from growing: the system self-regulates toward a steady-state capital level that reflects the risk load it is actually writing, rather than compounding indefinitely. This is the correct dynamic: in real Lloyd's, capacity grows when the market is genuinely expanding (new insureds, new perils), not simply because retained earnings pile up in an overcapitalised vehicle writing a fixed book.
+**Effect on dynamics.** With a 70% payout and the floor constraint, TotalCap mean-reverts rather than trending upward: benign years distribute surplus above initial_capital, keeping the market near the vulnerability regime. After a cat drawdown (capital below floor → no distribution, profits retained), insurers rebuild over several benign years before distributions resume. The floor prevents the distribution mechanism from accelerating a death spiral when capital is already impaired.
 
-**New event.** `CapitalDistributed { insurer_id: InsurerId, amount: u64 }`. Logged at `YearEnd` day, after `InsurerEntered`. Counted in a new `Distributions(B)` column in the year table. Add Inv 20: every `CapitalDistributed.amount > 0` (zero distributions are not logged).
+**Event.** `CapitalDistributed { insurer_id: InsurerId, amount: u64, remaining_capital: u64 }`. Logged at `YearEnd` day. Counted in `Distrib(B)` column in the year table. Inv 20: every `CapitalDistributed.amount > 0` (zero distributions are not logged).
 
 ---
 

@@ -61,6 +61,10 @@ pub struct InsurerConfig {
     /// Canonical: 0.85 — insurer begins reducing line when its AP/TP blended factor falls below 85%.
     /// Set to 0.0 in tests to always produce line_size = 1.0 (backward-compatible behaviour).
     pub floor_factor: f64,
+    /// Fraction of annual underwriting profit distributed to Names at YearEnd.
+    /// Loss years produce no distribution. Canonical: 0.70 (Lloyd's 3-year account practice).
+    /// 0.0 = no distributions (tests that don't need this mechanic).
+    pub payout_ratio: f64,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -172,6 +176,7 @@ impl SimulationConfig {
                     cr_sensitivity: 1.0,
                     market_weight_floor: 0.30,
                     floor_factor: 0.85,
+                    payout_ratio: 0.70,
                 })
                 .collect(),
             n_insureds: 100,

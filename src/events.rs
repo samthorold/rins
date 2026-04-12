@@ -146,6 +146,16 @@ pub enum Event {
         capacity_sensitivity: f64,
         market_weight_floor: f64,
     },
+    /// Annual profit distribution to Names (Lloyd's 3-year account practice).
+    /// Emitted at YearEnd only when the insurer is profitable and `payout_ratio > 0`.
+    /// Zero-amount distributions are never logged (Inv 20).
+    CapitalDistributed {
+        insurer_id: InsurerId,
+        /// Amount distributed to Names this year (cents). Always > 0.
+        amount: u64,
+        /// Insurer's capital remaining after distribution.
+        remaining_capital: u64,
+    },
 }
 
 // Manual `Eq` impls: `f64` doesn't implement `Eq` due to NaN, but damage_fraction
