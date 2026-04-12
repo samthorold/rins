@@ -56,6 +56,14 @@ pub struct YearStats {
     pub total_distributed: u64,
     /// Count of active (bound but not yet expired) policies at year-end.
     pub policies_in_force: u32,
+    /// Average line size from LeadQuoteIssued events this year (×100 = percent).
+    /// Diagnostic for Phase 5: soft-market insurers (own_factor near floor_factor) write ~33%;
+    /// hard-market insurers write 100%.
+    pub avg_line_pct: f64,
+    /// Sum of premiums for ALL policies active at any point during this year (cents).
+    /// Includes new binds (same as bound_premium) plus carry-overs from the prior year.
+    /// Use loss_ratio_full_exposure() to compute FeLR%.
+    pub full_exposure_premium: u64,
 }
 
 impl YearStats {
@@ -84,6 +92,8 @@ impl YearStats {
             market_weight_floor_mean: 0.0,
             total_distributed: 0,
             policies_in_force: 0,
+            avg_line_pct: 0.0,
+            full_exposure_premium: 0,
         }
     }
 
@@ -110,6 +120,16 @@ impl YearStats {
         self.loss_ratio() + expense_ratio
     }
 
+    /// Full-exposure loss ratio: claims / full_exposure_premium.
+    /// Includes carry-over premium from policies written in the prior year.
+    /// Zero if no full-exposure premium recorded.
+    pub fn loss_ratio_full_exposure(&self) -> f64 {
+        if self.full_exposure_premium == 0 {
+            0.0
+        } else {
+            self.claims as f64 / self.full_exposure_premium as f64
+        }
+    }
 }
 
 /// Distribution statistics for a continuous metric across N simulation runs.
@@ -354,6 +374,13 @@ pub fn analyse(
     let mut insurer_sensitivity: HashMap<InsurerId, (f64, f64, f64)> = HashMap::new();
     // Active policy set for policies_in_force snapshot at year-end.
     let mut active_policies: HashSet<PolicyId> = HashSet::new();
+    // LeadQuoteIssued line_size accumulator per year: (sum, count).
+    let mut line_size_by_year: HashMap<u32, (f64, u64)> = HashMap::new();
+    // Full-exposure premium tracking: premium and bound-year per policy.
+    // At PolicyExpired, if expiry year != bound year, the premium counts as carry-over
+    // in the expiry year's full_exposure_premium.
+    let mut policy_premiums: HashMap<PolicyId, u64> = HashMap::new();
+    let mut policy_bound_year: HashMap<PolicyId, u32> = HashMap::new();
 
     for sim_event in events {
         let year = sim_event.day.year().0;
@@ -363,7 +390,10 @@ pub fn analyse(
                 let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
                 s.bound_premium += premium;
                 s.sum_insured += sum_insured;
+                s.full_exposure_premium += premium;
                 active_policies.insert(*policy_id);
+                policy_premiums.insert(*policy_id, *premium);
+                policy_bound_year.insert(*policy_id, year);
                 // Track per-insurer line share for Gini computation.
                 let year_map = bound_by_insurer.entry(year).or_default();
                 for (insurer_id, line_share) in panel {
@@ -371,6 +401,15 @@ pub fn analyse(
                 }
             }
             Event::PolicyExpired { policy_id } => {
+                // Carry-over: if this policy was bound in a prior year, its premium
+                // counts as full-exposure premium in the expiry year too.
+                let bound_yr = policy_bound_year.get(policy_id).copied().unwrap_or(year);
+                if bound_yr < year
+                    && let Some(&prem) = policy_premiums.get(policy_id)
+                {
+                    let s = stats.entry(year).or_insert_with(|| YearStats::zero(year));
+                    s.full_exposure_premium += prem;
+                }
                 active_policies.remove(policy_id);
             }
             Event::ClaimSettled { insurer_id, amount, remaining_capital, .. } => {
@@ -435,6 +474,11 @@ pub fn analyse(
                 // Keep last_capital current so YearEnd total is accurate even without ClaimSettled.
                 last_capital.insert(*insurer_id, *capital);
             }
+            Event::LeadQuoteIssued { line_size, .. } => {
+                let entry = line_size_by_year.entry(year).or_insert((0.0, 0));
+                entry.0 += line_size;
+                entry.1 += 1;
+            }
             Event::YearEnd { year: y } => {
                 // Snapshot total capital and active insurer count at year boundary.
                 let total_cap: u64 = last_capital.values().sum();
@@ -442,6 +486,12 @@ pub fn analyse(
                 s.total_capital = total_cap;
                 s.insurer_count = active_insurer_count;
                 s.policies_in_force = active_policies.len() as u32;
+                // Average line size: mean of LeadQuoteIssued.line_size for this year.
+                if let Some((sum, count)) = line_size_by_year.get(&y.0) {
+                    if *count > 0 {
+                        s.avg_line_pct = sum / *count as f64 * 100.0;
+                    }
+                }
                 // Gini coefficient of bound-policy count across active writers this year.
                 if let Some(counts) = bound_by_insurer.get(&y.0) {
                     s.gini_market_share = gini_from_counts(counts);
@@ -1346,6 +1396,7 @@ mod tests {
                     market_weight_floor: 0.30,
                     floor_factor: 0.0,
                     payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
                 })
                 .collect(),
             n_insureds: 20,

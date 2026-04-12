@@ -104,7 +104,7 @@ Primary hypothesis — *partially confirmed.* Gini values in the year table are 
 
 ---
 
-## Phase 5 — Variable line sizes and panel assembly
+## Phase 5 — Variable line sizes and panel assembly `[DONE — 2026-04-12]`
 
 **Why this is the next phase.** The 200-year run (Gap 4 above) demonstrated that with fixed line sizes (`line_size = 1`) capital accumulates without bound on a fixed exposure pool. Variable lines are also the prerequisite for soft-market supply contraction (§7.4), post-catastrophe concentration dynamics (phenomenon 7), and the full lead-follow subscription model (Phase 7). They are the single change with the widest downstream unlock.
 
@@ -145,9 +145,15 @@ The day-offset invariants are unchanged. The quoting protocol is unchanged from 
 
 **Diagnostics.** New column: `AvgLine%` — mean offered line fraction across `LeadQuoteIssued` events per year. In benign years (adequate rates, full capital) this should approach `capacity_line` for most insurers (~30%). Post-cat it should fall toward `pricing_line`. Track the cross-correlation of `AvgLine%` and `Dropped#` over multi-year windows — these should move together, confirming that line contraction is the mechanism driving capacity shortage, not refusals.
 
+**Results (seed=42, 8×150M insurers, 100 insureds, 205yr run).**
+
+Primary hypothesis — *confirmed.* `AvgLine%` varies between 58–100% across years, reflecting `pricing_line` contracting when `own_ap_tp_factor` falls near `floor_factor=0.85`. In cat-impact years (e.g. yr12: LossR=83%, AvgLine%=63%; yr16: AvgLine%=58%), line contraction precedes and accompanies drops in `InForce`, confirming the mechanism. In profitable recovery years (yr13: AvgLine%=98%, yr14: AvgLine%=100%), full lines return promptly. The `AvgLine%` column is now the primary soft-market floor diagnostic.
+
+The market-freeze bug (year 23: Rate%=30%, InForce=28) was caused by a written-vs-earned premium mismatch in `own_cr_ewma` when an insurer rapidly lost market share. Fixed by volume-weighted EWMA: `effective_alpha = ewma_credibility × vol_weight` where `vol_weight = min(ytd_exposure / exposure_ewma, 1.0)`. Tests: `vol_weight_is_one_for_stable_book_size`, `own_cr_ewma_spike_suppressed_on_book_shrinkage`, `attritional_elf_stable_after_single_policy_spike`, `vol_weight_does_not_affect_first_year`.
+
 ---
 
-## Phase 6 — Capital distributions
+## Phase 6 — Capital distributions `[DONE — 2026-04-12]`
 
 **Why this is needed.** Gap 4 shows that TotalCap grows 6.3× over 200 years while the exposure ceiling stays fixed at 2.5B. Even variable line sizes (Phase 5) slow but do not stop this: each insurer writes proportionally larger lines and earns proportionally more premium, still retaining most profits. Without a drain, the `max_GUL / TotalCap` ratio converges to zero and crises become structurally impossible at century-scale. Variable lines fix the *relative* exposure-to-capital ratio within a year; distributions fix the *long-run* level.
 
@@ -167,6 +173,12 @@ Losses are not called (Names are not compelled to inject capital on a bad year �
 **Effect on long-run dynamics.** With a 70% payout and typical annual retained earnings of ~5% of capital, the equilibrium capital level stabilises at approximately `initial_capital / (1 - retention_fraction × annual_return_rate)`. The exact level is a calibration outcome, not a designer input. After a severe cat year (no profit → no distribution), capital dips and takes several years to recover, keeping the market in the vulnerability regime where crises bite. After a quiet year, the distribution prevents runaway accumulation. The capital level oscillates around a stable mean rather than drifting upward indefinitely.
 
 **Diagnostic.** New event `CapitalDistributed { insurer_id, amount }`. Add `Distributions(B)` to the year table showing total market capital returned in that year. In a well-calibrated run, TotalCap should plateau rather than grow monotonically: `Distributions(B) ≈ retained_earnings_rate × TotalCap` in benign years. Post-cat years should show near-zero distributions as profits collapse. The capital trajectory should resemble a mean-reverting process with cat-driven excursions downward rather than a monotonic ramp.
+
+**Results (seed=42, canonical run).**
+
+`Distrib(B)` shows 0.01–0.07B per year in profitable years, 0.00 after cat years — correct qualitative behaviour. `TotalCap(B)` still grows monotonically (1.62B at yr10 → ~4B at yr100) because the distribution floor is `1.5 × initial_capital`: insurers below 225M retain all profits. At start (150M capital) every insurer must accumulate 75M buffer before any distribution fires; this slows but does not stop long-run accumulation. Full stabilisation requires either a higher payout ratio or the rising supply curve for capital (Phase 7 context). The parameterisation is correct; calibration is a future concern.
+
+`InsurerConfig.distribution_floor_multiple: f64` (canonical: 1.5; tests: 1.0) is the key parameter: insurer must accumulate `floor_multiple × initial_capital` before paying Names. Tests: `on_year_end_no_distribution_when_capital_below_floor`, `on_year_end_distributes_only_when_capital_restored_above_floor`.
 
 ---
 

@@ -209,10 +209,10 @@ fn print_analysis(
         warmup + 1
     );
     println!(
-        "{:>4} | {:>9} | {:>8} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>10} | {:>9} | {:>9} | {:>7} | {:>8} | {:>8} | {:>6} | {:>10} | {:>6} | {:>7} | {:>7}",
-        "Year", "Assets(B)", "GUL(B)", "CatGUL%", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Distrib(B)", "CapDelta(B)", "NetRet(B)", "InForce", "Dropped#", "Reject#", "ApTp", "Insurers", "Gini", "CrSens", "CapSens"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>10} | {:>9} | {:>9} | {:>7} | {:>8} | {:>8} | {:>6} | {:>10} | {:>6} | {:>7} | {:>7} | {:>8}",
+        "Year", "Assets(B)", "GUL(B)", "CatGUL%", "Cov(B)", "Claims(B)", "LossR%", "FeLR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Distrib(B)", "CapDelta(B)", "NetRet(B)", "InForce", "Dropped#", "Reject#", "ApTp", "Insurers", "Gini", "CrSens", "CapSens", "AvgLine%"
     );
-    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 12 + 3 + 11 + 3 + 11 + 3 + 9 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6 + 3 + 7 + 3 + 7));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 12 + 3 + 11 + 3 + 11 + 3 + 9 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6 + 3 + 7 + 3 + 7 + 3 + 8));
 
     const CENTS_PER_BUSD: f64 = 100_000_000_000.0; // cents per billion USD
 
@@ -267,7 +267,7 @@ fn print_analysis(
         let net_ret_b = (s.bound_premium as f64 * (1.0 - expense_ratio) - s.claims as f64) / CENTS_PER_BUSD;
         prev_cap = Some(s.total_capital);
         println!(
-            "{:>4} | {:>9.2} | {:>8.2} | {:>7.1}% | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>10.2} | {:>+9.2} | {:>9.2} | {:>7} | {:>8} | {:>8} | {} | {} | {:>6.3} | {:>7.2} | {:>7.2}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>7.1}% | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>10.2} | {:>+9.2} | {:>9.2} | {:>7} | {:>8} | {:>8} | {} | {} | {:>6.3} | {:>7.2} | {:>7.2} | {:>7.1}%",
             s.year,
             assets_b,
             gul_b,
@@ -275,6 +275,7 @@ fn print_analysis(
             cov_b,
             claims_b,
             s.loss_ratio() * 100.0,
+            s.loss_ratio_full_exposure() * 100.0,
             s.combined_ratio(expense_ratio) * 100.0,
             avg_cr_str,
             s.rate_on_line() * 100.0,
@@ -291,6 +292,7 @@ fn print_analysis(
             s.gini_market_share,
             cr_mean,
             cap_mean,
+            s.avg_line_pct,
         );
     }
 }

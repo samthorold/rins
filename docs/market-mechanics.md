@@ -22,8 +22,8 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Separate cat / attritional ELF (cat ELF anchored, attritional EWMA-updated) | ACTIVE | `src/insurer.rs::on_year_end` |
 | Profit loading above ATP in underwriter channel | ACTIVE | `src/insurer.rs::underwriter_premium` |
 | Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
-| Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE (PARTIAL — capital limits enforced, but line_size fixed at 1.0; variable pricing_line formula planned — see §7.4, roadmap Phase 5) | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
-| Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode; panel assembly requires Phase 5 variable line sizes first) | `src/broker.rs` |
+| Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE — capital limits enforced; `line_size = min(capacity_line, pricing_line)` — continuous soft-market contraction via `pricing_line = clamp((own_factor - floor_factor)/(1-floor_factor), 0, 1)`; see §7.4, roadmap Phase 5 [DONE] | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
+| Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — multi-insurer panels assembled greedily; no follow-market pricing mode; follower shading planned for Phase 7) | `src/broker.rs` |
 | Capital distributions (annual profit payout to Names) | ACTIVE — `CapitalDistributed` event; capital floor prevents distribution when capital depleted below `initial_capital`; see §7.5 | `src/insurer.rs::on_year_end` |
 | Underwriter channel / AP/TP ratio (MS3 AvT) | ACTIVE — three-level pricing: ATP → TP (× profit loading) → AP (× blended factor); coordinator broadcasts market factor (3yr CR + capacity pressure); each insurer blends own capital state and loss history against market signal via credibility weighting. Key hardcoded equilibria: capacity_uplift step function, clamp amplitude bounds, 30% market floor, 5yr credibility ramp — see §4.5. | `src/insurer.rs::underwriter_premium`, `src/insurer.rs::own_ap_tp_factor`, `src/simulation.rs::handle_year_end` |
 | Supply / demand balance (insured reservation price) | ACTIVE — heterogeneous LogNormal reservation prices produce a downward-sloping demand curve; `Reject#` diagnostic separates demand-constrained from supply-constrained non-placements; quantity adjustment (variable limits, deductibles, self-insurance) and demand response to loss experience not modelled | `src/insured.rs::on_quote_presented` |
@@ -593,7 +593,7 @@ Central Fund and managed runoff remain `[TBD]` (§7.3).
 
 **Design note:** the Central Fund is a welfare mechanism, not a cycle mechanism. It should not materially alter cycle period or amplitude.
 
-### §7.4 Voluntary exit `[DEFERRED — awaiting Phase 5 variable line sizes]`
+### §7.4 Voluntary exit `[ACTIVE via variable line sizes — Phase 5 DONE 2026-04-12]`
 
 Binary exit/re-entry was implemented (Phase 2) but removed because it produced unrealistic synchronised behaviour: all insurers sharing similar aggregate loss histories hit the runoff threshold in the same year (mass exits), and all runoff insurers re-entered simultaneously the moment the market AP/TP factor exceeded 1.10 (mass re-entries). This bears no resemblance to the gradual, idiosyncratic capacity adjustments seen in the Lloyd's market.
 

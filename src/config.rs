@@ -65,6 +65,11 @@ pub struct InsurerConfig {
     /// Loss years produce no distribution. Canonical: 0.70 (Lloyd's 3-year account practice).
     /// 0.0 = no distributions (tests that don't need this mechanic).
     pub payout_ratio: f64,
+    /// Multiplier on initial_capital that forms the distribution floor.
+    /// Distributions are only paid when post-distribution capital ≥ initial_capital × multiple.
+    /// 1.0 = distribute as soon as capital returns to initial (original behaviour, tests).
+    /// 1.5 = canonical — insurer must accumulate a 50% surplus buffer before paying Names.
+    pub distribution_floor_multiple: f64,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -177,6 +182,7 @@ impl SimulationConfig {
                     market_weight_floor: 0.30,
                     floor_factor: 0.85,
                     payout_ratio: 0.70,
+                    distribution_floor_multiple: 1.5,
                 })
                 .collect(),
             n_insureds: 100,

@@ -109,6 +109,7 @@ impl Simulation {
                     c.market_weight_floor,
                     c.floor_factor,
                     c.payout_ratio,
+                    c.distribution_floor_multiple,
                 )
             })
             .collect();
@@ -666,11 +667,13 @@ impl Simulation {
 
         let floor_factor = self.config.insurers.first().map(|t| t.floor_factor).unwrap_or(0.85);
         let payout_ratio = self.config.insurers.first().map(|t| t.payout_ratio).unwrap_or(0.70);
+        let distribution_floor_multiple = self.config.insurers.first()
+            .map(|t| t.distribution_floor_multiple).unwrap_or(1.5);
         let insurer = Insurer::new(
             id, initial_capital, attritional_elf, cat_elf, target_loss_ratio,
             ewma_credibility, expense_ratio, profit_loading, net_line_capacity, scf, pml_frac,
             depletion_sensitivity, capacity_sensitivity, cr_sensitivity, market_weight_floor,
-            floor_factor, payout_ratio,
+            floor_factor, payout_ratio, distribution_floor_multiple,
         );
         let initial_capital_u64 = initial_capital.max(0) as u64;
 
@@ -720,6 +723,7 @@ mod tests {
                 market_weight_floor: 0.30,
                 floor_factor: 0.0,
                 payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
             }],
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -1029,6 +1033,7 @@ mod tests {
                 market_weight_floor: 0.30,
                 floor_factor: 0.0,
                 payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
             })
             .collect();
         let sim = run_sim(config);
@@ -1138,6 +1143,7 @@ mod tests {
             market_weight_floor: 0.30,
             floor_factor: 0.0,
             payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
         }];
         let sim = run_sim(config);
 
@@ -1330,6 +1336,7 @@ mod tests {
                 market_weight_floor: 0.30,
                 floor_factor: 0.0,
                 payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
             },
             InsurerConfig {
                 id: InsurerId(2),
@@ -1349,6 +1356,7 @@ mod tests {
                 market_weight_floor: 0.30,
                 floor_factor: 0.0,
                 payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
             },
         ];
 
@@ -1462,6 +1470,7 @@ mod tests {
                 0.30,           // market_weight_floor=canonical
                 0.0,            // floor_factor=0 (test: always line_size=1.0)
                 0.0,            // payout_ratio=0 (test: no distributions)
+                1.0,            // distribution_floor_multiple=1.0 (test: no effect)
             )
         };
 
@@ -1537,6 +1546,7 @@ mod tests {
                 market_weight_floor: 0.30,
                 floor_factor: 0.0,
                 payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
             }],
             n_insureds: 5,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
