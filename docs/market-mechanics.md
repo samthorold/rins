@@ -22,8 +22,9 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Separate cat / attritional ELF (cat ELF anchored, attritional EWMA-updated) | ACTIVE | `src/insurer.rs::on_year_end` |
 | Profit loading above ATP in underwriter channel | ACTIVE | `src/insurer.rs::underwriter_premium` |
 | Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
-| Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE — capital-linked fractions (net_line_capacity=0.30, solvency_capital_fraction=0.30, pml_200 derived from cat model) | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
-| Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
+| Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE (PARTIAL — capital limits enforced, but line_size fixed at 1.0; variable pricing_line formula planned — see §7.4, roadmap Phase 5) | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
+| Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode; panel assembly requires Phase 5 variable line sizes first) | `src/broker.rs` |
+| Capital distributions (annual profit payout to Names) | PLANNED — Phase 6; `CapitalDistributed` event; see §7.5 | — |
 | Underwriter channel / AP/TP ratio (MS3 AvT) | ACTIVE — three-level pricing: ATP → TP (× profit loading) → AP (× blended factor); coordinator broadcasts market factor (3yr CR + capacity pressure); each insurer blends own capital state and loss history against market signal via credibility weighting. Key hardcoded equilibria: capacity_uplift step function, clamp amplitude bounds, 30% market floor, 5yr credibility ramp — see §4.5. | `src/insurer.rs::underwriter_premium`, `src/insurer.rs::own_ap_tp_factor`, `src/simulation.rs::handle_year_end` |
 | Supply / demand balance (insured reservation price) | ACTIVE — heterogeneous LogNormal reservation prices produce a downward-sloping demand curve; `Reject#` diagnostic separates demand-constrained from supply-constrained non-placements; quantity adjustment (variable limits, deductibles, self-insurance) and demand response to loss experience not modelled | `src/insured.rs::on_quote_presented` |
 | Broker relationship scores | ACTIVE — +1.0 per PolicyBound, ×0.80 per YearEnd; routing sorted by score DESC + cyclic tiebreaker | `src/broker.rs` |
@@ -592,7 +593,7 @@ Central Fund and managed runoff remain `[TBD]` (§7.3).
 
 **Design note:** the Central Fund is a welfare mechanism, not a cycle mechanism. It should not materially alter cycle period or amplitude.
 
-### §7.4 Voluntary exit `[DEFERRED]`
+### §7.4 Voluntary exit `[DEFERRED — awaiting Phase 5 variable line sizes]`
 
 Binary exit/re-entry was implemented (Phase 2) but removed because it produced unrealistic synchronised behaviour: all insurers sharing similar aggregate loss histories hit the runoff threshold in the same year (mass exits), and all runoff insurers re-entered simultaneously the moment the market AP/TP factor exceeded 1.10 (mass re-entries). This bears no resemblance to the gradual, idiosyncratic capacity adjustments seen in the Lloyd's market.
 
@@ -603,9 +604,43 @@ Binary exit/re-entry was implemented (Phase 2) but removed because it produced u
 
 Full class exit carries heavy relational costs (broker relationships built over years) and regulatory friction (Lloyd's requires significant lead time and approval). It is reserved for extreme cases, not a routine soft-market lever.
 
-**Deferred until variable line sizes are implemented.** The intended soft-market withdrawal effect will emerge naturally once syndicates can express caution by reducing their line size rather than exiting entirely. Variable participation fractions are planned. At that point, soft-market supply contraction becomes a continuous quantity rather than a binary switch, matching the real market mechanism.
+**Design for variable line soft-market withdrawal.** When `pricing_line` (the insurer's appetite-based fraction) falls below `capacity_line` (the capital-limited fraction), the insurer expresses soft-market caution without any discrete exit decision:
 
-The interaction with phenomenon 1 (Underwriting Cycle) is direct: soft-market supply contraction closes the lower tail of the cycle. Until variable line sizes are in place, the model's soft-market floor is set by the AP/TP signal floor (0.70 × TP) rather than capacity withdrawal. See `docs/roadmap.md Phase 2` for the removal rationale.
+```
+pricing_line = clamp((own_ap_tp_factor - floor_factor) / (1.0 - floor_factor), 0.0, 1.0)
+line_size    = min(capacity_line, pricing_line)
+```
+
+At `own_ap_tp_factor = 1.0` (rates exactly at technical premium), `pricing_line = (1.0 - 0.85) / 0.15 = 1.0` — full capacity offered. At `own_ap_tp_factor = 0.90` (AP 10% below TP, soft floor), `pricing_line = (0.90 - 0.85) / 0.15 ≈ 0.33` — insurer writes one-third of its capital-limited line. At `own_ap_tp_factor ≤ 0.85`, `pricing_line = 0` — insurer declines without exiting. The floor_factor of 0.85 is a calibration parameter; `own_ap_tp_factor < 1.0` is mechanically reachable whenever the insurer's blended factor falls below technical premium during sustained benign years. 
+
+This makes supply contraction a continuous quantity emerging from individual pricing decisions. The broker observes insufficient total line subscription and emits `SubmissionDropped` without any agent-level exit; the insurer remains on the panel and wins business again when its `pricing_line` recovers after a cat shock restores the hard market signal. This is the real Lloyd's mechanism: syndicates price themselves out of business they don't want, not out of the market.
+
+The interaction with phenomenon 1 (Underwriting Cycle) is direct: soft-market supply contraction closes the lower tail of the cycle. See `docs/roadmap.md Phase 5` for the implementation plan and invariant updates.
+
+---
+
+### §7.5 Capital distributions `[PLANNED — Phase 6]`
+
+**Motivation.** The persistent capital model (§7.0) accumulates retained earnings indefinitely on a fixed exposure pool. A 200-year canonical run shows TotalCap growing 6.3× (1.26B → 8.01B) while total insured exposure stays fixed at 2.5B. The maximum conceivable single-year GUL is ~1.25B; with 8B capital the market becomes structurally crisis-proof regardless of cat severity. The ratio `max_GUL / TotalCap → 0` over time, and hard-market dynamics become cosmetic: pricing signals with no capacity constraint behind them.
+
+**Lloyd's context — Names distributions.** Lloyd's syndicates operate on a 3-year account. When an underwriting year closes, net profit is crystallised and distributable to Names. Names choose whether to recommit capital or withdraw. This is the drainage mechanism that prevents indefinite capital accumulation: profitable years see Names extract returns rather than compound them inside the syndicate. In aggregate, the Lloyd's market target solvency ratio (206% actual vs ~140% required) reflects approximately 1.5× excess capital — not the 6× excess that emerges without distributions.
+
+**Planned mechanism.** At `YearEnd`, after computing year P&L, each insurer distributes a fraction of annual underwriting profit:
+
+```
+year_profit  = ytd_premium − ytd_claims − ytd_expenses
+distributable = year_profit.max(0.0) × payout_ratio    // canonical: 0.70
+capital      −= distributable
+// emit CapitalDistributed { insurer_id, amount: distributable }
+```
+
+Loss years produce no distribution (Names are not automatically called in the base model — capital calls are a separate mechanism). Payout applies only when the year is profitable.
+
+**Effect on dynamics.** With 70% payout, annual retained earnings become `year_profit × 0.30`. TotalCap plateaus rather than ramps: in benign years, `Distributions(B) ≈ 0.70 × market_profit`, offsetting retained earnings. After a cat year (no profit → no distribution), capital dips and takes several benign years to recover, keeping the market in the vulnerability regime. The capital level becomes mean-reverting around a stable equilibrium rather than drifting upward without bound. Crisis severity relative to capital remains approximately constant across century-scale runs.
+
+**Interaction with variable line sizes (Phase 5).** With variable lines, a larger capital base writes proportionally larger lines and earns proportionally more premium — but also suffers proportionally larger losses. The absolute exposure scales with capital. Capital distributions then prevent the absolute capital level from growing: the system self-regulates toward a steady-state capital level that reflects the risk load it is actually writing, rather than compounding indefinitely. This is the correct dynamic: in real Lloyd's, capacity grows when the market is genuinely expanding (new insureds, new perils), not simply because retained earnings pile up in an overcapitalised vehicle writing a fixed book.
+
+**New event.** `CapitalDistributed { insurer_id: InsurerId, amount: u64 }`. Logged at `YearEnd` day, after `InsurerEntered`. Counted in a new `Distributions(B)` column in the year table. Add Inv 20: every `CapitalDistributed.amount > 0` (zero distributions are not logged).
 
 ---
 

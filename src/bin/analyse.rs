@@ -264,7 +264,7 @@ fn main() {
         let ap_tp_str = match cr_ewma {
             None => "  n/a ".to_string(),
             Some(ewma_cr) => {
-                let cr_signal = (ewma_cr - 1.0_f64).clamp(-0.50, 0.80);
+                let cr_signal = (ewma_cr - 1.0_f64).clamp(-0.10, 0.80);
                 let factor = 1.0 + cr_signal;  // capacity_uplift removed (Phase A)
                 format!("{:>6.2}", factor)
             }

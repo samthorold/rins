@@ -580,7 +580,7 @@ impl Simulation {
         self.market_ap_tp_factor = match self.cr_ewma {
             None => 1.0,
             Some(ewma_cr) => {
-                let cr_signal = (ewma_cr - 1.0_f64).clamp(-0.50, 0.80);
+                let cr_signal = (ewma_cr - 1.0_f64).clamp(-0.10, 0.80);
                 1.0 + cr_signal
             }
         };

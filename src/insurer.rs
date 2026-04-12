@@ -247,7 +247,7 @@ impl Insurer {
 
         let own_cr_signal = match self.own_cr_ewma {
             None => 0.0,
-            Some(ewma_cr) => (ewma_cr - 1.0).clamp(-0.50, 0.80),
+            Some(ewma_cr) => (ewma_cr - 1.0).clamp(-0.10, 0.80),
         };
 
         // Cat-aggregate utilisation: how full is the book relative to the SCF-based limit?

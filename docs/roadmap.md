@@ -8,15 +8,20 @@ Phases are ordered by expected impact per implementation cost and by logical dep
 
 ## Diagnosis: current structural gaps
 
-The canonical run (seed=42, 8×150M insurers, 100 insureds, 25 analysis years) shows rate-on-line oscillating directionally but collapsing prematurely: a 1.82pp rate spike after the year-16 double-cat collapses fully within 3 years despite year 18 also producing an 85% loss ratio. Capital accumulates monotonically from 1.20B to 1.80B over 25 years. No insolvencies. These are signs of three structural gaps:
+Phases 1, 3, and 4 are complete. The 200-year canonical run (seed=42, 8×150M insurers at start, 100 insureds, 205 total years, 5yr warmup) reveals the following picture: Rate-on-line oscillates between ~11.5–16.0% RoL, ApTp cycles between 0.90 (soft floor) and 1.45 (post year-124 catastrophe cluster), and 11 years exceed 100% LossR — all cat-driven. Capital entry fires correctly: 7 entrants over 200 years, clustering after severe years. No insolvencies despite a 225% LossR year. Total capital grows monotonically from 1.26B (yr6) to 8.01B (yr205). These are signs of four structural gaps:
 
-**Gap 1 — Coordinator-broadcast pricing.** All insurers apply the same `market_ap_tp_factor`, computed from the market-aggregate 3-year CR. A capital-depleted incumbent prices identically to a flush new entrant. There is no mechanism for insurers to hold rates while competitors soften, so the hard market collapses as soon as the aggregate CR signal normalises — regardless of individual capital recovery status.
+**Gap 1 — Coordinator-broadcast pricing.** `[Addressed by Phase 1 — DONE]` Per-insurer capital-state blending is active. Each insurer applies its own `own_ap_tp_factor` weighted by credibility against the market signal. Post-cat rate dispersion (CV 0.07–0.18 by year) confirms competitive pricing is operating.
 
-**Gap 2 — No voluntary exit, and uncapped entry count.** `[Deferred — see Phase 2]` Insurers enter when AP/TP > 1.10 but never leave except via insolvency. Supply is a ratchet: it expands in hard markets and holds in soft ones. The resulting monotonic capital accumulation prevents the soft-market phase of the cycle from developing.
+**Gap 2 — No soft-market supply contraction.** `[Deferred — requires Phase 5 variable line sizes]` Insurers enter when AP/TP > 1.10 but cannot reduce exposure without full exit. Binary exit/re-entry was removed (Phase 2) as unrealistic. Until insurers can express caution by writing a smaller share of each risk rather than exiting entirely, supply contraction is missing from the cycle's lower half. Variable line sizes (Phase 5) are the prerequisite; they make supply contraction continuous rather than binary.
 
-A companion sub-gap on the entry side: the 1-year cooldown constrains the *timing* of entry but not the *total* number of entrants. A sustained 10-year hard market would spawn 10 new insurers on top of the starting 8 — more than doubling capacity — with no declining marginal attractiveness signal. The real market has a finite pool of willing capital with a rising supply curve: the nth entrant requires higher expected returns than the (n-1)th because it draws from progressively less-experienced or higher-hurdle capital sources. The model assumes flat, infinite supply. Both the exit floor and the entry ceiling are needed for a symmetric supply response; fixing only voluntary exit leaves the entry side uncapped.
+A companion sub-gap: the entry count is uncapped. A sustained 10-year hard market spawns 10 new insurers with no declining marginal attractiveness signal. The real market has a rising supply curve for capital: the nth entrant requires higher expected returns than the (n-1)th. Both the exit floor (Phase 5) and a softer entry signal (market saturation) are needed for a symmetric supply response.
 
-**Gap 3 — Inelastic demand.** All 100 insureds buy full coverage at fixed sum_insured. Demand does not respond to price. In the real market, hard-market rate spikes cause buyers to raise retentions, reduce limits, or self-insure, shrinking effective demand and absorbing some of the supply contraction. Soft-market rates attract buyers back in. Without this, new entrant capital can only clear by reducing rates — it has no volume to absorb.
+**Gap 3 — Inelastic demand.** `[Addressed by Phase 4 — DONE]` Heterogeneous reservation prices from `LogNormal(ln(0.25), 0.40)` are active. At 14% RoL ~7.5% of insureds price out; at 21% ~33% price out. The `Reject#` column separates demand-constrained from supply-constrained non-placements. Quantity adjustment (limit reduction, deductible increase) is not yet modelled.
+
+**Gap 4 — Bounded exposure, unbounded capital.** `[Requires Phase 5 + Phase 6]` The insured pool is fixed at 100 × 25M USD = 2.5B total exposure. The theoretical maximum single-year GUL is ~1.25B (100 policies, 50% damage cap). TotalCap has grown to 8.01B by year 205: a 225% LossR year (yr124) reduced capital by only 9.5% and produced no insolvencies. The ratio max_GUL / TotalCap converges to zero over time; crisis dynamics become structurally impossible regardless of cat severity. Two mechanisms address this:
+
+- **Variable line sizes (Phase 5):** the link between capital and exposure becomes proportional rather than binary. A larger capital base writes proportionally larger lines and earns proportionally more premium, but also absorbs proportionally larger losses — keeping the loss-to-capital ratio stable as the market grows.
+- **Capital distributions (Phase 6):** a payout-ratio mechanism drains surplus each year, preventing monotonic accumulation. Models the Lloyd's Names structure in which profits are distributed annually and capital does not compound indefinitely inside the vehicle.
 
 ---
 
@@ -99,9 +104,77 @@ Primary hypothesis — *partially confirmed.* Gini values in the year table are 
 
 ---
 
-## Phase 5 — Lead-follow subscription market
+## Phase 5 — Variable line sizes and panel assembly
 
-**Mechanism.** Full Lloyd's subscription model: broker nominates a lead insurer based on relationship score. Lead quotes in lead mode (no prior quote visible, full individual pricing from Phase 1). Followers observe the lead quote and shade ±Δ based on their own actuarial view and relationship. If total subscribed capacity reaches the required limit, the risk is placed as a panel policy split across multiple insurers.
+**Why this is the next phase.** The 200-year run (Gap 4 above) demonstrated that with fixed line sizes (`line_size = 1`) capital accumulates without bound on a fixed exposure pool. Variable lines are also the prerequisite for soft-market supply contraction (§7.4), post-catastrophe concentration dynamics (phenomenon 7), and the full lead-follow subscription model (Phase 7). They are the single change with the widest downstream unlock.
+
+**Mechanism.** Each insurer's `on_lead_quote_requested` returns a `(premium, line_size)` pair rather than just a premium. `line_size ∈ (0.0, 1.0]` is computed from two factors the insurer already holds:
+
+```
+capacity_line = min(net_line_capacity × capital / sum_insured, 1.0)
+                                          // capital-linked limit — already computed
+
+pricing_line  = clamp((own_ap_tp_factor - floor_factor) / (1.0 - floor_factor), 0.0, 1.0)
+                                          // at floor_factor: write nothing; at 1.0+: write max
+                                          // canonical floor_factor ≈ 0.85
+
+line_size = min(capacity_line, pricing_line)
+```
+
+`pricing_line` is the key addition: it makes the offered line a continuous function of pricing adequacy. When `own_ap_tp_factor` is high (hard market, adequate rates) the insurer writes its full capital-limited line; when it is close to the floor it writes a small line or declines entirely. This is the mechanism by which soft-market supply contraction emerges from individual insurer behaviour rather than from a binary exit decision.
+
+The broker accumulates lines from solicited insurers until the total reaches 1.0, approaching additional insurers (score-ranked) if the initial panel is undersubscribed. A risk that cannot be fully subscribed after exhausting the insurer pool emits `SubmissionDropped` — the same existing event that already triggers renewal.
+
+**Architectural scope.** This is the largest protocol change in the simulation to date. The changes are self-contained within the placement and settlement layers:
+
+| Component | Change |
+|---|---|
+| `LeadQuoteIssued` | Add `line_size: f64` field |
+| `PolicyBound` | Replace `insurer_id: InsurerId` with `panel: Vec<(InsurerId, f64)>` |
+| `ClaimSettled` | Emitted once per panel member; `amount = total_loss × member_line_size` |
+| `Insurer::on_lead_quote_requested` | Compute and return `line_size` |
+| `Broker::on_lead_quote_issued` | Accumulate panel; emit `QuotePresented` when ≥ 1.0 subscribed |
+| `Market::on_asset_damage` | Route claims to all panel members proportionally |
+| `Insurer::on_policy_bound/expired` | Apply `sum_insured × line_size` to exposure tracking |
+
+The day-offset invariants are unchanged. The quoting protocol is unchanged from the insured's perspective (one `QuotePresented` → one `QuoteAccepted` → one `PolicyBound`). The insolvency path is unchanged. The panel-splitting infrastructure is already noted in market-mechanics.md §2.1 as scaffolded.
+
+**Invariants requiring update.** Inv 11 (ClaimSettled insurer matches PolicyBound insurer) becomes: every `ClaimSettled.insurer_id` is a member of the `PolicyBound.panel` for that policy. Add: sum of `ClaimSettled.amount` for a (policy, loss) equals total insured loss, within integer rounding.
+
+**Primary hypothesis.** After a cat event, capital-depleted incumbents reduce their offered line size rather than declining outright. The aggregate market line fraction per risk falls, causing more risks to be undersubscribed. `Dropped#` rises *without* insurers exiting. When pricing recovers, line fractions expand and the `Dropped#` falls — a smooth, insurer-specific supply response rather than a step-change. This produces genuine soft-market floor emergence and closes the lower half of the underwriting cycle.
+
+**Diagnostics.** New column: `AvgLine%` — mean offered line fraction across `LeadQuoteIssued` events per year. In benign years (adequate rates, full capital) this should approach `capacity_line` for most insurers (~30%). Post-cat it should fall toward `pricing_line`. Track the cross-correlation of `AvgLine%` and `Dropped#` over multi-year windows — these should move together, confirming that line contraction is the mechanism driving capacity shortage, not refusals.
+
+---
+
+## Phase 6 — Capital distributions
+
+**Why this is needed.** Gap 4 shows that TotalCap grows 6.3× over 200 years while the exposure ceiling stays fixed at 2.5B. Even variable line sizes (Phase 5) slow but do not stop this: each insurer writes proportionally larger lines and earns proportionally more premium, still retaining most profits. Without a drain, the `max_GUL / TotalCap` ratio converges to zero and crises become structurally impossible at century-scale. Variable lines fix the *relative* exposure-to-capital ratio within a year; distributions fix the *long-run* level.
+
+**Mechanism.** At `YearEnd`, each insurer distributes a fraction of its annual underwriting profit:
+
+```
+year_underwriting_profit = ytd_premium - ytd_claims - ytd_expenses
+distributable = year_underwriting_profit.max(0.0) * payout_ratio    // canonical: 0.70
+capital -= distributable
+// emit CapitalDistributed { insurer_id, amount }
+```
+
+Losses are not called (Names are not compelled to inject capital on a bad year — that is a Lloyd's Names call mechanism, planned separately). Payout applies only in profit years.
+
+**Lloyd's context.** Lloyd's syndicates operate on a 3-year account. When an underwriting year closes, profits crystallise and are distributable to Names. Names choose whether to recommit capital or withdraw. The 70% payout ratio reflects managing agencies retaining 20–30% for solvency buffer and profit commission; Names extract the rest. Historically profitable Lloyd's syndicates have returned capital at payout ratios of 60–80% of underwriting profit in good years.
+
+**Effect on long-run dynamics.** With a 70% payout and typical annual retained earnings of ~5% of capital, the equilibrium capital level stabilises at approximately `initial_capital / (1 - retention_fraction × annual_return_rate)`. The exact level is a calibration outcome, not a designer input. After a severe cat year (no profit → no distribution), capital dips and takes several years to recover, keeping the market in the vulnerability regime where crises bite. After a quiet year, the distribution prevents runaway accumulation. The capital level oscillates around a stable mean rather than drifting upward indefinitely.
+
+**Diagnostic.** New event `CapitalDistributed { insurer_id, amount }`. Add `Distributions(B)` to the year table showing total market capital returned in that year. In a well-calibrated run, TotalCap should plateau rather than grow monotonically: `Distributions(B) ≈ retained_earnings_rate × TotalCap` in benign years. Post-cat years should show near-zero distributions as profits collapse. The capital trajectory should resemble a mean-reverting process with cat-driven excursions downward rather than a monotonic ramp.
+
+---
+
+## Phase 7 — Lead-follow subscription market
+
+*(Previously Phase 5. Variable line sizes, Phase 5, must be operational before this phase is started — follower behaviour is only meaningful when panel subscription is real.)*
+
+**Mechanism.** Full Lloyd's subscription model: broker nominates a lead insurer based on relationship score. Lead quotes in lead mode (no prior quote visible, full individual pricing from Phase 1). Followers observe the lead quote and shade ±Δ based on their own actuarial view and relationship. Panel assembly uses the variable line size machinery from Phase 5; followers can write a smaller line than the lead.
 
 This is the prerequisite for phenomena 3 (Broker-Syndicate Network Herding), 5 (Relationship-Driven Placement Stickiness), and 7 (Post-Catastrophe Market Concentration Surge).
 
@@ -115,10 +188,12 @@ Phases are ordered by two criteria: (a) independent value — does the phase pro
 
 | Phase | Independent value | Unlocks |
 |---|---|---|
-| 1 — Individual pricing | High — rate dispersion and hard-market duration immediately testable | Phase 3, Phase 5 |
-| 2 — Voluntary exit | High — supply-side oscillation testable in isolation | Full cycle confirmation |
-| 3 — Competitive quoting | Medium-High — market share concentration and new-entrant undercutting testable; needs Phase 1 price dispersion | Phase 5 |
-| 4 — Demand elasticity | Medium — cycle modulation and supply/demand separation; most useful once competitive dynamics (Phase 3) visible | Phenomenon 9 |
-| 5 — Lead-follow | Low in isolation — full value requires Phases 1–4 and relationship scores | Phenomena 3, 5, 7 |
+| 1 — Individual pricing | High — rate dispersion and hard-market duration immediately testable | Phase 3, Phase 7 |
+| 2 — Voluntary exit | Removed — see rationale above | — |
+| 3 — Competitive quoting | Medium-High — market share concentration and new-entrant undercutting | Phase 7 |
+| 4 — Demand elasticity | Medium — cycle modulation and supply/demand separation | Phenomenon 9 |
+| 5 — Variable line sizes | **High — prerequisite for all remaining phases; closes soft-market floor** | Phase 6, Phase 7, Phenomena 6, 7 |
+| 6 — Capital distributions | High — prevents long-run crisis immunity; requires Phase 5 panel premium flows | Sustained cycle dynamics |
+| 7 — Lead-follow | Low in isolation — full value requires Phases 1–5 and relationship scores | Phenomena 3, 5, 7 |
 
-Phases 1 and 2 are independent of each other and could be developed in parallel. Phase 3 requires Phase 1's individual pricing to produce competitive dynamics worth routing for. Phase 4 (demand elasticity) is most legible once Phase 3 market-share dynamics are running — price-sensitive buyers exiting interacts with relationship scores to shape who retains the residual pool. Phase 5 requires all prior phases.
+Phase 5 is the critical path item. It is a prerequisite for Phase 6 (capital distributions need realistic premium volumes from variable-line policies), Phase 7 (follower behaviour requires a panel to subscribe into), and for deferred §7.4 voluntary exit mechanics. Phase 6 should begin immediately after Phase 5's panel assembly is validated, as it is a small addition to `handle_year_end` that does not change the quoting or settlement protocol. Phase 7 is the largest remaining phase and should not be started until Phases 5 and 6 are stable and their diagnostic signals are clean.
