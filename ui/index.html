@@ -187,6 +187,7 @@ import { prepPanel2Data, renderPanel2 } from "./js/panel2.js";
 import { prepPanel3Data, renderPanel3 } from "./js/panel3.js";
 import { prepPanel4Data, renderPanel4 } from "./js/panel4.js";
 import { prepPanel5Data, renderPanel5 } from "./js/panel5.js";
+import { prepPanel6Data, renderPanel6 } from "./js/panel6.js";
 
 const bus = new EventBus();
 const registry = new PanelRegistry({
@@ -331,8 +332,25 @@ registry.register({
   },
 });
 
+// Panel 6: Price Dispersion.
+registry.register({
+  slotId: "panel-6",
+  render: ({ db }) => renderPanel6(prepPanel6Data(db)),
+  onYearSelected: (year) => {
+    const slot = document.getElementById("panel-6");
+    if (!slot) return;
+    if (year === null || year === undefined) {
+      slot.classList.remove("has-cursor");
+      slot.removeAttribute("data-cursor");
+    } else {
+      slot.classList.add("has-cursor");
+      slot.setAttribute("data-cursor", `cursor → year ${year}`);
+    }
+  },
+});
+
 for (const slot of [
-  "panel-6", "panel-7", "panel-8",
+  "panel-7", "panel-8",
 ]) {
   installPlaceholderCursor(slot);
 }
