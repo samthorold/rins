@@ -191,6 +191,33 @@ if (chromium) {
     assert.equal((await page.locator("#selected-year").textContent()).trim(), "");
   });
 
+  test("panel 7 renders a sortable table and broadcasts on row click", async (t) => {
+    const server = await startServer();
+    const browser = await chromium.launch();
+    t.after(async () => { await browser.close(); await server.close(); });
+    const page = await browser.newPage();
+    await page.goto(server.url);
+    await page.setInputFiles("#file-input", {
+      name: "fixture.ndjson",
+      mimeType: "application/x-ndjson",
+      buffer: Buffer.from(FIXTURE),
+    });
+    await page.waitForSelector("#panel-7 table.p7-table");
+    const dataRows = await page.locator("#panel-7 tbody tr[data-year]").count();
+    assert.ok(dataRows >= 1);
+
+    // Click a row → year-selected broadcast hits all 8 slots.
+    await page.locator("#panel-7 tbody tr[data-year]").first().click();
+    await page.waitForFunction(
+      () => document.querySelectorAll(".slot.has-cursor").length === 8,
+    );
+    // Clicked row gains the selected class.
+    assert.equal(
+      await page.locator("#panel-7 tbody tr.p7-selected").count(),
+      1,
+    );
+  });
+
   test("drop-zone accepts a real DataTransfer drop", async (t) => {
     const server = await startServer();
     const browser = await chromium.launch();

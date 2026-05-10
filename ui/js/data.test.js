@@ -198,6 +198,55 @@ test("YearStats gini > 0 with concentration", () => {
   assert.ok(y2.gini > 0);
 });
 
+test("YearStats insurer_count tracks active insurers at year end", () => {
+  const db = parseNDJSONText(buildFixture());
+  const [y1, y2, y3] = db.getYearStats();
+  assert.equal(y1.insurer_count, 2);
+  assert.equal(y2.insurer_count, 2);
+  // Insurer 2 went insolvent in y3.
+  assert.equal(y3.insurer_count, 1);
+});
+
+test("YearStats total_assets sums unique-insured CoverageRequested per year", () => {
+  // Build a fixture that includes CoverageRequested.
+  const lines = [];
+  const push = (day, event) => lines.push(JSON.stringify({ day, event }));
+  push(0, { SimulationStart: { year_start: 1, warmup_years: 0, analysis_years: 2 } });
+  push(0, { InsurerEntered: { insurer_id: 1, initial_capital: 1000 } });
+  push(0, { YearStart: { year: 1 } });
+  push(1, { CoverageRequested: { insured_id: 1, risk: { sum_insured: 500, territory: "US-NE", perils_covered: ["Attritional"] } } });
+  push(1, { CoverageRequested: { insured_id: 2, risk: { sum_insured: 700, territory: "US-Gulf", perils_covered: ["Attritional"] } } });
+  // Duplicate request for insured 1 in same year — should not double count.
+  push(50, { CoverageRequested: { insured_id: 1, risk: { sum_insured: 500, territory: "US-NE", perils_covered: ["Attritional"] } } });
+  push(359, { YearEnd: { year: 1 } });
+  push(360, { YearStart: { year: 2 } });
+  push(361, { CoverageRequested: { insured_id: 1, risk: { sum_insured: 500, territory: "US-NE", perils_covered: ["Attritional"] } } });
+  push(719, { YearEnd: { year: 2 } });
+  const db = parseNDJSONText(lines.join("\n"));
+  const [y1, y2] = db.getYearStats();
+  assert.equal(y1.total_assets, 1200);
+  assert.equal(y2.total_assets, 500);
+});
+
+test("YearStats sensitivity means snapshot active insurers", () => {
+  const lines = [];
+  const push = (day, event) => lines.push(JSON.stringify({ day, event }));
+  push(0, { SimulationStart: { year_start: 1, warmup_years: 0, analysis_years: 2 } });
+  push(0, { InsurerEntered: { insurer_id: 1, initial_capital: 1000, cr_sensitivity: 1.0, capacity_sensitivity: 0.2, market_weight_floor: 0.3 } });
+  push(0, { InsurerEntered: { insurer_id: 2, initial_capital: 1000, cr_sensitivity: 2.0, capacity_sensitivity: 0.4, market_weight_floor: 0.5 } });
+  push(0, { YearStart: { year: 1 } });
+  push(359, { YearEnd: { year: 1 } });
+  push(360, { YearStart: { year: 2 } });
+  push(400, { InsurerInsolvent: { insurer_id: 2 } });
+  push(719, { YearEnd: { year: 2 } });
+  const db = parseNDJSONText(lines.join("\n"));
+  const [y1, y2] = db.getYearStats();
+  assert.ok(Math.abs(y1.cr_sens_mean - 1.5) < 1e-9);
+  assert.ok(Math.abs(y1.cap_sens_mean - 0.3) < 1e-9);
+  assert.ok(Math.abs(y2.cr_sens_mean - 1.0) < 1e-9);
+  assert.ok(Math.abs(y2.cap_sens_mean - 0.2) < 1e-9);
+});
+
 // ---------- Real events.ndjson smoke test ----------
 
 test("loads a real events.ndjson if present (smoke)", () => {

@@ -129,6 +129,7 @@ class Database {
         year: y,
         bound_premium: 0,
         sum_insured: 0,
+        total_assets: 0,
         claims: 0,
         attr_gul: 0,
         cat_gul: 0,
@@ -138,7 +139,11 @@ class Database {
         entrants: 0,
         dropped: 0,
         gini: 0,
+        insurer_count: 0,
+        cr_sens_mean: 0,
+        cap_sens_mean: 0,
         _policies_by_insurer: new Map(),
+        _assets_seen: new Set(),
       });
     }
 
@@ -146,6 +151,8 @@ class Database {
     const lastCapital = new Map();
     let runningCapital = 0;
     const activeInsurers = new Set();
+    // Per-insurer sensitivity parameters from InsurerEntered.
+    const sensByInsurer = new Map();
 
     for (const e of this.events) {
       const s = stats.get(e.year);
@@ -193,6 +200,19 @@ class Database {
               lastCapital.set(id, cap);
               runningCapital += cap;
             }
+            sensByInsurer.set(id, {
+              cr: e.data.cr_sensitivity ?? 0,
+              cap: e.data.capacity_sensitivity ?? 0,
+            });
+          }
+          break;
+        }
+        case "CoverageRequested": {
+          const insuredId = e.data.insured_id;
+          const si = e.data.risk?.sum_insured ?? 0;
+          if (typeof insuredId === "number" && !s._assets_seen.has(insuredId)) {
+            s._assets_seen.add(insuredId);
+            s.total_assets += si;
           }
           break;
         }
@@ -215,6 +235,21 @@ class Database {
           // including insurers that bound zero policies.
           s.total_capital = runningCapital;
           s._active_snapshot = new Set(activeInsurers);
+          s.insurer_count = activeInsurers.size;
+          if (activeInsurers.size > 0) {
+            let crSum = 0, capSum = 0, n = 0;
+            for (const id of activeInsurers) {
+              const sens = sensByInsurer.get(id);
+              if (!sens) continue;
+              crSum += sens.cr;
+              capSum += sens.cap;
+              n += 1;
+            }
+            if (n > 0) {
+              s.cr_sens_mean = crSum / n;
+              s.cap_sens_mean = capSum / n;
+            }
+          }
           break;
         }
       }
@@ -246,6 +281,7 @@ class Database {
       s.gini = giniCoefficient(values);
       delete s._policies_by_insurer;
       delete s._active_snapshot;
+      delete s._assets_seen;
     }
 
     // Second pass: for years where total_capital was set by YearEnd, lastSeen
