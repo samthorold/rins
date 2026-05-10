@@ -70,6 +70,10 @@ pub struct InsurerConfig {
     /// 1.0 = distribute as soon as capital returns to initial (original behaviour, tests).
     /// 1.5 = canonical — insurer must accumulate a 50% surplus buffer before paying Names.
     pub distribution_floor_multiple: f64,
+    /// Maximum fraction the lead writes as its own stamp (Lloyd's leads: 10–25%).
+    /// The lead's capacity_line is capped at this value before the pricing_line is applied.
+    /// Canonical: 0.25. Use 1.0 in tests to preserve full-line (solo-writer) behaviour.
+    pub leader_participation_cap: f64,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -183,6 +187,7 @@ impl SimulationConfig {
                     floor_factor: 0.85,
                     payout_ratio: 0.70,
                     distribution_floor_multiple: 1.5,
+                    leader_participation_cap: 0.25,
                 })
                 .collect(),
             n_insureds: 100,

@@ -110,6 +110,7 @@ impl Simulation {
                     c.floor_factor,
                     c.payout_ratio,
                     c.distribution_floor_multiple,
+                    c.leader_participation_cap,
                 )
             })
             .collect();
@@ -312,10 +313,31 @@ impl Simulation {
                 }
             }
 
-            Event::LeadQuoteIssued { submission_id, insured_id, insurer_id, atp: _, premium, line_size, cat_exposure_at_quote: _ } => {
+            Event::LeadQuoteIssued { submission_id, insured_id, insurer_id, atp, premium, line_size, cat_exposure_at_quote: _ } => {
                 let events =
-                    self.broker.on_lead_quote_issued(day, submission_id, insured_id, insurer_id, premium, line_size);
+                    self.broker.on_lead_quote_issued(day, submission_id, insured_id, insurer_id, atp, premium, line_size);
                 for (d, e) in events {
+                    self.schedule(d, e);
+                }
+            }
+
+            Event::FollowerQuoteRequested { submission_id, insured_id, insurer_id, ref risk, lead_premium, lead_atp } => {
+                let risk = risk.clone();
+                if let Some(ins) = self.insurers.iter().find(|i| i.id == insurer_id) {
+                    for (d, e) in ins.on_follower_quote_requested(day, submission_id, insured_id, &risk, lead_premium, lead_atp) {
+                        self.schedule(d, e);
+                    }
+                }
+            }
+
+            Event::FollowerQuoteIssued { submission_id, insurer_id, line_size, .. } => {
+                for (d, e) in self.broker.on_follower_quote_issued(day, submission_id, insurer_id, line_size) {
+                    self.schedule(d, e);
+                }
+            }
+
+            Event::FollowerQuoteDeclined { submission_id, insurer_id, .. } => {
+                for (d, e) in self.broker.on_follower_quote_declined(day, submission_id, insurer_id) {
                     self.schedule(d, e);
                 }
             }
@@ -669,11 +691,13 @@ impl Simulation {
         let payout_ratio = self.config.insurers.first().map(|t| t.payout_ratio).unwrap_or(0.70);
         let distribution_floor_multiple = self.config.insurers.first()
             .map(|t| t.distribution_floor_multiple).unwrap_or(1.5);
+        let leader_participation_cap = self.config.insurers.first()
+            .map(|t| t.leader_participation_cap).unwrap_or(0.25);
         let insurer = Insurer::new(
             id, initial_capital, attritional_elf, cat_elf, target_loss_ratio,
             ewma_credibility, expense_ratio, profit_loading, net_line_capacity, scf, pml_frac,
             depletion_sensitivity, capacity_sensitivity, cr_sensitivity, market_weight_floor,
-            floor_factor, payout_ratio, distribution_floor_multiple,
+            floor_factor, payout_ratio, distribution_floor_multiple, leader_participation_cap,
         );
         let initial_capital_u64 = initial_capital.max(0) as u64;
 
@@ -724,6 +748,7 @@ mod tests {
                 floor_factor: 0.0,
                 payout_ratio: 0.0,
                 distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
             }],
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -1010,9 +1035,10 @@ mod tests {
     // ── Competitive quoting ───────────────────────────────────────────────────
 
     #[test]
-    fn all_insurers_solicited_per_submission() {
-        // 3 identical insurers, qps=None (all). Every submission solicits all 3.
-        // All 3 insurer IDs must appear in LeadQuoteIssued events.
+    fn exactly_one_lead_quote_requested_per_submission() {
+        // 3 identical insurers, qps=None (all 3 are candidates).
+        // Under lead-follow architecture, only 1 LeadQuoteRequested is emitted per submission.
+        // Total LQR count must equal the number of submissions (CoverageRequested count).
         let mut config = minimal_config(1, 6);
         config.insurers = (1..=3)
             .map(|i| InsurerConfig {
@@ -1034,25 +1060,28 @@ mod tests {
                 floor_factor: 0.0,
                 payout_ratio: 0.0,
                 distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
             })
             .collect();
         let sim = run_sim(config);
 
-        let insurer_ids_in_issued: std::collections::HashSet<u64> = sim
+        let n_coverage_requested = sim
             .log
             .iter()
-            .filter_map(|e| match &e.event {
-                Event::LeadQuoteIssued { insurer_id, .. } => Some(insurer_id.0),
-                _ => None,
-            })
-            .collect();
+            .filter(|e| matches!(e.event, Event::CoverageRequested { .. }))
+            .count();
+        let n_lead_quote_requested = sim
+            .log
+            .iter()
+            .filter(|e| matches!(e.event, Event::LeadQuoteRequested { .. }))
+            .count();
 
-        for id in 1u64..=3 {
-            assert!(
-                insurer_ids_in_issued.contains(&id),
-                "insurer {id} must appear in LeadQuoteIssued events (all are solicited per submission)"
-            );
-        }
+        // Each CoverageRequested produces exactly one initial LeadQuoteRequested.
+        // (Retries add more, but with healthy insurers there are none.)
+        assert_eq!(
+            n_lead_quote_requested, n_coverage_requested,
+            "each submission must produce exactly one LeadQuoteRequested (got {n_lead_quote_requested} LQR for {n_coverage_requested} CR)"
+        );
     }
 
     // ── Renewal ───────────────────────────────────────────────────────────────
@@ -1144,6 +1173,7 @@ mod tests {
             floor_factor: 0.0,
             payout_ratio: 0.0,
                 distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
         }];
         let sim = run_sim(config);
 
@@ -1337,6 +1367,7 @@ mod tests {
                 floor_factor: 0.0,
                 payout_ratio: 0.0,
                 distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
             },
             InsurerConfig {
                 id: InsurerId(2),
@@ -1357,6 +1388,7 @@ mod tests {
                 floor_factor: 0.0,
                 payout_ratio: 0.0,
                 distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
             },
         ];
 
@@ -1471,6 +1503,7 @@ mod tests {
                 0.0,            // floor_factor=0 (test: always line_size=1.0)
                 0.0,            // payout_ratio=0 (test: no distributions)
                 1.0,            // distribution_floor_multiple=1.0 (test: no effect)
+                1.0,            // leader_participation_cap=1.0 (test: no cap)
             )
         };
 
@@ -1547,6 +1580,7 @@ mod tests {
                 floor_factor: 0.0,
                 payout_ratio: 0.0,
                 distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
             }],
             n_insureds: 5,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },

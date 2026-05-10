@@ -36,6 +36,9 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Outward reinsurance | TBD | — |
 | Persistent capital (premiums accumulate, claims erode, no annual reset) | ACTIVE | `src/insurer.rs` |
 | Central Fund / managed runoff | TBD | — |
+| Investment income on reserves and capital | PLANNED — §4.6 | — |
+| Reinstatement premiums | PLANNED — §2.1 | — |
+| Reserve development / IBNR | PLANNED — §6.1 | — |
 
 ---
 
@@ -109,6 +112,8 @@ The insured retains losses below attachment (the deductible) and losses above at
 **Current simplification:** all policies use full-value coverage — `attachment = 0`, `limit = sum_insured`. Layer mechanics are fully implemented in `src/market.rs::on_insured_loss`; the attachment/limit parameters exist but are set to this degenerate case in canonical config.
 
 **Panel splitting:** the net insured loss is pro-rated by each syndicate's share (in basis points). Each panel entry receives a separate `ClaimSettled` event. The sum of all `ClaimSettled` amounts equals the net insured loss, up to integer rounding no larger than the panel size. **[PARTIAL — current model has a single insurer per policy; panel splitting infrastructure exists but panel size = 1.]**
+
+**Reinstatement premiums `[PLANNED]`:** after a cat event triggers a claim that exhausts a policy layer, a **reinstatement premium** restores the limit for the remainder of the policy year. In the Lloyd's market the reinstatement premium is typically 100% of the original layer premium (pro-rated for unexpired term), paid immediately by the insured. This creates two effects: (1) additional premium income for the insurer in the same year as the loss, partially offsetting the net capital impact; (2) automatic within-year rate hardening — a second cat event in the same year costs the insured an additional reinstatement premium on top of the original, creating a non-linear cost penalty for cat frequency that is absent from annual flat premiums. Without reinstatement premiums, the simulation understates post-cat income and the within-year deterrent effect of multiple events. This mechanism is required before phenomenon §1 (Underwriting Cycle) can be fully calibrated against Lloyd's rate-on-line data, since Lloyd's quoted ROL includes the reinstatement cost. *Not yet implemented; no new events required — a `ReinstatementPremiumCharged` event or a credit to `ClaimSettled` would suffice.*
 
 ### §2.2 Annual policy terms and expiry `[ACTIVE]`
 
@@ -465,6 +470,33 @@ Replace the coordinator-broadcast `market_ap_tp_factor` with per-insurer inferen
 
 ---
 
+## 4.6 Investment Income `[PLANNED]`
+
+Lloyd's syndicates hold two pools of invested assets: the **Premium Trust Fund (PTF)** (premiums collected but not yet paid out as claims or returned to Names) and the **Funds at Lloyd's (FAL)** (member capital lodged as security). Both earn investment returns that flow through to syndicate profitability and affect the underwriting cycle.
+
+**Why investment income matters for cycle dynamics.** Venezian (1985) and Cummins & Outreville (1987) identify the investment income channel as a co-driver of insurance cycle period and amplitude. When investment yields are high (e.g. 2022–2024: 4–5%), syndicates can tolerate combined ratios above 100% while still earning adequate total returns. The underwriting loss is subsidised by investment income, softening the hard-market signal and reducing the urgency of rate restoration. When yields are near zero (2010–2021), syndicates must earn the full cost of capital from underwriting profit alone, making hard markets sharper and longer. Without investment income, the simulation's cycle is driven purely by capital depletion via losses, producing shorter hard markets than the empirical record (1–2 years observed vs. 5–10 years empirical in Lloyd's). This is the primary structural explanation for the hard-market duration gap in the current run.
+
+**Mechanism.** At `YearEnd`, each insurer credits investment return on its total capital balance:
+
+```
+investment_income = capital × investment_return_rate
+capital += investment_income
+```
+
+`investment_return_rate` can be:
+- **Deterministic scenario:** a constant or time-series representing a macroeconomic regime (e.g. 3% throughout, or a schedule declining from 5% in year 1 to 0% in year 50 and back to 4% by year 100).
+- **Stochastic:** a mean-reverting AR(1) process around a long-run average (e.g. mean 3%, σ 1.5%, half-life 5 years). The stochastic version would allow the simulation to test whether interest rate cycles couple with underwriting cycles to produce the historically observed 5–10 year period.
+
+**Calibration anchor.** Lloyd's 2024 investment return on assets: approximately 4.5% on the total balance sheet. At the canonical TotalCap of ~3B USD, a 4.5% return generates ~135M USD per year in investment income — comparable to total annual premium income — and would materially dampen the effective combined ratio. The inclusion of investment income is therefore not a minor adjustment but a structurally significant driver of when the market recognises a capital crisis.
+
+**Connection to capital distributions (§7.5).** Investment income changes the composition of `year_profit`: some fraction now comes from investment rather than underwriting. Distributions should be applied to total profit (underwriting + investment), not just underwriting profit. In the current implementation `year_profit = net_written − total_claims`, which excludes investment income. When investment income is added, a separate `investment_income` term must be included before computing `distributable`.
+
+**Connection to §7.1 (Syndicate entry) and the rising supply curve.** Investment income makes the entry-attractiveness threshold `market_ap_tp_factor > 1.10` less reliable as a cycle signal: in a high-yield environment, syndicates are profitable at AP/TP ratios below 1.0, so the threshold fires correctly only if calibrated relative to the prevailing yield. A more complete entry signal would compare total return (underwriting + investment) against cost of capital, not just the AP/TP ratio.
+
+*Not yet implemented. Requires: `investment_return_rate` field in `InsurerConfig` (or a market-level `yield_curve` in `SimulationConfig`); credit at `YearEnd` before computing distributions; stochastic scenario optional.*
+
+---
+
 ## 5. Placement `[PARTIAL]`
 
 Lloyd's operates a subscription market: a lead syndicate sets terms, and followers subscribe on those terms (or decline). The quoting round is orchestrated by the coordinator.
@@ -510,6 +542,15 @@ LossEvent (cat) or attritional schedule
 Each loss updates the syndicate's accumulated loss experience and revises its actuarial estimate — the primary input to §4.1.
 
 Syndicates learn from the full loss on a policy, not their proportional share. All syndicates on the same risk therefore converge toward the same long-run estimate regardless of line size. This is a structural rule.
+
+**Reserve development / IBNR `[PLANNED]`.** The current model settles all claims immediately at `ClaimSettled`, with no reserving lag. Real Lloyd's syndicates operate a 3-year account: an underwriting year is kept open for three years to allow IBNR (Incurred But Not Reported) claims to emerge before the year is reinsured-to-close. Reserve development — the difference between the ultimate loss and the initially held reserve — creates a deferred capital effect:
+
+- **Adverse development** (reserve strengthening): the syndicate books additional capital charges 12–24 months after the loss year. This is a secondary, lagged capital shock that sustains hard markets beyond the year of the triggering event. After Katrina (2005), industry reserves were strengthened through 2008 as loss creep accumulated from business interruption, demand surge, and litigation.
+- **Favourable development** (reserve release): in benign years, releasing excess reserves inflates reported profits and masks deteriorating underwriting quality. When releases exhaust, the true combined ratio steps up abruptly — a hardening trigger with no new catastrophe. The Lloyd's 1988–1992 crisis and the US P&C soft-market collapse in 2001 were both amplified by prior-year reserve deficiency recognition.
+
+Reserve development is a required mechanism before phenomenon §13 can emerge, and it is a contributing cause of the hard-market duration gap identified in phenomenon §1.
+
+*Design: at `PolicyBound`, insurer records an initial IBNR reserve. Annual development applies loss development factors (LDF) to revise the reserve. The difference from the prior-year estimate is booked as a capital adjustment (`ReserveDevelopment` event). At year 3, the remaining reserve is crystallised and any shortfall triggers a capital debit. LDFs would be calibrated from historical chain-ladder data for the relevant line.*
 
 ### §6.2 Loss settlement invariants `[ACTIVE]`
 
@@ -574,6 +615,8 @@ After each annual review (`handle_year_end`), the coordinator checks whether the
 **Relationship-building lag:** a new entrant starts with no broker relationship scores and enters the round-robin at the back. This second lag means new capacity contributes incrementally and reaches full participation only after 2–3 years of active placement. The combination of the two lags — formation + relationship-building — sustains elevated rates for several years after the shock, which is the empirically observed hard-market duration.
 
 **Implementation:** `src/simulation.rs::handle_year_end` → `spawn_new_insurer`. 1-in-3 new entrants are aggressive (optimistic internal cat model; `pml_damage_fraction_override = Some(0.126)`). `InsurerEntered { insurer_id, initial_capital, is_aggressive }` is logged directly. Voluntary exit during soft markets (§7.4) would close the lower tail of the cycle.
+
+**Structural gap — flat supply curve for capital `[PLANNED]`.** The current entry trigger (`market_ap_tp_factor > 1.10`) treats every hard-market year identically: one new entrant per year, no declining marginal attractiveness. In practice, capital formation has an upward-sloping supply curve: the easiest capital (committed PE funds, existing names topping up, established managing agents launching new syndicates) deploys first at moderate expected returns; additional capital requires progressively higher expected returns to attract. After the most severe events (post-Katrina 2006; post-Ian 2023), capacity from new sources continued forming for 2–3 years as the return signal remained elevated — but each successive class entered at lower expected returns as competition absorbed the opportunity. The flat trigger in the simulation allows too-rapid capacity restoration, collapsing hard markets within 1–2 years rather than 4–7 years. A rising supply curve would be implemented as a declining `market_ap_tp_factor` threshold per successive entrant within a hard-market episode, or equivalently as an entry capital requirement that rises with incumbent capacity. This is a prerequisite for matching the empirical hard-market duration observed in the Lloyd's record.
 
 ### §7.2 Exit via insolvency `[ACTIVE (PARTIAL)]`
 
@@ -651,6 +694,8 @@ Loss years produce no cash call in the base model — Names are not automaticall
 **Effect on dynamics.** With a 70% payout and the floor constraint, TotalCap mean-reverts rather than trending upward: benign years distribute surplus above initial_capital, keeping the market near the vulnerability regime. After a cat drawdown (capital below floor → no distribution, profits retained), insurers rebuild over several benign years before distributions resume. The floor prevents the distribution mechanism from accelerating a death spiral when capital is already impaired.
 
 **Event.** `CapitalDistributed { insurer_id: InsurerId, amount: u64, remaining_capital: u64 }`. Logged at `YearEnd` day. Counted in `Distrib(B)` column in the year table. Inv 20: every `CapitalDistributed.amount > 0` (zero distributions are not logged).
+
+**Coupling to investment income (§4.6) `[PLANNED]`.** The current `year_profit = net_written − total_claims` excludes investment income. When §4.6 is implemented, investment income must be included before computing `distributable`: `year_profit = net_written − total_claims + investment_income`. Without this, distributions are understated in high-yield environments and overstated in zero-yield environments. In a high-yield scenario, distributing only the underwriting profit leaves investment income accumulating inside the vehicle, partially replicating the pre-Phase-6 capital ratchet. The correct definition of distributable profit is total economic return — underwriting plus investment — less the retained fraction needed for solvency buffer.
 
 ---
 

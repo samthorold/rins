@@ -24,6 +24,8 @@ pub enum DeclineReason {
     MaxLineSizeExceeded,
     MaxCatAggregateBreached,
     Insolvent,
+    /// Follower declines because the lead's premium is below the follower's own Technical Premium.
+    RateBelowTP,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,6 +66,35 @@ pub enum Event {
         /// Fraction of the risk this insurer is willing to write [0.0, 1.0].
         /// Derived from capital headroom and pricing adequacy; see Phase 5 formula.
         line_size: f64,
+    },
+    /// Broker solicits a follower insurer to participate at the lead's rate.
+    /// Emitted same day as `LeadQuoteIssued` for each follower in the candidate list.
+    FollowerQuoteRequested {
+        submission_id: SubmissionId,
+        insured_id: InsuredId,
+        /// The follower being solicited.
+        insurer_id: InsurerId,
+        /// Needed for follower capacity checks (line and cat aggregate limits).
+        risk: Risk,
+        /// The premium the follower would write at if it accepts (= lead's quoted premium).
+        lead_premium: u64,
+        /// Lead's actuarial technical price, carried for audit and Phase D observability.
+        lead_atp: u64,
+    },
+    /// Follower insurer has agreed to participate at the lead's rate.
+    FollowerQuoteIssued {
+        submission_id: SubmissionId,
+        insured_id: InsuredId,
+        insurer_id: InsurerId,
+        /// Capacity-only line size; not constrained by leader_participation_cap.
+        line_size: f64,
+    },
+    /// Follower insurer declined participation.
+    FollowerQuoteDeclined {
+        submission_id: SubmissionId,
+        insured_id: InsuredId,
+        insurer_id: InsurerId,
+        reason: DeclineReason,
     },
     /// Broker presents the assembled panel quote to the insured.
     QuotePresented {
@@ -351,6 +382,80 @@ mod tests {
             assert!(v.get("day").is_some(), "missing 'day' key in: {line}");
             assert!(v.get("event").is_some(), "missing 'event' key in: {line}");
         }
+    }
+
+    #[test]
+    fn decline_reason_rate_below_tp_serializes() {
+        let ev = SimEvent {
+            day: Day(1),
+            event: Event::LeadQuoteDeclined {
+                submission_id: SubmissionId(0),
+                insured_id: InsuredId(1),
+                insurer_id: InsurerId(1),
+                reason: DeclineReason::RateBelowTP,
+            },
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: SimEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        assert!(json.contains("RateBelowTP"));
+    }
+
+    #[test]
+    fn follower_quote_requested_serializes() {
+        let ev = SimEvent {
+            day: Day(1),
+            event: Event::FollowerQuoteRequested {
+                submission_id: SubmissionId(0),
+                insured_id: InsuredId(1),
+                insurer_id: InsurerId(2),
+                risk: Risk {
+                    sum_insured: 1_000_000,
+                    territory: "US-SE".to_string(),
+                    perils_covered: vec![Peril::WindstormAtlantic],
+                },
+                lead_premium: 50_000,
+                lead_atp: 48_000,
+            },
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: SimEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        assert!(json.contains("FollowerQuoteRequested"));
+    }
+
+    #[test]
+    fn follower_quote_issued_serializes() {
+        let ev = SimEvent {
+            day: Day(1),
+            event: Event::FollowerQuoteIssued {
+                submission_id: SubmissionId(0),
+                insured_id: InsuredId(1),
+                insurer_id: InsurerId(2),
+                line_size: 0.75,
+            },
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: SimEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        assert!(json.contains("FollowerQuoteIssued"));
+    }
+
+    #[test]
+    fn follower_quote_declined_serializes() {
+        let ev = SimEvent {
+            day: Day(1),
+            event: Event::FollowerQuoteDeclined {
+                submission_id: SubmissionId(0),
+                insured_id: InsuredId(1),
+                insurer_id: InsurerId(2),
+                reason: DeclineReason::RateBelowTP,
+            },
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: SimEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        assert!(json.contains("FollowerQuoteDeclined"));
     }
 
     #[test]

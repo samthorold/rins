@@ -374,7 +374,7 @@ pub fn analyse(
     let mut insurer_sensitivity: HashMap<InsurerId, (f64, f64, f64)> = HashMap::new();
     // Active policy set for policies_in_force snapshot at year-end.
     let mut active_policies: HashSet<PolicyId> = HashSet::new();
-    // LeadQuoteIssued line_size accumulator per year: (sum, count).
+    // Line size accumulator per year (LeadQuoteIssued + FollowerQuoteIssued): (sum, count).
     let mut line_size_by_year: HashMap<u32, (f64, u64)> = HashMap::new();
     // Full-exposure premium tracking: premium and bound-year per policy.
     // At PolicyExpired, if expiry year != bound year, the premium counts as carry-over
@@ -474,7 +474,7 @@ pub fn analyse(
                 // Keep last_capital current so YearEnd total is accurate even without ClaimSettled.
                 last_capital.insert(*insurer_id, *capital);
             }
-            Event::LeadQuoteIssued { line_size, .. } => {
+            Event::LeadQuoteIssued { line_size, .. } | Event::FollowerQuoteIssued { line_size, .. } => {
                 let entry = line_size_by_year.entry(year).or_insert((0.0, 0));
                 entry.0 += line_size;
                 entry.1 += 1;
@@ -691,6 +691,15 @@ pub enum IntegrityViolation {
     LeadQuoteOrphanResponse { submission_id: u64, insurer_id: u64, day: u64, kind: String },
     /// Inv 20 — CapitalDistributed.amount must be > 0; zero amounts indicate a logic error.
     DistributionAmountZero { insurer_id: u64, day: u64 },
+    /// Inv 21 — FollowerQuoteRequested has no prior LeadQuoteIssued for the same submission.
+    FollowerRequestWithoutLeadIssued { submission_id: u64, insurer_id: u64, day: u64 },
+    /// Inv 22 — (submission_id, insurer_id) received more than one follower response.
+    FollowerDuplicateResponse { submission_id: u64, insurer_id: u64, count: u32 },
+    /// Inv 23 — FollowerQuoteIssued or FollowerQuoteDeclined without a prior FollowerQuoteRequested.
+    FollowerOrphanResponse { submission_id: u64, insurer_id: u64, day: u64, kind: String },
+    /// Inv 24 — Same insurer appears in both LeadQuoteRequested and FollowerQuoteRequested
+    /// for the same submission.
+    InsurerBothLeadAndFollower { submission_id: u64, insurer_id: u64 },
 }
 
 impl std::fmt::Display for IntegrityViolation {
@@ -735,6 +744,18 @@ impl std::fmt::Display for IntegrityViolation {
             Self::DistributionAmountZero { insurer_id, day } => {
                 write!(f, "DistributionAmountZero insurer={insurer_id} day={day}")
             }
+            Self::FollowerRequestWithoutLeadIssued { submission_id, insurer_id, day } => {
+                write!(f, "FollowerRequestWithoutLeadIssued sub={submission_id} insurer={insurer_id} day={day}")
+            }
+            Self::FollowerDuplicateResponse { submission_id, insurer_id, count } => {
+                write!(f, "FollowerDuplicateResponse sub={submission_id} insurer={insurer_id} count={count}")
+            }
+            Self::FollowerOrphanResponse { submission_id, insurer_id, day, kind } => {
+                write!(f, "FollowerOrphanResponse sub={submission_id} insurer={insurer_id} day={day} kind={kind}")
+            }
+            Self::InsurerBothLeadAndFollower { submission_id, insurer_id } => {
+                write!(f, "InsurerBothLeadAndFollower sub={submission_id} insurer={insurer_id}")
+            }
         }
     }
 }
@@ -760,6 +781,12 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
     let mut lead_requested: HashMap<(SubmissionId, InsurerId), u64> = HashMap::new();
     let mut lead_responses: HashMap<(SubmissionId, InsurerId), u32> = HashMap::new();
     let mut orphan_responses: Vec<(SubmissionId, InsurerId, u64, String)> = Vec::new();
+    // Follower flow tracking for Inv 21–24.
+    let mut sub_lead_issued: HashSet<SubmissionId> = HashSet::new();
+    let mut follower_requested: HashMap<(SubmissionId, InsurerId), u64> = HashMap::new();
+    let mut follower_responses: HashMap<(SubmissionId, InsurerId), u32> = HashMap::new();
+    let mut follower_orphan_responses: Vec<(SubmissionId, InsurerId, u64, String)> = Vec::new();
+    let mut sub_lead_insurer: HashMap<SubmissionId, InsurerId> = HashMap::new();
 
     for ev in events {
         let day = ev.day.0;
@@ -800,18 +827,35 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
             }
             Event::LeadQuoteRequested { submission_id, insurer_id, .. } => {
                 lead_requested.entry((*submission_id, *insurer_id)).or_insert(day);
+                sub_lead_insurer.entry(*submission_id).or_insert(*insurer_id);
             }
             Event::LeadQuoteIssued { submission_id, insurer_id, .. } => {
                 if !lead_requested.contains_key(&(*submission_id, *insurer_id)) {
                     orphan_responses.push((*submission_id, *insurer_id, day, "LeadQuoteIssued".to_string()));
                 }
                 *lead_responses.entry((*submission_id, *insurer_id)).or_insert(0) += 1;
+                sub_lead_issued.insert(*submission_id);
             }
             Event::LeadQuoteDeclined { submission_id, insurer_id, .. } => {
                 if !lead_requested.contains_key(&(*submission_id, *insurer_id)) {
                     orphan_responses.push((*submission_id, *insurer_id, day, "LeadQuoteDeclined".to_string()));
                 }
                 *lead_responses.entry((*submission_id, *insurer_id)).or_insert(0) += 1;
+            }
+            Event::FollowerQuoteRequested { submission_id, insurer_id, .. } => {
+                follower_requested.entry((*submission_id, *insurer_id)).or_insert(day);
+            }
+            Event::FollowerQuoteIssued { submission_id, insurer_id, .. } => {
+                if !follower_requested.contains_key(&(*submission_id, *insurer_id)) {
+                    follower_orphan_responses.push((*submission_id, *insurer_id, day, "FollowerQuoteIssued".to_string()));
+                }
+                *follower_responses.entry((*submission_id, *insurer_id)).or_insert(0) += 1;
+            }
+            Event::FollowerQuoteDeclined { submission_id, insurer_id, .. } => {
+                if !follower_requested.contains_key(&(*submission_id, *insurer_id)) {
+                    follower_orphan_responses.push((*submission_id, *insurer_id, day, "FollowerQuoteDeclined".to_string()));
+                }
+                *follower_responses.entry((*submission_id, *insurer_id)).or_insert(0) += 1;
             }
             _ => {}
         }
@@ -978,6 +1022,50 @@ pub fn verify_integrity(events: &[SimEvent]) -> Vec<IntegrityViolation> {
                     day: ev.day.0,
                 });
             }
+        }
+    }
+
+    // ── Follower Flow (4) ─────────────────────────────────────────────────────
+
+    // Inv 21: every FollowerQuoteRequested must have a prior LeadQuoteIssued for same sub.
+    for (&(sub_id, ins_id), &req_day) in &follower_requested {
+        if !sub_lead_issued.contains(&sub_id) {
+            violations.push(IntegrityViolation::FollowerRequestWithoutLeadIssued {
+                submission_id: sub_id.0,
+                insurer_id: ins_id.0,
+                day: req_day,
+            });
+        }
+    }
+
+    // Inv 22: at most one follower response per (submission, insurer).
+    for (&(sub_id, ins_id), &count) in &follower_responses {
+        if count > 1 {
+            violations.push(IntegrityViolation::FollowerDuplicateResponse {
+                submission_id: sub_id.0,
+                insurer_id: ins_id.0,
+                count,
+            });
+        }
+    }
+
+    // Inv 23: every follower response needs a prior FollowerQuoteRequested.
+    for (sub_id, ins_id, orphan_day, kind) in follower_orphan_responses {
+        violations.push(IntegrityViolation::FollowerOrphanResponse {
+            submission_id: sub_id.0,
+            insurer_id: ins_id.0,
+            day: orphan_day,
+            kind,
+        });
+    }
+
+    // Inv 24: an insurer cannot be both the lead and a follower for the same submission.
+    for (&(sub_id, ins_id), _) in &follower_requested {
+        if sub_lead_insurer.get(&sub_id) == Some(&ins_id) {
+            violations.push(IntegrityViolation::InsurerBothLeadAndFollower {
+                submission_id: sub_id.0,
+                insurer_id: ins_id.0,
+            });
         }
     }
 
@@ -1396,7 +1484,8 @@ mod tests {
                     market_weight_floor: 0.30,
                     floor_factor: 0.0,
                     payout_ratio: 0.0,
-                distribution_floor_multiple: 1.0,
+                    distribution_floor_multiple: 1.0,
+                    leader_participation_cap: 1.0,
                 })
                 .collect(),
             n_insureds: 20,
