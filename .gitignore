@@ -2,3 +2,4 @@
 .DS_Store
 *.ndjson
 scripts/__pycache__/
+node_modules

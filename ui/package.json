@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test js/*.test.js"
+    "test": "node --test js/*.test.js",
+    "serve": "node serve.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.59.1"
   }
 }

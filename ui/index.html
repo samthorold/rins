@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>rins event-log viewer</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel-border: #232936;
+    --fg: #d8dee9;
+    --fg-dim: #8b94a7;
+    --accent: #8ec07c;
+    --accent-dim: #4a6b3f;
+    --warn: #fb4934;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: .6rem 1rem;
+    border-bottom: 1px solid var(--panel-border);
+    background: var(--panel);
+  }
+  header h1 {
+    font-size: 1rem;
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: .04em;
+  }
+  header .status { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+  header .selected-year { color: var(--accent); font-variant-numeric: tabular-nums; }
+  header button, header label.file-pick {
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--panel-border);
+    padding: .25rem .6rem;
+    border-radius: 3px;
+    cursor: pointer;
+    font: inherit;
+  }
+  header button:hover, header label.file-pick:hover { border-color: var(--accent-dim); }
+  #year-picker {
+    display: none;
+    align-items: center;
+    gap: .4rem;
+  }
+  #year-picker input {
+    width: 5rem;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--panel-border);
+    padding: .15rem .35rem;
+    border-radius: 3px;
+    font: inherit;
+  }
+  main { padding: 1rem; }
+  #drop-zone {
+    border: 2px dashed var(--panel-border);
+    border-radius: 6px;
+    padding: 3rem 1rem;
+    text-align: center;
+    color: var(--fg-dim);
+    transition: border-color .15s, background .15s;
+  }
+  #drop-zone.dragging {
+    border-color: var(--accent);
+    background: rgba(142,192,124,.06);
+    color: var(--fg);
+  }
+  #drop-zone p { margin: .25rem 0; }
+  #drop-zone .hint { font-size: .85em; }
+  #panel-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 1rem;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: .75rem;
+    min-height: 180px;
+    display: flex;
+    flex-direction: column;
+  }
+  .panel.wide { grid-column: 1 / -1; }
+  .panel h2 {
+    font-size: .85rem;
+    font-weight: 600;
+    margin: 0 0 .5rem 0;
+    color: var(--fg-dim);
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .panel .slot {
+    flex: 1;
+    min-height: 140px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-dim);
+    font-style: italic;
+  }
+  .panel .slot.has-cursor::before {
+    content: attr(data-cursor);
+    color: var(--accent);
+    font-style: normal;
+    font-variant-numeric: tabular-nums;
+  }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>rins event log</h1>
+  <label class="file-pick">
+    Load file…
+    <input id="file-input" type="file" accept=".ndjson,.jsonl,.json,application/x-ndjson,application/json" hidden />
+  </label>
+  <span id="status" class="status">no file loaded</span>
+  <span id="year-picker">
+    <span class="status">selected year:</span>
+    <input id="year-input" type="number" min="1" step="1" />
+    <button id="year-clear" type="button">clear</button>
+    <span id="selected-year" class="selected-year"></span>
+  </span>
+</header>
+
+<main>
+  <div id="drop-zone">
+    <p><strong>Drop <code>events.ndjson</code> here</strong></p>
+    <p class="hint">or use “Load file…” above. Run <code>cargo run</code> to regenerate.</p>
+  </div>
+
+  <div id="panel-grid" class="hidden">
+    <section class="panel" data-slot-host="panel-1">
+      <h2>1 · Underwriting Cycle</h2>
+      <div class="slot" id="panel-1">awaiting panel implementation</div>
+    </section>
+    <section class="panel" data-slot-host="panel-2">
+      <h2>2 · Risk Pooling</h2>
+      <div class="slot" id="panel-2">awaiting panel implementation</div>
+    </section>
+    <section class="panel" data-slot-host="panel-3">
+      <h2>3 · Capital Crisis Waterfall</h2>
+      <div class="slot" id="panel-3">awaiting panel implementation</div>
+    </section>
+    <section class="panel" data-slot-host="panel-4">
+      <h2>4 · Placement Stickiness</h2>
+      <div class="slot" id="panel-4">awaiting panel implementation</div>
+    </section>
+    <section class="panel" data-slot-host="panel-5">
+      <h2>5 · Accumulation Risk</h2>
+      <div class="slot" id="panel-5">awaiting panel implementation</div>
+    </section>
+    <section class="panel" data-slot-host="panel-6">
+      <h2>6 · Price Dispersion</h2>
+      <div class="slot" id="panel-6">awaiting panel implementation</div>
+    </section>
+    <section class="panel wide" data-slot-host="panel-7">
+      <h2>7 · Year Character Table</h2>
+      <div class="slot" id="panel-7">awaiting panel implementation</div>
+    </section>
+    <section class="panel wide" data-slot-host="panel-8">
+      <h2>8 · Invariant Dashboard</h2>
+      <div class="slot" id="panel-8">awaiting panel implementation</div>
+    </section>
+  </div>
+</main>
+
+<script type="module">
+import { parseNDJSONText } from "./js/data.js";
+import { EventBus, PanelRegistry } from "./js/shell.js";
+
+const bus = new EventBus();
+const registry = new PanelRegistry({
+  getSlot: (id) => document.getElementById(id),
+  bus,
+});
+
+const statusEl = document.getElementById("status");
+const dropZone = document.getElementById("drop-zone");
+const panelGrid = document.getElementById("panel-grid");
+const fileInput = document.getElementById("file-input");
+const yearPicker = document.getElementById("year-picker");
+const yearInput = document.getElementById("year-input");
+const yearClear = document.getElementById("year-clear");
+const selectedYearEl = document.getElementById("selected-year");
+
+// Cross-panel cursor: until the real panels ship, every empty slot reflects
+// the selected year so we can verify the coordination wiring is alive.
+function installPlaceholderCursor(slotId) {
+  registry.register({
+    slotId,
+    render: () => {
+      const div = document.createElement("div");
+      div.className = "placeholder";
+      div.textContent = "awaiting panel implementation";
+      return div;
+    },
+    onYearSelected: (year) => {
+      const slot = document.getElementById(slotId);
+      if (!slot) return;
+      if (year === null || year === undefined) {
+        slot.classList.remove("has-cursor");
+        slot.removeAttribute("data-cursor");
+      } else {
+        slot.classList.add("has-cursor");
+        slot.setAttribute("data-cursor", `cursor → year ${year}`);
+      }
+    },
+  });
+}
+
+for (const slot of [
+  "panel-1", "panel-2", "panel-3", "panel-4",
+  "panel-5", "panel-6", "panel-7", "panel-8",
+]) {
+  installPlaceholderCursor(slot);
+}
+
+bus.on("yearSelected", (year) => {
+  selectedYearEl.textContent = year === null || year === undefined ? "" : `year ${year}`;
+  if (year !== null && year !== undefined && yearInput.valueAsNumber !== year) {
+    yearInput.value = String(year);
+  }
+});
+
+yearInput.addEventListener("change", () => {
+  const v = yearInput.valueAsNumber;
+  registry.selectYear(Number.isFinite(v) ? v : null);
+});
+yearClear.addEventListener("click", () => {
+  yearInput.value = "";
+  registry.selectYear(null);
+});
+
+async function handleFile(file) {
+  if (!file) return;
+  statusEl.textContent = `reading ${file.name} (${formatBytes(file.size)})…`;
+  const t0 = performance.now();
+  try {
+    const text = await file.text();
+    const db = parseNDJSONText(text);
+    const stats = db.getYearStats();
+    registry.renderAll(db);
+    const dt = (performance.now() - t0).toFixed(0);
+    statusEl.textContent = `${file.name} · ${db.events.length.toLocaleString()} events · ${stats.length} years · ${dt} ms`;
+    dropZone.classList.add("hidden");
+    panelGrid.classList.remove("hidden");
+    yearPicker.style.display = "inline-flex";
+    if (stats.length > 0) {
+      const minY = stats[0].year;
+      const maxY = stats[stats.length - 1].year;
+      yearInput.min = String(minY);
+      yearInput.max = String(maxY);
+      yearInput.placeholder = `${minY}–${maxY}`;
+    }
+  } catch (err) {
+    statusEl.textContent = `failed to read ${file.name}: ${err.message}`;
+    console.error(err);
+  }
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+fileInput.addEventListener("change", (e) => {
+  const f = e.target.files && e.target.files[0];
+  handleFile(f);
+});
+
+["dragenter", "dragover"].forEach((ev) => {
+  dropZone.addEventListener(ev, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.add("dragging");
+  });
+});
+["dragleave", "drop"].forEach((ev) => {
+  dropZone.addEventListener(ev, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.remove("dragging");
+  });
+});
+dropZone.addEventListener("drop", (e) => {
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  handleFile(f);
+});
+
+// Allow drop anywhere on the page once the grid is visible (for re-loading).
+window.addEventListener("dragover", (e) => { e.preventDefault(); });
+window.addEventListener("drop", (e) => {
+  if (dropZone.classList.contains("hidden") === false) return;
+  e.preventDefault();
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+</script>
+</body>
+</html>
