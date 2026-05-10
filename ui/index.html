@@ -183,6 +183,7 @@
 import { parseNDJSONText } from "./js/data.js";
 import { EventBus, PanelRegistry } from "./js/shell.js";
 import { prepPanel1Data, renderPanel1 } from "./js/panel1.js";
+import { prepPanel2Data, renderPanel2 } from "./js/panel2.js";
 
 const bus = new EventBus();
 const registry = new PanelRegistry({
@@ -241,8 +242,25 @@ registry.register({
   },
 });
 
+// Panel 2: Risk Pooling.
+registry.register({
+  slotId: "panel-2",
+  render: ({ db }) => renderPanel2(prepPanel2Data(db)),
+  onYearSelected: (year) => {
+    const slot = document.getElementById("panel-2");
+    if (!slot) return;
+    if (year === null || year === undefined) {
+      slot.classList.remove("has-cursor");
+      slot.removeAttribute("data-cursor");
+    } else {
+      slot.classList.add("has-cursor");
+      slot.setAttribute("data-cursor", `cursor → year ${year}`);
+    }
+  },
+});
+
 for (const slot of [
-  "panel-2", "panel-3", "panel-4",
+  "panel-3", "panel-4",
   "panel-5", "panel-6", "panel-7", "panel-8",
 ]) {
   installPlaceholderCursor(slot);
