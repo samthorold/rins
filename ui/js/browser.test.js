@@ -120,6 +120,23 @@ if (chromium) {
     assert.match(status, /\d+ years/);
   });
 
+  test("panel 1 renders an SVG chart with traces after a file is loaded", async (t) => {
+    const server = await startServer();
+    const browser = await chromium.launch();
+    t.after(async () => { await browser.close(); await server.close(); });
+    const page = await browser.newPage();
+    await page.goto(server.url);
+    await page.setInputFiles("#file-input", {
+      name: "fixture.ndjson",
+      mimeType: "application/x-ndjson",
+      buffer: Buffer.from(FIXTURE),
+    });
+    await page.waitForSelector("#panel-1 svg");
+    assert.equal(await page.locator("#panel-1 svg").count(), 1);
+    // Capital area trace is always present once we have any rows.
+    assert.equal(await page.locator("#panel-1 svg path.trace-capital").count(), 1);
+  });
+
   test("year-picker broadcasts a cursor into every panel slot", async (t) => {
     const server = await startServer();
     const browser = await chromium.launch();
