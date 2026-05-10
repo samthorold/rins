@@ -185,6 +185,7 @@ import { EventBus, PanelRegistry } from "./js/shell.js";
 import { prepPanel1Data, renderPanel1 } from "./js/panel1.js";
 import { prepPanel2Data, renderPanel2 } from "./js/panel2.js";
 import { prepPanel3Data, renderPanel3 } from "./js/panel3.js";
+import { prepPanel4Data, renderPanel4 } from "./js/panel4.js";
 
 const bus = new EventBus();
 const registry = new PanelRegistry({
@@ -277,8 +278,24 @@ registry.register({
   },
 });
 
+// Panel 4: Placement Stickiness & Market Concentration.
+registry.register({
+  slotId: "panel-4",
+  render: ({ db }) => renderPanel4(prepPanel4Data(db)),
+  onYearSelected: (year) => {
+    const slot = document.getElementById("panel-4");
+    if (!slot) return;
+    if (year === null || year === undefined) {
+      slot.classList.remove("has-cursor");
+      slot.removeAttribute("data-cursor");
+    } else {
+      slot.classList.add("has-cursor");
+      slot.setAttribute("data-cursor", `cursor → year ${year}`);
+    }
+  },
+});
+
 for (const slot of [
-  "panel-4",
   "panel-5", "panel-6", "panel-7", "panel-8",
 ]) {
   installPlaceholderCursor(slot);
