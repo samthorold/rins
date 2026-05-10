@@ -126,7 +126,7 @@
   <h1>rins event log</h1>
   <label class="file-pick">
     Load file…
-    <input id="file-input" type="file" accept=".ndjson,.jsonl,.json,application/x-ndjson,application/json" hidden />
+    <input id="file-input" type="file" accept=".ndjson,.jsonl,.json,application/x-ndjson,application/json" multiple hidden />
   </label>
   <span id="status" class="status">no file loaded</span>
   <span id="year-picker">
@@ -140,7 +140,7 @@
 <main>
   <div id="drop-zone">
     <p><strong>Drop <code>events.ndjson</code> here</strong></p>
-    <p class="hint">or use “Load file…” above. Run <code>cargo run</code> to regenerate.</p>
+    <p class="hint">or use “Load file…” above. Drop multiple <code>events_seed_*.ndjson</code> files to populate panels 9 &amp; 10. Run <code>cargo run</code> to regenerate.</p>
   </div>
 
   <div id="panel-grid" class="hidden">
@@ -176,6 +176,14 @@
       <h2>8 · Invariant Dashboard</h2>
       <div class="slot" id="panel-8">awaiting panel implementation</div>
     </section>
+    <section class="panel wide" data-slot-host="panel-9">
+      <h2>9 · Distribution Fans (multi-run)</h2>
+      <div class="slot" id="panel-9">load multiple events_seed_*.ndjson files to populate</div>
+    </section>
+    <section class="panel wide" data-slot-host="panel-10">
+      <h2>10 · Phenomenon Robustness (multi-run)</h2>
+      <div class="slot" id="panel-10">load multiple events_seed_*.ndjson files to populate</div>
+    </section>
   </div>
 </main>
 
@@ -190,6 +198,8 @@ import { prepPanel5Data, renderPanel5 } from "./js/panel5.js";
 import { prepPanel6Data, renderPanel6 } from "./js/panel6.js";
 import { prepPanel7Data, renderPanel7 } from "./js/panel7.js";
 import { prepPanel8Data, renderPanel8 } from "./js/panel8.js";
+import { prepPanel9Data, renderPanel9 } from "./js/panel9.js";
+import { prepPanel10Data, renderPanel10 } from "./js/panel10.js";
 
 const bus = new EventBus();
 const registry = new PanelRegistry({
@@ -392,6 +402,29 @@ registry.register({
   },
 });
 
+// Panels 9 & 10 derive from the *full set* of loaded runs, not a single db.
+// They re-render whenever the multi-run list changes (separate from the
+// primary registry path, which handles single-db panels).
+let loadedDbs = [];
+function renderMultiRunPanels() {
+  const slot9 = document.getElementById("panel-9");
+  const slot10 = document.getElementById("panel-10");
+  if (slot9) {
+    if (loadedDbs.length === 0) {
+      slot9.replaceChildren(document.createTextNode("load multiple events_seed_*.ndjson files to populate"));
+    } else {
+      slot9.replaceChildren(renderPanel9(prepPanel9Data(loadedDbs)));
+    }
+  }
+  if (slot10) {
+    if (loadedDbs.length === 0) {
+      slot10.replaceChildren(document.createTextNode("load multiple events_seed_*.ndjson files to populate"));
+    } else {
+      slot10.replaceChildren(renderPanel10(prepPanel10Data(loadedDbs)));
+    }
+  }
+}
+
 bus.on("yearSelected", (year) => {
   selectedYearEl.textContent = year === null || year === undefined ? "" : `year ${year}`;
   if (year !== null && year !== undefined && yearInput.valueAsNumber !== year) {
@@ -408,17 +441,35 @@ yearClear.addEventListener("click", () => {
   registry.selectYear(null);
 });
 
-async function handleFile(file) {
-  if (!file) return;
-  statusEl.textContent = `reading ${file.name} (${formatBytes(file.size)})…`;
+async function handleFiles(files) {
+  if (!files || files.length === 0) return;
+  const list = Array.from(files);
+  statusEl.textContent = `reading ${list.length} file${list.length === 1 ? "" : "s"}…`;
   const t0 = performance.now();
   try {
-    const text = await file.text();
-    const db = parseNDJSONText(text);
-    const stats = db.getYearStats();
-    registry.renderAll(db);
+    const dbs = [];
+    let totalBytes = 0;
+    let totalEvents = 0;
+    for (const file of list) {
+      totalBytes += file.size;
+      const text = await file.text();
+      const db = parseNDJSONText(text);
+      db.getYearStats();
+      dbs.push(db);
+      totalEvents += db.events.length;
+    }
+    loadedDbs = dbs;
+    // Render single-run panels against the first db (same behaviour as before).
+    const primary = dbs[0];
+    const stats = primary.getYearStats();
+    registry.renderAll(primary);
+    renderMultiRunPanels();
     const dt = (performance.now() - t0).toFixed(0);
-    statusEl.textContent = `${file.name} · ${db.events.length.toLocaleString()} events · ${stats.length} years · ${dt} ms`;
+    if (list.length === 1) {
+      statusEl.textContent = `${list[0].name} · ${primary.events.length.toLocaleString()} events · ${stats.length} years · ${dt} ms`;
+    } else {
+      statusEl.textContent = `${list.length} runs · ${totalEvents.toLocaleString()} events total · ${formatBytes(totalBytes)} · ${dt} ms`;
+    }
     dropZone.classList.add("hidden");
     panelGrid.classList.remove("hidden");
     yearPicker.style.display = "inline-flex";
@@ -430,7 +481,7 @@ async function handleFile(file) {
       yearInput.placeholder = `${minY}–${maxY}`;
     }
   } catch (err) {
-    statusEl.textContent = `failed to read ${file.name}: ${err.message}`;
+    statusEl.textContent = `failed to read files: ${err.message}`;
     console.error(err);
   }
 }
@@ -442,8 +493,7 @@ function formatBytes(n) {
 }
 
 fileInput.addEventListener("change", (e) => {
-  const f = e.target.files && e.target.files[0];
-  handleFile(f);
+  handleFiles(e.target.files);
 });
 
 ["dragenter", "dragover"].forEach((ev) => {
@@ -461,8 +511,8 @@ fileInput.addEventListener("change", (e) => {
   });
 });
 dropZone.addEventListener("drop", (e) => {
-  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-  handleFile(f);
+  const files = e.dataTransfer && e.dataTransfer.files;
+  handleFiles(files);
 });
 
 // Allow drop anywhere on the page once the grid is visible (for re-loading).
@@ -470,8 +520,8 @@ window.addEventListener("dragover", (e) => { e.preventDefault(); });
 window.addEventListener("drop", (e) => {
   if (dropZone.classList.contains("hidden") === false) return;
   e.preventDefault();
-  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-  if (f) handleFile(f);
+  const files = e.dataTransfer && e.dataTransfer.files;
+  if (files && files.length > 0) handleFiles(files);
 });
 </script>
 </body>

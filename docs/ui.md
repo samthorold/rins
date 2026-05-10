@@ -323,22 +323,26 @@ for each year Y:
 
 ---
 
-## Multi-Run Panels (future)
+## Multi-Run Panels
 
-When the viewer supports loading multiple `events_seed_*.ndjson` files from `--output-dir`:
+Selecting multiple `events_seed_*.ndjson` files (file picker is `multiple`-enabled, drag-and-drop also accepts a multi-selection) populates the cross-run panels. The first file is treated as the primary database for panels 1–8; panels 9–10 derive from the full set.
 
 ### Panel 9: Distribution Fans
 
 - For each of: Loss Ratio, Combined Ratio, Rate on Line, Total Capital
 - X-axis: year, Y-axis: value
-- Percentile bands: p5-p95 (lightest), p25-p75 (medium), p50 (bold line)
+- Percentile bands: p5–p95 (lightest), p25–p75 (medium), p50 (bold line)
+- Nearest-rank percentile (so a single run pins p5/p50/p95 to the same value)
 - Shows whether phenomena are robust across seeds or seed-specific artifacts
 
 ### Panel 10: Phenomenon Robustness
 
-- For each CONFIRMED/PARTIAL phenomenon, compute a detection metric across N runs
-- Display as a scorecard: "Underwriting cycle detected in 87/100 runs (87%)"
-- Metrics: cycle detected = rate-on-line range > 2pp; risk pooling confirmed = attritional CV ratio > 7×; etc.
+- Scorecard: detection rate per phenomenon across N runs ("87 / 100 · 87%")
+- Implemented detectors:
+  - **Underwriting cycle** — rate-on-line range across analysis years > 2pp
+  - **Catastrophe-amplified crisis** — year with ≥2 cat events AND ≥1 insolvency
+  - **Insolvencies observed** — ≥1 InsurerInsolvent in analysis years
+  - **Post-warmup market entry** — ≥1 InsurerEntered after day 0
 
 ---
 
@@ -360,6 +364,8 @@ ui/
       dispersion.js   # Panel 6
       table.js        # Panel 7
       invariants.js   # Panel 8
+      panel9.js       # Distribution Fans (multi-run)
+      panel10.js      # Phenomenon Robustness (multi-run)
   serve.rs            # Optional: tiny Rust HTTP server (or just open the HTML file)
 ```
 

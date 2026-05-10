@@ -95,7 +95,7 @@ if (chromium) {
     assert.equal(await page.locator("#year-picker").isVisible(), false);
   });
 
-  test("loading a file via the picker reveals 8 panel slots and the year picker", async (t) => {
+  test("loading a file via the picker reveals 10 panel slots and the year picker", async (t) => {
     const server = await startServer();
     const browser = await chromium.launch();
     t.after(async () => { await browser.close(); await server.close(); });
@@ -112,7 +112,7 @@ if (chromium) {
     assert.equal(await page.locator("#drop-zone").isVisible(), false);
     assert.equal(await page.locator("#year-picker").isVisible(), true);
     const slotCount = await page.locator("#panel-grid .slot").count();
-    assert.equal(slotCount, 8);
+    assert.equal(slotCount, 10);
 
     const status = await page.locator("#status").textContent();
     assert.match(status, /fixture\.ndjson/);
@@ -216,6 +216,25 @@ if (chromium) {
       await page.locator("#panel-7 tbody tr.p7-selected").count(),
       1,
     );
+  });
+
+  test("loading multiple files populates the multi-run panels (9 & 10)", async (t) => {
+    const server = await startServer();
+    const browser = await chromium.launch();
+    t.after(async () => { await browser.close(); await server.close(); });
+    const page = await browser.newPage();
+    await page.goto(server.url);
+
+    await page.setInputFiles("#file-input", [
+      { name: "events_seed_1.ndjson", mimeType: "application/x-ndjson", buffer: Buffer.from(FIXTURE) },
+      { name: "events_seed_2.ndjson", mimeType: "application/x-ndjson", buffer: Buffer.from(FIXTURE) },
+    ]);
+
+    await page.waitForSelector("#panel-9 svg");
+    await page.waitForSelector("#panel-10 .p10-row");
+    assert.ok(await page.locator("#panel-9 svg").count() >= 1);
+    assert.equal(await page.locator("#panel-10 .p10-row").count(), 4);
+    assert.match(await page.locator("#status").textContent(), /2 runs/);
   });
 
   test("drop-zone accepts a real DataTransfer drop", async (t) => {
