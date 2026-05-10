@@ -186,6 +186,7 @@ import { prepPanel1Data, renderPanel1 } from "./js/panel1.js";
 import { prepPanel2Data, renderPanel2 } from "./js/panel2.js";
 import { prepPanel3Data, renderPanel3 } from "./js/panel3.js";
 import { prepPanel4Data, renderPanel4 } from "./js/panel4.js";
+import { prepPanel5Data, renderPanel5 } from "./js/panel5.js";
 
 const bus = new EventBus();
 const registry = new PanelRegistry({
@@ -295,8 +296,43 @@ registry.register({
   },
 });
 
+// Panel 5: Accumulation Risk.
+let panel5LastDb = null;
+registry.register({
+  slotId: "panel-5",
+  render: ({ db }) => {
+    panel5LastDb = db;
+    return renderPanel5(prepPanel5Data(db));
+  },
+  onYearSelected: (year) => {
+    const slot = document.getElementById("panel-5");
+    if (!slot) return;
+    if (year === null || year === undefined) {
+      slot.classList.remove("has-cursor");
+      slot.removeAttribute("data-cursor");
+      // Reset territory sub-panel to default (latest year).
+      if (panel5LastDb) {
+        const data = prepPanel5Data(panel5LastDb);
+        const svg = renderPanel5(data);
+        slot.innerHTML = "";
+        slot.appendChild(svg);
+      }
+    } else {
+      slot.classList.add("has-cursor");
+      slot.setAttribute("data-cursor", `cursor → year ${year}`);
+      // Re-render territory split for the selected year.
+      if (panel5LastDb) {
+        const data = prepPanel5Data(panel5LastDb, { selectedYear: year });
+        const svg = renderPanel5(data);
+        slot.innerHTML = "";
+        slot.appendChild(svg);
+      }
+    }
+  },
+});
+
 for (const slot of [
-  "panel-5", "panel-6", "panel-7", "panel-8",
+  "panel-6", "panel-7", "panel-8",
 ]) {
   installPlaceholderCursor(slot);
 }
