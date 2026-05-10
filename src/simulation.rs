@@ -107,6 +107,10 @@ impl Simulation {
                     c.capacity_sensitivity,
                     c.cr_sensitivity,
                     c.market_weight_floor,
+                    c.floor_factor,
+                    c.payout_ratio,
+                    c.distribution_floor_multiple,
+                    c.leader_participation_cap,
                 )
             })
             .collect();
@@ -115,17 +119,29 @@ impl Simulation {
 
         let territories = &config.catastrophe.territories;
         let mut insureds = Vec::new();
+        // Sample each insured's reservation price from LogNormal(max_rol_mu, max_rol_sigma).
+        // Uses a local RNG seeded from config.seed — fully independent of Simulation.rng,
+        // which is also seeded from config.seed but constructed separately below.
+        let mut insured_rng = ChaCha20Rng::seed_from_u64(config.seed);
         for i in 0..config.n_insureds {
             let territory = if territories.is_empty() {
                 "US-SE".to_string()
             } else {
                 territories[i % territories.len()].clone()
             };
+            let base_rol = if config.max_rol_sigma == 0.0 {
+                config.max_rol_mu.exp()
+            } else {
+                use rand_distr::{Distribution as _, LogNormal};
+                let dist = LogNormal::new(config.max_rol_mu, config.max_rol_sigma)
+                    .expect("invalid LogNormal params for max_rol");
+                dist.sample(&mut insured_rng)
+            };
             insureds.push(Insured::new(
                 InsuredId(i as u64 + 1),
                 territory,
                 vec![Peril::WindstormAtlantic, Peril::Attritional],
-                config.max_rate_on_line,
+                base_rol,
             ));
         }
         let qps = config
@@ -195,6 +211,20 @@ impl Simulation {
                 analysis_years: self.config.years,
             },
         );
+        // Emit InsurerEntered for each initial insurer so the event stream is self-contained.
+        // Day(0) distinguishes these from dynamically-spawned entrants (day > 0).
+        for insurer in &self.insurers {
+            self.log.push(SimEvent {
+                day: Day(0),
+                event: Event::InsurerEntered {
+                    insurer_id: insurer.id,
+                    initial_capital: insurer.capital.max(0) as u64,
+                    cr_sensitivity: insurer.cr_sensitivity(),
+                    capacity_sensitivity: insurer.capacity_sensitivity(),
+                    market_weight_floor: insurer.market_weight_floor(),
+                },
+            });
+        }
     }
 
     /// Run the simulation until a stopping condition is met.
@@ -277,26 +307,48 @@ impl Simulation {
                 }
             }
 
-            Event::LeadQuoteDeclined { submission_id, .. } => {
-                for (d, e) in self.broker.on_lead_quote_declined(day, submission_id) {
+            Event::LeadQuoteDeclined { submission_id, insurer_id, .. } => {
+                for (d, e) in self.broker.on_lead_quote_declined(day, submission_id, insurer_id) {
                     self.schedule(d, e);
                 }
             }
 
-            Event::LeadQuoteIssued { submission_id, insured_id, insurer_id, atp: _, premium, cat_exposure_at_quote: _ } => {
+            Event::LeadQuoteIssued { submission_id, insured_id, insurer_id, atp, premium, line_size, cat_exposure_at_quote: _ } => {
                 let events =
-                    self.broker.on_lead_quote_issued(day, submission_id, insured_id, insurer_id, premium);
+                    self.broker.on_lead_quote_issued(day, submission_id, insured_id, insurer_id, atp, premium, line_size);
                 for (d, e) in events {
                     self.schedule(d, e);
                 }
             }
 
-            Event::QuotePresented { submission_id, insured_id, insurer_id, premium } => {
-                // Insured decides whether to accept. Currently always accepts.
+            Event::FollowerQuoteRequested { submission_id, insured_id, insurer_id, ref risk, lead_premium, lead_atp } => {
+                let risk = risk.clone();
+                if let Some(ins) = self.insurers.iter().find(|i| i.id == insurer_id) {
+                    for (d, e) in ins.on_follower_quote_requested(day, submission_id, insured_id, &risk, lead_premium, lead_atp) {
+                        self.schedule(d, e);
+                    }
+                }
+            }
+
+            Event::FollowerQuoteIssued { submission_id, insurer_id, line_size, .. } => {
+                for (d, e) in self.broker.on_follower_quote_issued(day, submission_id, insurer_id, line_size) {
+                    self.schedule(d, e);
+                }
+            }
+
+            Event::FollowerQuoteDeclined { submission_id, insurer_id, .. } => {
+                for (d, e) in self.broker.on_follower_quote_declined(day, submission_id, insurer_id) {
+                    self.schedule(d, e);
+                }
+            }
+
+            Event::QuotePresented { submission_id, insured_id, leader_id, ref panel, premium } => {
+                // Insured decides whether to accept.
+                let panel = panel.clone();
                 for insured in &self.broker.insureds {
                     if insured.id == insured_id {
                         let events =
-                            insured.on_quote_presented(day, submission_id, insurer_id, premium);
+                            insured.on_quote_presented(day, submission_id, leader_id, panel, premium);
                         for (d, e) in events {
                             self.schedule(d, e);
                         }
@@ -305,8 +357,9 @@ impl Simulation {
                 }
             }
 
-            Event::QuoteAccepted { submission_id, insured_id, insurer_id, premium } => {
+            Event::QuoteAccepted { submission_id, insured_id, leader_id: _, ref panel, premium } => {
                 let year = day.year();
+                let panel = panel.clone();
                 let risk = self
                     .broker
                     .insureds
@@ -323,7 +376,7 @@ impl Simulation {
                         day,
                         submission_id,
                         insured_id,
-                        insurer_id,
+                        panel,
                         premium,
                         risk,
                         year,
@@ -368,35 +421,30 @@ impl Simulation {
                 // attritional exposure regardless of policy status.
 
                 if let Some(policy) = self.market.policies.get(&policy_id) {
-                    let insurer_id = policy.insurer_id;
+                    let panel = policy.panel.clone();
                     let sum_insured = policy.risk.sum_insured;
                     let perils = policy.risk.perils_covered.clone();
-                    if let Some(ins) = self.insurers.iter_mut().find(|i| i.id == insurer_id) {
-                        ins.on_policy_bound(policy_id, sum_insured, premium, &perils);
-                        // Back-fill total_cat_exposure now that the insurer aggregate is updated.
-                        let total_cat_exposure = ins.cat_aggregate;
-                        if let Some(last) = self.log.last_mut() {
-                            if let Event::PolicyBound { total_cat_exposure: ref mut tce, .. } =
-                                last.event
-                            {
-                                *tce = total_cat_exposure;
-                            }
+                    for (insurer_id, line_share) in &panel {
+                        if let Some(ins) = self.insurers.iter_mut().find(|i| i.id == *insurer_id) {
+                            ins.on_policy_bound(policy_id, sum_insured, premium, &perils, *line_share);
                         }
+                        // Update broker relationship score per panel member.
+                        self.broker.on_policy_bound(*insurer_id);
                     }
-                    // Update broker relationship score: incumbent gets +1 for each bound policy.
-                    self.broker.on_policy_bound(insurer_id);
                 }
 
                 self.year_premium_written += premium;
             }
 
             Event::PolicyExpired { policy_id } => {
-                // Read insurer_id before market removes the policy record.
-                let insurer_id = self.market.policies.get(&policy_id).map(|p| p.insurer_id);
-                if let Some(ins_id) = insurer_id
-                    && let Some(ins) = self.insurers.iter_mut().find(|i| i.id == ins_id)
-                {
-                    ins.on_policy_expired(policy_id);
+                // Read panel before market removes the policy record.
+                let panel = self.market.policies.get(&policy_id).map(|p| p.panel.clone());
+                if let Some(panel) = panel {
+                    for (ins_id, _) in &panel {
+                        if let Some(ins) = self.insurers.iter_mut().find(|i| i.id == *ins_id) {
+                            ins.on_policy_expired(policy_id);
+                        }
+                    }
                 }
                 self.market.on_policy_expired(policy_id);
             }
@@ -460,6 +508,12 @@ impl Simulation {
 
             // InsurerEntered is logged directly by spawn_new_insurer — no further dispatch.
             Event::InsurerEntered { .. } => {}
+
+            // CapitalDistributed is logged directly by the insurer in on_year_end — no further dispatch.
+            Event::CapitalDistributed { .. } => {}
+
+            // YearEndCapital is logged directly by the insurer in on_year_end — no further dispatch.
+            Event::YearEndCapital { .. } => {}
         }
     }
 
@@ -554,7 +608,7 @@ impl Simulation {
         self.market_ap_tp_factor = match self.cr_ewma {
             None => 1.0,
             Some(ewma_cr) => {
-                let cr_signal = (ewma_cr - 1.0_f64).clamp(-0.50, 0.80);
+                let cr_signal = (ewma_cr - 1.0_f64).clamp(-0.10, 0.80);
                 1.0 + cr_signal
             }
         };
@@ -633,10 +687,17 @@ impl Simulation {
         let capacity_sensitivity = self.rng.random_range(0.0_f64..0.25);  // U(0.0, 0.25); canonical=0.10
         let market_weight_floor  = self.rng.random_range(0.0_f64..0.60);  // U(0.0, 0.60); canonical=0.30
 
+        let floor_factor = self.config.insurers.first().map(|t| t.floor_factor).unwrap_or(0.85);
+        let payout_ratio = self.config.insurers.first().map(|t| t.payout_ratio).unwrap_or(0.70);
+        let distribution_floor_multiple = self.config.insurers.first()
+            .map(|t| t.distribution_floor_multiple).unwrap_or(1.5);
+        let leader_participation_cap = self.config.insurers.first()
+            .map(|t| t.leader_participation_cap).unwrap_or(0.25);
         let insurer = Insurer::new(
             id, initial_capital, attritional_elf, cat_elf, target_loss_ratio,
             ewma_credibility, expense_ratio, profit_loading, net_line_capacity, scf, pml_frac,
             depletion_sensitivity, capacity_sensitivity, cr_sensitivity, market_weight_floor,
+            floor_factor, payout_ratio, distribution_floor_multiple, leader_participation_cap,
         );
         let initial_capital_u64 = initial_capital.max(0) as u64;
 
@@ -646,7 +707,13 @@ impl Simulation {
 
         self.log.push(SimEvent {
             day,
-            event: Event::InsurerEntered { insurer_id: id, initial_capital: initial_capital_u64 },
+            event: Event::InsurerEntered {
+                insurer_id: id,
+                initial_capital: initial_capital_u64,
+                cr_sensitivity,
+                capacity_sensitivity,
+                market_weight_floor,
+            },
         });
     }
 }
@@ -678,6 +745,10 @@ mod tests {
                 capacity_sensitivity: 0.0,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
+                payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
             }],
             n_insureds,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -692,7 +763,8 @@ mod tests {
                 territories: vec!["US-SE".to_string()], // single territory: all insureds hit
             },
             quotes_per_submission: None,
-            max_rate_on_line: 1.0, // unlimited — tests accept all quotes by default
+            max_rol_mu: 0.0,    // exp(0) = 1.0: all insureds accept all quotes (tests)
+            max_rol_sigma: 0.0, // sigma=0: degenerate — everyone gets exp(mu) exactly
             disable_cats: false,
         }
     }
@@ -963,9 +1035,10 @@ mod tests {
     // ── Competitive quoting ───────────────────────────────────────────────────
 
     #[test]
-    fn all_insurers_solicited_per_submission() {
-        // 3 identical insurers, qps=None (all). Every submission solicits all 3.
-        // All 3 insurer IDs must appear in LeadQuoteIssued events.
+    fn exactly_one_lead_quote_requested_per_submission() {
+        // 3 identical insurers, qps=None (all 3 are candidates).
+        // Under lead-follow architecture, only 1 LeadQuoteRequested is emitted per submission.
+        // Total LQR count must equal the number of submissions (CoverageRequested count).
         let mut config = minimal_config(1, 6);
         config.insurers = (1..=3)
             .map(|i| InsurerConfig {
@@ -984,25 +1057,31 @@ mod tests {
                 capacity_sensitivity: 0.0,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
+                payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
             })
             .collect();
         let sim = run_sim(config);
 
-        let insurer_ids_in_issued: std::collections::HashSet<u64> = sim
+        let n_coverage_requested = sim
             .log
             .iter()
-            .filter_map(|e| match &e.event {
-                Event::LeadQuoteIssued { insurer_id, .. } => Some(insurer_id.0),
-                _ => None,
-            })
-            .collect();
+            .filter(|e| matches!(e.event, Event::CoverageRequested { .. }))
+            .count();
+        let n_lead_quote_requested = sim
+            .log
+            .iter()
+            .filter(|e| matches!(e.event, Event::LeadQuoteRequested { .. }))
+            .count();
 
-        for id in 1u64..=3 {
-            assert!(
-                insurer_ids_in_issued.contains(&id),
-                "insurer {id} must appear in LeadQuoteIssued events (all are solicited per submission)"
-            );
-        }
+        // Each CoverageRequested produces exactly one initial LeadQuoteRequested.
+        // (Retries add more, but with healthy insurers there are none.)
+        assert_eq!(
+            n_lead_quote_requested, n_coverage_requested,
+            "each submission must produce exactly one LeadQuoteRequested (got {n_lead_quote_requested} LQR for {n_coverage_requested} CR)"
+        );
     }
 
     // ── Renewal ───────────────────────────────────────────────────────────────
@@ -1045,7 +1124,9 @@ mod tests {
         // max_rate_on_line=0.0 rejects every quote (any positive premium > 0%).
         // The simulation must schedule CoverageRequested at QuoteRejected.day + 358.
         let mut config = minimal_config(2, 1);
-        config.max_rate_on_line = 0.0;
+        // exp(-f64::INFINITY) = 0.0 → all quotes rejected; sigma=0 for determinism.
+        config.max_rol_mu = f64::NEG_INFINITY;
+        config.max_rol_sigma = 0.0;
         let sim = run_sim(config);
 
         let qr_day = sim
@@ -1089,6 +1170,10 @@ mod tests {
             capacity_sensitivity: 0.0,
             cr_sensitivity: 1.0,
             market_weight_floor: 0.30,
+            floor_factor: 0.0,
+            payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
         }];
         let sim = run_sim(config);
 
@@ -1207,26 +1292,26 @@ mod tests {
     // ── New enriched fields ───────────────────────────────────────────────────
 
     #[test]
-    fn policy_bound_total_cat_exposure_increases_with_each_binding() {
-        // Single insurer, 3 insureds, 1 year. All risks cover WindstormAtlantic.
-        // Each successive PolicyBound must show total_cat_exposure growing by ASSET_VALUE.
-        use crate::config::ASSET_VALUE;
+    fn policy_bound_panel_contains_insurer() {
+        // Single insurer, 3 insureds, 1 year. All PolicyBound events must have panel = [(InsurerId(1), 1.0)].
         let sim = run_sim(minimal_config(1, 3));
-        let exposures: Vec<u64> = sim
+        let bound_events: Vec<_> = sim
             .log
             .iter()
             .filter_map(|e| {
-                if let Event::PolicyBound { total_cat_exposure, .. } = &e.event {
-                    Some(*total_cat_exposure)
+                if let Event::PolicyBound { panel, .. } = &e.event {
+                    Some(panel.clone())
                 } else {
                     None
                 }
             })
             .collect();
-        assert!(exposures.len() >= 3, "need at least 3 PolicyBound events");
-        assert_eq!(exposures[0], ASSET_VALUE, "1st PolicyBound: total_cat_exposure must equal ASSET_VALUE");
-        assert_eq!(exposures[1], 2 * ASSET_VALUE, "2nd PolicyBound: total_cat_exposure must equal 2×ASSET_VALUE");
-        assert_eq!(exposures[2], 3 * ASSET_VALUE, "3rd PolicyBound: total_cat_exposure must equal 3×ASSET_VALUE");
+        assert!(!bound_events.is_empty(), "need at least one PolicyBound event");
+        for panel in &bound_events {
+            assert_eq!(panel.len(), 1, "single insurer → panel must have 1 member");
+            assert_eq!(panel[0].0, InsurerId(1), "InsurerId(1) must be panel member");
+            assert!((panel[0].1 - 1.0).abs() < 1e-9, "line share must be 1.0");
+        }
     }
 
     #[test]
@@ -1279,6 +1364,10 @@ mod tests {
                 capacity_sensitivity: 0.0,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
+                payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
             },
             InsurerConfig {
                 id: InsurerId(2),
@@ -1296,6 +1385,10 @@ mod tests {
                 capacity_sensitivity: 0.0,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
+                payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
             },
         ];
 
@@ -1303,11 +1396,10 @@ mod tests {
 
         // Every PolicyBound must be with insurer 2.
         for e in &sim.log {
-            if let Event::PolicyBound { insurer_id, .. } = &e.event {
-                assert_eq!(
-                    *insurer_id,
-                    InsurerId(2),
-                    "all policies must bind with insurer 2 (insurer 1 always declines)"
+            if let Event::PolicyBound { panel, .. } = &e.event {
+                assert!(
+                    panel.iter().all(|(id, _)| *id == InsurerId(2)),
+                    "all policies must bind with insurer 2 (insurer 1 always declines), got panel {:?}", panel
                 );
             }
         }
@@ -1335,10 +1427,11 @@ mod tests {
         let mut config = minimal_config(10, 7);
         config.attritional.annual_rate = 10.0;
         let sim = run_sim(config);
+        // Filter to day > 0 to exclude initial-insurer InsurerEntered events (logged by start()).
         let entered = sim
             .log
             .iter()
-            .filter(|e| matches!(e.event, Event::InsurerEntered { .. }))
+            .filter(|e| e.day.0 > 0 && matches!(e.event, Event::InsurerEntered { .. }))
             .count();
         assert!(entered > 0, "expected entry when AP/TP > 1.10 (high-loss scenario)");
     }
@@ -1351,10 +1444,11 @@ mod tests {
         config.catastrophe.event_classes[0].annual_frequency = 0.0;
         config.attritional.annual_rate = 0.0;
         let sim = run_sim(config);
+        // Filter to day > 0 to exclude initial-insurer InsurerEntered events (logged by start()).
         let entered = sim
             .log
             .iter()
-            .filter(|e| matches!(e.event, Event::InsurerEntered { .. }))
+            .filter(|e| e.day.0 > 0 && matches!(e.event, Event::InsurerEntered { .. }))
             .count();
         assert_eq!(entered, 0, "entry must not fire when AP/TP stays below threshold");
     }
@@ -1406,6 +1500,10 @@ mod tests {
                 0.0,            // capacity_sensitivity=0 (not tested here)
                 1.0,            // cr_sensitivity=canonical
                 0.30,           // market_weight_floor=canonical
+                0.0,            // floor_factor=0 (test: always line_size=1.0)
+                0.0,            // payout_ratio=0 (test: no distributions)
+                1.0,            // distribution_floor_multiple=1.0 (test: no effect)
+                1.0,            // leader_participation_cap=1.0 (test: no cap)
             )
         };
 
@@ -1420,7 +1518,7 @@ mod tests {
         let try_12th_quote = |mut ins: Insurer| {
             use crate::types::SubmissionId;
             for pid in 0..11u64 {
-                ins.on_policy_bound(PolicyId(pid), sum_insured, 0, &[crate::events::Peril::WindstormAtlantic]);
+                ins.on_policy_bound(PolicyId(pid), sum_insured, 0, &[crate::events::Peril::WindstormAtlantic], 1.0);
             }
             let events = ins.on_lead_quote_requested(
                 Day(0),
@@ -1479,6 +1577,10 @@ mod tests {
                 capacity_sensitivity: 0.10,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
+                payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
             }],
             n_insureds: 5,
             attritional: AttritionalConfig { annual_rate: 2.0, mu: -3.0, sigma: 1.0 },
@@ -1493,7 +1595,8 @@ mod tests {
                 territories: vec!["US-SE".to_string()],
             },
             quotes_per_submission: None,
-            max_rate_on_line: 1.0,
+            max_rol_mu: 0.0,
+            max_rol_sigma: 0.0,
             disable_cats: false,
         };
 
@@ -1514,6 +1617,40 @@ mod tests {
             (cr1 * 1e9).round() as i64,
             (cr2 * 1e9).round() as i64,
             "successive spawns must draw different cr_sensitivity values: cr1={cr1}, cr2={cr2}"
+        );
+    }
+
+    #[test]
+    fn insured_reservation_prices_are_heterogeneous() {
+        // With sigma > 0, insureds must receive distinct LogNormal draws.
+        let config = SimulationConfig {
+            n_insureds: 20,
+            max_rol_mu: f64::ln(0.25), // median = 0.25
+            max_rol_sigma: 0.40,
+            ..minimal_config(1, 20)
+        };
+        let sim = Simulation::from_config(config);
+        let rols: Vec<f64> = sim.broker.insureds.iter().map(|i| i.base_max_rol()).collect();
+        assert!(rols.iter().all(|&r| r > 0.0), "all draws must be positive: {rols:?}");
+        let first = rols[0];
+        assert!(
+            rols.iter().any(|&r| (r - first).abs() > 1e-9),
+            "expected heterogeneous reservation prices across 20 insureds, all got {first}"
+        );
+    }
+
+    #[test]
+    fn insured_reservation_prices_degenerate_homogeneous() {
+        // sigma=0: every insured gets exactly exp(mu); no RNG consumed.
+        let config = SimulationConfig {
+            max_rol_mu: f64::ln(0.25), // exp(ln(0.25)) = 0.25
+            max_rol_sigma: 0.0,
+            ..minimal_config(1, 5)
+        };
+        let sim = Simulation::from_config(config);
+        assert!(
+            sim.broker.insureds.iter().all(|i| (i.base_max_rol() - 0.25).abs() < 1e-9),
+            "sigma=0 must assign exp(mu)=0.25 to every insured"
         );
     }
 }

@@ -24,6 +24,8 @@ pub enum DeclineReason {
     MaxLineSizeExceeded,
     MaxCatAggregateBreached,
     Insolvent,
+    /// Follower declines because the lead's premium is below the follower's own Technical Premium.
+    RateBelowTP,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,19 +63,60 @@ pub enum Event {
         atp: u64,                  // actuarial technical price (break-even floor)
         premium: u64,              // final quoted premium (underwriter decision)
         cat_exposure_at_quote: u64, // insurer's WindstormAtlantic aggregate before this risk is added (0 if risk doesn't cover cat)
+        /// Fraction of the risk this insurer is willing to write [0.0, 1.0].
+        /// Derived from capital headroom and pricing adequacy; see Phase 5 formula.
+        line_size: f64,
     },
-    /// Broker presents the quote to the insured.
+    /// Broker solicits a follower insurer to participate at the lead's rate.
+    /// Emitted same day as `LeadQuoteIssued` for each follower in the candidate list.
+    FollowerQuoteRequested {
+        submission_id: SubmissionId,
+        insured_id: InsuredId,
+        /// The follower being solicited.
+        insurer_id: InsurerId,
+        /// Needed for follower capacity checks (line and cat aggregate limits).
+        risk: Risk,
+        /// The premium the follower would write at if it accepts (= lead's quoted premium).
+        lead_premium: u64,
+        /// Lead's actuarial technical price, carried for audit and Phase D observability.
+        lead_atp: u64,
+    },
+    /// Follower insurer has agreed to participate at the lead's rate.
+    FollowerQuoteIssued {
+        submission_id: SubmissionId,
+        insured_id: InsuredId,
+        insurer_id: InsurerId,
+        /// Capacity-only line size; not constrained by leader_participation_cap.
+        line_size: f64,
+    },
+    /// Follower insurer declined participation.
+    FollowerQuoteDeclined {
+        submission_id: SubmissionId,
+        insured_id: InsuredId,
+        insurer_id: InsurerId,
+        reason: DeclineReason,
+    },
+    /// Broker presents the assembled panel quote to the insured.
     QuotePresented {
         submission_id: SubmissionId,
         insured_id: InsuredId,
-        insurer_id: InsurerId,
+        /// The insurer with the highest relationship score in the solicited set.
+        /// Sets terms; followers fill remaining capacity in score order.
+        leader_id: InsurerId,
+        /// Assembled panel: (insurer_id, line_share) ordered leader-first.
+        /// Shares sum to 1.0.
+        panel: Vec<(InsurerId, f64)>,
+        /// Blended premium: Σ line_share_i × premium_i.
         premium: u64,
     },
-    /// Insured accepts the quote. Market creates the policy record.
+    /// Insured accepts the quote. Panel is passed through unchanged.
     QuoteAccepted {
         submission_id: SubmissionId,
         insured_id: InsuredId,
-        insurer_id: InsurerId,
+        /// Leader insurer (passed through from QuotePresented).
+        leader_id: InsurerId,
+        /// Panel: (insurer_id, line_share) summing to 1.0.
+        panel: Vec<(InsurerId, f64)>,
         premium: u64,
     },
     /// Insured rejects the quote (rate on line exceeds max_rate_on_line).
@@ -87,12 +130,10 @@ pub enum Event {
         policy_id: PolicyId,
         submission_id: SubmissionId,
         insured_id: InsuredId,
-        insurer_id: InsurerId,
+        /// Panel of insurers writing this policy: (insurer_id, line_share), shares sum to 1.0.
+        panel: Vec<(InsurerId, f64)>,
         premium: u64,
         sum_insured: u64, // makes the event self-contained for exposure analysis
-        /// Insurer's total WindstormAtlantic aggregate after this policy is added.
-        /// Zero for risks that do not cover WindstormAtlantic.
-        total_cat_exposure: u64,
     },
     PolicyExpired {
         policy_id: PolicyId,
@@ -128,9 +169,37 @@ pub enum Event {
     InsurerInsolvent { insurer_id: InsurerId },
     /// A new insurer has entered the market, spawned by the coordinator after observing
     /// sustained market profitability. Logged at the YearEnd day that triggered entry.
+    /// Also emitted at Day(0) for the initial insurers so the event stream is self-contained.
     InsurerEntered {
         insurer_id: InsurerId,
         initial_capital: u64,
+        cr_sensitivity: f64,
+        capacity_sensitivity: f64,
+        market_weight_floor: f64,
+    },
+    /// Annual profit distribution to Names (Lloyd's 3-year account practice).
+    /// Emitted at YearEnd only when the insurer is profitable and `payout_ratio > 0`.
+    /// Zero-amount distributions are never logged (Inv 20).
+    CapitalDistributed {
+        insurer_id: InsurerId,
+        /// Amount distributed to Names this year (cents). Always > 0.
+        amount: u64,
+        /// Insurer's capital remaining after distribution.
+        remaining_capital: u64,
+    },
+    /// Per-insurer capital snapshot emitted at each YearEnd, after distributions but before
+    /// YTD accumulators are reset. Allows the analyse binary to reconcile capital movements:
+    /// `CapDelta ≈ ytd_premium × (1 − expense_ratio) − ytd_claims − distributions`.
+    YearEndCapital {
+        insurer_id: InsurerId,
+        /// Insurer capital after any distribution this year (cents).
+        capital: u64,
+        /// Capital at formation — the floor for distribution eligibility (cents).
+        initial_capital: u64,
+        /// Gross premium written this year by this insurer (cents).
+        ytd_premium: u64,
+        /// Claims paid this year by this insurer (cents).
+        ytd_claims: u64,
     },
 }
 
@@ -266,19 +335,17 @@ mod tests {
                 policy_id: PolicyId(0),
                 submission_id: SubmissionId(1),
                 insured_id: InsuredId(5),
-                insurer_id: InsurerId(2),
+                panel: vec![(InsurerId(2), 1.0)],
                 premium: 50_000,
                 sum_insured: 5_000_000_000,
-                total_cat_exposure: 7_000_000_000,
             },
         };
         let value = serde_json::to_value(&ev).unwrap();
         assert_eq!(value["event"]["PolicyBound"]["policy_id"], 0);
-        assert_eq!(value["event"]["PolicyBound"]["insurer_id"], 2);
         assert_eq!(value["event"]["PolicyBound"]["insured_id"], 5);
         assert_eq!(value["event"]["PolicyBound"]["premium"], 50_000);
         assert_eq!(value["event"]["PolicyBound"]["sum_insured"], 5_000_000_000u64);
-        assert_eq!(value["event"]["PolicyBound"]["total_cat_exposure"], 7_000_000_000u64);
+        assert!(value["event"]["PolicyBound"]["panel"].is_array());
     }
 
     #[test]
@@ -315,6 +382,80 @@ mod tests {
             assert!(v.get("day").is_some(), "missing 'day' key in: {line}");
             assert!(v.get("event").is_some(), "missing 'event' key in: {line}");
         }
+    }
+
+    #[test]
+    fn decline_reason_rate_below_tp_serializes() {
+        let ev = SimEvent {
+            day: Day(1),
+            event: Event::LeadQuoteDeclined {
+                submission_id: SubmissionId(0),
+                insured_id: InsuredId(1),
+                insurer_id: InsurerId(1),
+                reason: DeclineReason::RateBelowTP,
+            },
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: SimEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        assert!(json.contains("RateBelowTP"));
+    }
+
+    #[test]
+    fn follower_quote_requested_serializes() {
+        let ev = SimEvent {
+            day: Day(1),
+            event: Event::FollowerQuoteRequested {
+                submission_id: SubmissionId(0),
+                insured_id: InsuredId(1),
+                insurer_id: InsurerId(2),
+                risk: Risk {
+                    sum_insured: 1_000_000,
+                    territory: "US-SE".to_string(),
+                    perils_covered: vec![Peril::WindstormAtlantic],
+                },
+                lead_premium: 50_000,
+                lead_atp: 48_000,
+            },
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: SimEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        assert!(json.contains("FollowerQuoteRequested"));
+    }
+
+    #[test]
+    fn follower_quote_issued_serializes() {
+        let ev = SimEvent {
+            day: Day(1),
+            event: Event::FollowerQuoteIssued {
+                submission_id: SubmissionId(0),
+                insured_id: InsuredId(1),
+                insurer_id: InsurerId(2),
+                line_size: 0.75,
+            },
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: SimEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        assert!(json.contains("FollowerQuoteIssued"));
+    }
+
+    #[test]
+    fn follower_quote_declined_serializes() {
+        let ev = SimEvent {
+            day: Day(1),
+            event: Event::FollowerQuoteDeclined {
+                submission_id: SubmissionId(0),
+                insured_id: InsuredId(1),
+                insurer_id: InsurerId(2),
+                reason: DeclineReason::RateBelowTP,
+            },
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: SimEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        assert!(json.contains("FollowerQuoteDeclined"));
     }
 
     #[test]

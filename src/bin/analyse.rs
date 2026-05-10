@@ -207,6 +207,10 @@ fn main() {
         "  [{}] Inv 19 — Every insurer response has a prior LeadQuoteRequested",
         status(ihas(|v| matches!(v, IntegrityViolation::LeadQuoteOrphanResponse { .. })))
     );
+    println!(
+        "  [{}] Inv 20 — CapitalDistributed.amount > 0 (no zero-amount distributions)",
+        status(ihas(|v| matches!(v, IntegrityViolation::DistributionAmountZero { .. })))
+    );
 
     if int_violations.is_empty() {
         println!("  All integrity invariants PASS");
@@ -232,13 +236,19 @@ fn main() {
 
     println!("=== Tier 2 — Year Character Table ===");
     println!(
-        "{:>4} | {:>9} | {:>8} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>8} | {:>6} | {:>10} | {:>6} | {:>7} | {:>7}",
-        "Year", "Assets(B)", "GUL(B)", "CatGUL%", "Cov(B)", "Claims(B)", "LossR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Dropped#", "ApTp", "Insurers", "Gini", "CrSens", "CapSens"
+        "{:>4} | {:>9} | {:>8} | {:>8} | {:>8} | {:>9} | {:>8} | {:>8} | {:>8} | {:>8} | {:>7} | {:>5} | {:>11} | {:>10} | {:>9} | {:>9} | {:>7} | {:>8} | {:>8} | {:>6} | {:>10} | {:>6} | {:>7} | {:>7} | {:>8}",
+        "Year", "Assets(B)", "GUL(B)", "CatGUL%", "Cov(B)", "Claims(B)", "LossR%", "FeLR%", "CombR%", "CrEwma%", "Rate%", "Cats#", "TotalCap(B)", "Distrib(B)", "CapDelta(B)", "NetRet(B)", "InForce", "Dropped#", "Reject#", "ApTp", "Insurers", "Gini", "CrSens", "CapSens", "AvgLine%"
     );
-    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6 + 3 + 7 + 3 + 7));
+    println!("{}", "-".repeat(4 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 11 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 10 + 3 + 9 + 3 + 7 + 3 + 13 + 3 + 12 + 3 + 11 + 3 + 11 + 3 + 9 + 3 + 10 + 3 + 8 + 3 + 10 + 3 + 6 + 3 + 7 + 3 + 7 + 3 + 8));
 
     const CR_EWMA_ALPHA: f64 = 1.0 / 3.0;
     let mut cr_ewma: Option<f64> = None;
+    let mut prev_cap: Option<u64> = None;
+
+    // Accumulators for the end-of-table reconciliation block.
+    let mut cum_net_ret: f64 = 0.0;
+    let mut cum_distrib: f64 = 0.0;
+    let cap_start = stats.first().map(|s| s.total_capital as f64 / CENTS_PER_BUSD).unwrap_or(0.0);
 
     for s in &stats {
         let lr_pct = s.loss_ratio() * 100.0;
@@ -264,7 +274,7 @@ fn main() {
         let ap_tp_str = match cr_ewma {
             None => "  n/a ".to_string(),
             Some(ewma_cr) => {
-                let cr_signal = (ewma_cr - 1.0_f64).clamp(-0.50, 0.80);
+                let cr_signal = (ewma_cr - 1.0_f64).clamp(-0.10, 0.80);
                 let factor = 1.0 + cr_signal;  // capacity_uplift removed (Phase A)
                 format!("{:>6.2}", factor)
             }
@@ -280,8 +290,18 @@ fn main() {
                 (false, false) => base,
             }
         };
+        let distrib_b = s.total_distributed as f64 / CENTS_PER_BUSD;
+        let cap_delta_b = match prev_cap {
+            Some(p) => (s.total_capital as f64 - p as f64) / CENTS_PER_BUSD,
+            None    => 0.0,
+        };
+        // Net retention: premium after expenses minus claims — expected capital change from operations.
+        let net_ret_b = (s.bound_premium as f64 * (1.0 - expense_ratio) - s.claims as f64) / CENTS_PER_BUSD;
+        prev_cap = Some(s.total_capital);
+        cum_net_ret += net_ret_b;
+        cum_distrib += distrib_b;
         println!(
-            "{:>4} | {:>9.2} | {:>8.2} | {:>7.1}% | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>8} | {} | {} | {:>6.3} | {:>7.2} | {:>7.2}",
+            "{:>4} | {:>9.2} | {:>8.2} | {:>7.1}% | {:>8.2} | {:>9.2} | {:>7.1}% | {:>7.1}% | {:>7.1}% | {} | {:>6.2}% | {:>5} | {:>11.2} | {:>10.2} | {:>+9.2} | {:>9.2} | {:>7} | {:>8} | {:>8} | {} | {} | {:>6.3} | {:>7.2} | {:>7.2} | {:>7.1}%",
             s.year,
             assets_b,
             gul_b,
@@ -289,20 +309,58 @@ fn main() {
             cov_b,
             claims_b,
             lr_pct,
+            s.loss_ratio_full_exposure() * 100.0,
             cr_pct,
             avg_cr_str,
             rol_pct,
             s.cat_event_count,
             cap_b,
+            distrib_b,
+            cap_delta_b,
+            net_ret_b,
+            s.policies_in_force,
             s.dropped_count,
+            s.rejected_count,
             ap_tp_str,
             insurer_str,
             s.gini_market_share,
             s.cr_sensitivity_mean,
             s.capacity_sensitivity_mean,
+            s.avg_line_pct,
         );
     }
     println!();
+
+    // ── Capital reconciliation ────────────────────────────────────────────────
+    // CapDelta should equal NetRetention minus Distributions if accounting is complete.
+    // Any residual identifies unmodelled cash flows (e.g. new-entrant capital injections).
+    {
+        let cap_end = stats.last().map(|s| s.total_capital as f64 / CENTS_PER_BUSD).unwrap_or(0.0);
+        let cum_cap_delta = cap_end - cap_start;
+        // New-entrant capital: sum of initial_capital from InsurerEntered events (day > 0).
+        let entrant_capital_b: f64 = events.iter().filter_map(|e| {
+            if let rins::events::Event::InsurerEntered { initial_capital, .. } = &e.event {
+                if e.day.0 > 0 { Some(*initial_capital as f64 / CENTS_PER_BUSD) } else { None }
+            } else { None }
+        }).sum();
+        // Operating CapDelta strips out the entrant capital injections.
+        let operating_delta = cum_cap_delta - entrant_capital_b;
+        let residual = operating_delta - (cum_net_ret - cum_distrib);
+
+        println!("=== Capital Reconciliation (analysis years) ===");
+        println!("  Cap start (yr {}):          {:>+9.3} B", stats.first().map(|s| s.year).unwrap_or(0), cap_start);
+        println!("  Cap end   (yr {}):          {:>+9.3} B", stats.last().map(|s| s.year).unwrap_or(0), cap_end);
+        println!("  Cumulative CapDelta:         {:>+9.3} B", cum_cap_delta);
+        println!("  of which entrant capital:    {:>+9.3} B", entrant_capital_b);
+        println!("  Operating CapDelta:          {:>+9.3} B  (CapDelta − entrants)", operating_delta);
+        println!("  ─────────────────────────────────────────");
+        println!("  Cumulative NetRetention:     {:>+9.3} B  (premium×(1−exp) − claims)", cum_net_ret);
+        println!("  Cumulative Distributions:    {:>+9.3} B", cum_distrib);
+        println!("  NetRet − Distrib:            {:>+9.3} B", cum_net_ret - cum_distrib);
+        println!("  ─────────────────────────────────────────");
+        println!("  Residual (OpDelta − (NR−D)): {:>+9.3} B  (≈0 if accounting complete)", residual);
+        println!();
+    }
 
     // ── Tier 3: premium dispersion ────────────────────────────────────────────
     // Group LeadQuoteIssued.premium by year, compute mean and population CV.

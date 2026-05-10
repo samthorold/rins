@@ -143,29 +143,31 @@ Report: individual attritional CV, market attritional CV, CV ratio, LLN predicti
 
 ---
 
-### Tier 2 — Year Character Table (always)
+### Tier 2 — Year Character Summary (always)
 
-Reproduce the full table exactly as printed by `cargo run --release --bin analyse` — header line,
-separator line, and all data rows — inside a fenced code block. Do not reformat, subset, or
-convert to a markdown table.
+Do **not** reproduce the full table — it is too large. Instead, parse it from the `cargo run --release --bin analyse` output and report the following:
 
-```
-(paste raw output here)
-```
+**Column definitions (for interpretation):**
+- **LossR%:** pure loss ratio = total claims / total gross premium.
+- **CombR%:** combined ratio = LossR% + expense ratio (34.4%). Underwriting profit requires CombR% < 100%.
+- **Rate%:** market-wide rate on line = bound premium / sum insured.
+- **Dominant peril:** "Attritional" if CatGUL% < 30%, "Mixed" if 30–60%, "Cat" if > 60%.
+- **TotalCap(B):** total capital across all insurers at year-end (billions USD).
+- **Insolvent#:** count of `InsurerInsolvent` events in the year.
 
-**LossR%:** pure loss ratio = total claims / total gross premium.
+**Report these summaries:**
 
-**CombR%:** combined ratio = LossR% + expense ratio (34.4%). Underwriting profit requires CombR% < 100%; above 100% the market is loss-making before investment income.
+1. **Overall range** — min/max for LossR%, CombR%, Rate%, and TotalCap(B) over all analysis years, with the year each extreme occurred.
 
-**Rate%:** market-wide rate on line = bound premium / sum insured. Varies year to year as the attritional EWMA updates ATP. A declining trend over benign years indicates EWMA softening. Flag any year where Rate% falls below the earliest-year Rate% by more than 0.5pp as a soft-market signal.
+2. **Loss-making years** — list every year where CombR% > 100% as a compact table: `Year | LossR% | CombR% | CatGUL% | Cats# | TotalCap(B)`. Sort by year. Note the dominant peril for each.
 
-**Dominant peril:** "Attritional" if Cat GUL% < 30%, "Mixed" if 30–60%, "Cat" if > 60%.
+3. **Rate cycle** — identify hard/soft market phases from the Rate% column. For each distinct hard-market episode (Rate% rising ≥ 1pp above the soft floor), report: trigger year, peak Rate%, and how many years until Rate% returned to within 0.5pp of the floor.
 
-**TotalCap(B):** total capital across all insurers at year-end (billions USD, floored at 0 per insurer). A declining trend flags capital erosion from cumulative losses.
+4. **Capital trajectory** — TotalCap(B) at years 6, 25, 50, 75, 100, 125, 150, 175, and the final year. Flag any multi-year declining stretch.
 
-**Insolvent#:** count of `InsurerInsolvent` events in the year. Any non-zero value should be noted explicitly.
+5. **Insurer count** — first year and last year insurer count; total entrants over the run.
 
-After the table, note any year with Insolvent# > 0 and call out years where CombR% > 100% (market loss-making).
+6. **Any year with Insolvent# > 0** — call out explicitly.
 
 ---
 

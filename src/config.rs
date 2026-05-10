@@ -56,6 +56,24 @@ pub struct InsurerConfig {
     /// Ensures even experienced insurers retain some market anchor (Lloyd's PMD benchmarking).
     /// Randomised at entry [U(0.0, 0.60)]; canonical = 0.30.
     pub market_weight_floor: f64,
+    /// Minimum own_ap_tp_factor at which the insurer writes a full line (pricing_line = 1.0).
+    /// pricing_line = clamp((own_factor - floor_factor) / (1 - floor_factor), 0, 1).
+    /// Canonical: 0.85 — insurer begins reducing line when its AP/TP blended factor falls below 85%.
+    /// Set to 0.0 in tests to always produce line_size = 1.0 (backward-compatible behaviour).
+    pub floor_factor: f64,
+    /// Fraction of annual underwriting profit distributed to Names at YearEnd.
+    /// Loss years produce no distribution. Canonical: 0.70 (Lloyd's 3-year account practice).
+    /// 0.0 = no distributions (tests that don't need this mechanic).
+    pub payout_ratio: f64,
+    /// Multiplier on initial_capital that forms the distribution floor.
+    /// Distributions are only paid when post-distribution capital ≥ initial_capital × multiple.
+    /// 1.0 = distribute as soon as capital returns to initial (original behaviour, tests).
+    /// 1.5 = canonical — insurer must accumulate a 50% surplus buffer before paying Names.
+    pub distribution_floor_multiple: f64,
+    /// Maximum fraction the lead writes as its own stamp (Lloyd's leads: 10–25%).
+    /// The lead's capacity_line is capped at this value before the pricing_line is applied.
+    /// Canonical: 0.25. Use 1.0 in tests to preserve full-line (solo-writer) behaviour.
+    pub leader_participation_cap: f64,
 }
 
 /// Attritional peril parameters — LogNormal damage fraction, Poisson frequency.
@@ -119,11 +137,14 @@ pub struct SimulationConfig {
     pub catastrophe: CatConfig,
     /// Number of insurers solicited per submission. None = all insurers.
     pub quotes_per_submission: Option<usize>,
-    /// Maximum rate on line an insured will accept (premium / sum_insured).
-    /// Quotes above this threshold are rejected; the insured retries at next renewal.
-    /// Canonical: 0.15 — well above current 6–8% rate band; becomes binding once
-    /// capital-linked pricing raises rates post-cat.
-    pub max_rate_on_line: f64,
+    /// Log-space mean of the log-normal distribution of insured reservation prices
+    /// (base_max_rate_on_line ~ LogNormal(mu, sigma)); median = exp(mu).
+    /// Set sigma == 0.0 for a homogeneous population: every insured gets exp(mu) exactly.
+    /// Canonical: mu = ln(0.25) ≈ -1.386, sigma = 0.40.
+    ///   At 11% RoL: ~2% reject. At 14%: ~7.5%. At 18%: ~21%. At 21%: ~33%.
+    pub max_rol_mu: f64,
+    /// Log-space std-dev of the reservation price distribution. 0.0 = homogeneous (tests).
+    pub max_rol_sigma: f64,
     /// When true, no cat `LossEvent`s are scheduled. Attritional losses still run.
     /// Useful for isolating attritional dynamics without cat noise.
     pub disable_cats: bool,
@@ -163,6 +184,10 @@ impl SimulationConfig {
                     capacity_sensitivity: 0.10,
                     cr_sensitivity: 1.0,
                     market_weight_floor: 0.30,
+                    floor_factor: 0.85,
+                    payout_ratio: 0.70,
+                    distribution_floor_multiple: 1.5,
+                    leader_participation_cap: 0.25,
                 })
                 .collect(),
             n_insureds: 100,
@@ -202,7 +227,10 @@ impl SimulationConfig {
                 ],
             },
             quotes_per_submission: Some(4), // solicit top-4 (by relationship score) per submission
-            max_rate_on_line: 0.30, // 30% RoL ceiling — allows market recovery after cat-driven EWMA spikes
+            // LogNormal(ln(0.25), 0.40): median reservation price = 25% RoL.
+            // At 14% (normal hard market): ~7.5% reject. At 18%: ~21%. At 21%: ~33%.
+            max_rol_mu: f64::ln(0.25),  // ≈ -1.386; median = 0.25
+            max_rol_sigma: 0.40,
             disable_cats: false,
         }
     }

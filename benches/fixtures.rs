@@ -32,7 +32,7 @@ pub fn prepopulate_policies(market: &mut Market, policy_count: usize) {
             Day(0),
             sid,
             iid,
-            InsurerId(1),
+            vec![(InsurerId(1), 1.0)],
             100_000,
             default_risk(),
             Year(1),
@@ -69,6 +69,10 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
                 capacity_sensitivity: 0.0,
                 cr_sensitivity: 1.0,
                 market_weight_floor: 0.30,
+                floor_factor: 0.0,
+                payout_ratio: 0.0,
+                distribution_floor_multiple: 1.0,
+                leader_participation_cap: 1.0,
             })
             .collect(),
         n_insureds: scenario.n_insureds,
@@ -84,7 +88,8 @@ pub fn build_simulation(scenario: &Scenario, seed: u64, years: u32) -> Simulatio
             territories: vec!["US-SE".to_string()],
         },
         quotes_per_submission: None,
-        max_rate_on_line: 1.0,
+        max_rol_mu: 0.0,
+        max_rol_sigma: 0.0,
         disable_cats: false,
     };
     let mut sim = Simulation::from_config(config);

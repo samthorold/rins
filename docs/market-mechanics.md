@@ -22,10 +22,11 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Separate cat / attritional ELF (cat ELF anchored, attritional EWMA-updated) | ACTIVE | `src/insurer.rs::on_year_end` |
 | Profit loading above ATP in underwriter channel | ACTIVE | `src/insurer.rs::underwriter_premium` |
 | Expense loading (net premium credited to capital) | PARTIAL — `expense_ratio` applied at bind; explicit brokerage not modelled | `src/insurer.rs::on_policy_bound` |
-| Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE — capital-linked fractions (net_line_capacity=0.30, solvency_capital_fraction=0.30, pml_200 derived from cat model) | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
-| Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — single-insurer panel; no follow-market mode) | `src/broker.rs` |
+| Exposure management (per-risk line size, cat aggregate PML constraint) | ACTIVE — capital limits enforced; `line_size = min(capacity_line, pricing_line)` — continuous soft-market contraction via `pricing_line = clamp((own_factor - floor_factor)/(1-floor_factor), 0, 1)`; see §7.4, roadmap Phase 5 [DONE] | `src/insurer.rs::on_lead_quote_requested`, `§4.4` |
+| Lead-follow quoting (round-robin + decline re-routing) | ACTIVE (PARTIAL — multi-insurer panels assembled greedily; no follow-market pricing mode; follower shading planned for Phase 7) | `src/broker.rs` |
+| Capital distributions (annual profit payout to Names) | ACTIVE — `CapitalDistributed` event; capital floor prevents distribution when capital depleted below `initial_capital`; see §7.5 | `src/insurer.rs::on_year_end` |
 | Underwriter channel / AP/TP ratio (MS3 AvT) | ACTIVE — three-level pricing: ATP → TP (× profit loading) → AP (× blended factor); coordinator broadcasts market factor (3yr CR + capacity pressure); each insurer blends own capital state and loss history against market signal via credibility weighting. Key hardcoded equilibria: capacity_uplift step function, clamp amplitude bounds, 30% market floor, 5yr credibility ramp — see §4.5. | `src/insurer.rs::underwriter_premium`, `src/insurer.rs::own_ap_tp_factor`, `src/simulation.rs::handle_year_end` |
-| Supply / demand balance (insured reservation price) | PARTIAL — step-function demand curve implemented; quantity adjustment (variable limits, deductibles, self-insurance) and demand response to loss experience not modelled; consequence: demand cannot amplify or resist rate movements, weakening cycle amplitude | `src/insured.rs::on_quote_presented` |
+| Supply / demand balance (insured reservation price) | ACTIVE — heterogeneous LogNormal reservation prices produce a downward-sloping demand curve; `Reject#` diagnostic separates demand-constrained from supply-constrained non-placements; quantity adjustment (variable limits, deductibles, self-insurance) and demand response to loss experience not modelled | `src/insured.rs::on_quote_presented` |
 | Broker relationship scores | ACTIVE — +1.0 per PolicyBound, ×0.80 per YearEnd; routing sorted by score DESC + cyclic tiebreaker | `src/broker.rs` |
 | Syndicate entry / exit (capital entry) | ACTIVE — AP/TP > 1.10 trigger + new insurer spawn; 1-year cooldown; critical for underwriting cycle emergence | `src/simulation.rs::handle_year_end` |
 | Annual coordinator statistics | PLANNED | — |
@@ -35,6 +36,9 @@ This is a living document. Mechanics are ordered by concept dependency — you c
 | Outward reinsurance | TBD | — |
 | Persistent capital (premiums accumulate, claims erode, no annual reset) | ACTIVE | `src/insurer.rs` |
 | Central Fund / managed runoff | TBD | — |
+| Investment income on reserves and capital | PLANNED — §4.6 | — |
+| Reinstatement premiums | PLANNED — §2.1 | — |
+| Reserve development / IBNR | PLANNED — §6.1 | — |
 
 ---
 
@@ -109,6 +113,8 @@ The insured retains losses below attachment (the deductible) and losses above at
 
 **Panel splitting:** the net insured loss is pro-rated by each syndicate's share (in basis points). Each panel entry receives a separate `ClaimSettled` event. The sum of all `ClaimSettled` amounts equals the net insured loss, up to integer rounding no larger than the panel size. **[PARTIAL — current model has a single insurer per policy; panel splitting infrastructure exists but panel size = 1.]**
 
+**Reinstatement premiums `[PLANNED]`:** after a cat event triggers a claim that exhausts a policy layer, a **reinstatement premium** restores the limit for the remainder of the policy year. In the Lloyd's market the reinstatement premium is typically 100% of the original layer premium (pro-rated for unexpired term), paid immediately by the insured. This creates two effects: (1) additional premium income for the insurer in the same year as the loss, partially offsetting the net capital impact; (2) automatic within-year rate hardening — a second cat event in the same year costs the insured an additional reinstatement premium on top of the original, creating a non-linear cost penalty for cat frequency that is absent from annual flat premiums. Without reinstatement premiums, the simulation understates post-cat income and the within-year deterrent effect of multiple events. This mechanism is required before phenomenon §1 (Underwriting Cycle) can be fully calibrated against Lloyd's rate-on-line data, since Lloyd's quoted ROL includes the reinstatement cost. *Not yet implemented; no new events required — a `ReinstatementPremiumCharged` event or a credit to `ClaimSettled` would suffice.*
+
 ### §2.2 Annual policy terms and expiry `[ACTIVE]`
 
 All policies are **annual contracts** written for a 12-month period, reflecting the Lloyd's standard placement cycle. Loss events can only trigger claims against policies that are currently active (inception ≤ event day < expiry). Syndicates re-underwrite their book at each renewal; premiums earned in one year do not carry forward.
@@ -125,23 +131,23 @@ All policies are **annual contracts** written for a 12-month period, reflecting 
 
 ### §3.1 Insureds `[ACTIVE]`
 
-Each Insured owns one or more Assets and seeks insurance coverage each year. Insureds are active agents: they evaluate quotes against a **reservation price** and accumulate GUL history. State: `id`, `risk` (asset description), `max_rate_on_line`. Source: `src/insured.rs`.
+Each Insured owns one or more Assets and seeks insurance coverage each year. Insureds are active agents: they evaluate quotes against a **reservation price** and accumulate GUL history. State: `id`, `risk` (asset description), `base_max_rate_on_line` (private), `rol_uplift` (post-loss elevation). Source: `src/insured.rs`.
 
-**Reservation price:** each insured has a maximum acceptable rate on line (`max_rate_on_line`). `Insured::on_quote_presented` computes `rate = premium / sum_insured`; if `rate > max_rate_on_line` it emits `QuoteRejected` instead of `QuoteAccepted`. A rejected insured is uninsured for the year but retries at the next annual renewal (same timing offset as an accepted quote — the renewal `CoverageRequested` fires `361 − 3 = 358` days after the rejection day). Canonical value: **0.15** (15% RoL — above the typical 6–8% rate band, so rarely binding at current pricing; lowers as capital-linked pricing is introduced).
+**Reservation price:** each insured's baseline acceptance threshold is drawn at construction from `LogNormal(max_rol_mu, max_rol_sigma)`. `Insured::on_quote_presented` computes `rate = premium / sum_insured` and compares it against `effective_max_rol() = base_max_rate_on_line + rol_uplift`; if `rate > effective_max_rol()` it emits `QuoteRejected` instead of `QuoteAccepted`. A rejected insured is uninsured for the year but retries at the next annual renewal (`CoverageRequested` fires `358` days after the rejection day, identical offset to `QuoteAccepted`). Canonical distribution: `LogNormal(ln(0.25), 0.40)` — median reservation price 25% RoL; at 14% (typical hard market) ~7.5% of insureds reject; at 21% ~33% reject.
 
-**Demand curve structure:** the reservation price creates a step-function demand curve — inelastic until the price ceiling is hit, then vertically zero. At canonical rates of 6–8%, demand is near-fully inelastic: every insured that can find a willing insurer will buy. The `Dropped#` column in the year table therefore measures supply-side capacity exhaustion, not demand-side price sensitivity — insureds are willing buyers shut out by capital-constrained insurers.
+**Demand curve structure:** the LogNormal distribution across 100 insureds produces a downward-sloping aggregate demand curve. At normal rates (6–8%) virtually all insureds accept; as rates spike toward and above 15%, a measurable and growing fraction voluntarily price out. The `Dropped#` column measures supply-constrained non-placements (all insurers declined); the `Reject#` column measures demand-constrained non-placements (insured's reservation price breached). In hard markets, the `Reject#` share rises — the two columns together diagnose whether a capacity crunch is insurer-driven or price-driven.
 
-This is a reasonable first-order model for Lloyd's *primary* commercial lines (marine, property, energy), which are largely mandatory or balance-sheet driven and for which demand is genuinely inelastic across the historical rate range. It is less appropriate for upper excess-of-loss layers, where buyers make explicit cost-benefit decisions about each additional layer and will drop remote layers when ROLs spike — a demand-side behaviour that would reduce the pressure on `Dropped#` in hard markets. Heterogeneous reservation prices by layer position would capture this, and is a future extension aligned with phenomenon 10 (Layer-Position Premium Gradient).
+This approximates Lloyd's *primary* commercial lines (marine, property, energy), where demand is largely balance-sheet driven and genuinely inelastic across the normal rate range. The left tail of the LogNormal (a small number of very price-sensitive buyers) provides continuous demand-side pressure. It is less appropriate for upper excess-of-loss layers, where buyers make explicit cost-benefit decisions about each additional layer and will drop remote layers when ROLs spike — a richer demand-side behaviour aligned with phenomenon 10 (Layer-Position Premium Gradient).
 
 **Structural demand gaps `[PARTIAL]`:** three demand-side mechanisms present in the real market are not yet modelled:
 
-1. *No quantity adjustment.* Each insured buys exactly one contract at full `sum_insured` with zero attachment. Real buyers adjust their programme structure in response to price — raising deductibles, reducing limits, dropping remote excess layers, or self-insuring tranches when rates spike. Without this, demand is constant regardless of price level; the market cannot price-clear through demand reduction.
+1. *No quantity adjustment.* Each insured buys exactly one contract at full `sum_insured` with zero attachment. Real buyers adjust their programme structure in response to price — raising deductibles, reducing limits, dropping remote excess layers, or self-insuring tranches when rates spike. Without this, the margin buyers who price out are entirely absent rather than reducing their coverage.
 
-2. *No demand response to loss experience.* Real buyers with repeated large losses restructure their coverage (higher limits, lower attachments, multi-year contracts) or seek alternative risk transfer. Buyers with low loss histories may expand coverage in soft markets. Neither feedback is present.
+2. *No demand response to loss experience.* Real buyers with repeated large losses restructure their coverage (higher limits, lower attachments, multi-year contracts) or seek alternative risk transfer. Buyers with low loss histories may expand coverage in soft markets. The `rol_uplift` mechanism provides a partial approximation (post-loss elevation of the effective threshold), but it increases *willingness* to pay rather than restructuring the programme size.
 
 3. *No self-insurance or alternative risk transfer.* Captives, parametric covers, and retained deductibles are not modelled. In hard markets, a fraction of demand migrates to these alternatives, reducing the insured pool and limiting the capacity crunch. The converse — migration back to the market in soft markets — would expand demand and absorb excess capacity.
 
-**Consequence for cycle dynamics:** with flat demand, new capital entering in a hard market has no additional premium volume to absorb — the only adjustment mechanism is rate reduction. This causes rates to collapse faster than in the real market, where buyer re-entry and programme expansion absorb new capacity without immediately forcing prices down. The under-damped rate collapse seen in the canonical run (8.05% in yr17 → 6.23% by yr20 despite continued cat activity) is partly a consequence of this structural gap. See `docs/roadmap.md Phase 3` for the planned demand elasticity design.
+**Consequence for cycle dynamics:** the LogNormal demand curve moderates amplitude — marginal buyers pricing out in hard markets reduce premium volume, absorbing some of the capacity pressure that previously forced rates down. However, without quantity adjustment, buyers who do purchase still buy at full `sum_insured`, so the volume effect is in head-count only. See `docs/roadmap.md Phase 4` for observed calibration results.
 
 Canonical config: 100 uniform insureds (sum_insured = 50M USD each).
 
@@ -464,6 +470,33 @@ Replace the coordinator-broadcast `market_ap_tp_factor` with per-insurer inferen
 
 ---
 
+## 4.6 Investment Income `[PLANNED]`
+
+Lloyd's syndicates hold two pools of invested assets: the **Premium Trust Fund (PTF)** (premiums collected but not yet paid out as claims or returned to Names) and the **Funds at Lloyd's (FAL)** (member capital lodged as security). Both earn investment returns that flow through to syndicate profitability and affect the underwriting cycle.
+
+**Why investment income matters for cycle dynamics.** Venezian (1985) and Cummins & Outreville (1987) identify the investment income channel as a co-driver of insurance cycle period and amplitude. When investment yields are high (e.g. 2022–2024: 4–5%), syndicates can tolerate combined ratios above 100% while still earning adequate total returns. The underwriting loss is subsidised by investment income, softening the hard-market signal and reducing the urgency of rate restoration. When yields are near zero (2010–2021), syndicates must earn the full cost of capital from underwriting profit alone, making hard markets sharper and longer. Without investment income, the simulation's cycle is driven purely by capital depletion via losses, producing shorter hard markets than the empirical record (1–2 years observed vs. 5–10 years empirical in Lloyd's). This is the primary structural explanation for the hard-market duration gap in the current run.
+
+**Mechanism.** At `YearEnd`, each insurer credits investment return on its total capital balance:
+
+```
+investment_income = capital × investment_return_rate
+capital += investment_income
+```
+
+`investment_return_rate` can be:
+- **Deterministic scenario:** a constant or time-series representing a macroeconomic regime (e.g. 3% throughout, or a schedule declining from 5% in year 1 to 0% in year 50 and back to 4% by year 100).
+- **Stochastic:** a mean-reverting AR(1) process around a long-run average (e.g. mean 3%, σ 1.5%, half-life 5 years). The stochastic version would allow the simulation to test whether interest rate cycles couple with underwriting cycles to produce the historically observed 5–10 year period.
+
+**Calibration anchor.** Lloyd's 2024 investment return on assets: approximately 4.5% on the total balance sheet. At the canonical TotalCap of ~3B USD, a 4.5% return generates ~135M USD per year in investment income — comparable to total annual premium income — and would materially dampen the effective combined ratio. The inclusion of investment income is therefore not a minor adjustment but a structurally significant driver of when the market recognises a capital crisis.
+
+**Connection to capital distributions (§7.5).** Investment income changes the composition of `year_profit`: some fraction now comes from investment rather than underwriting. Distributions should be applied to total profit (underwriting + investment), not just underwriting profit. In the current implementation `year_profit = net_written − total_claims`, which excludes investment income. When investment income is added, a separate `investment_income` term must be included before computing `distributable`.
+
+**Connection to §7.1 (Syndicate entry) and the rising supply curve.** Investment income makes the entry-attractiveness threshold `market_ap_tp_factor > 1.10` less reliable as a cycle signal: in a high-yield environment, syndicates are profitable at AP/TP ratios below 1.0, so the threshold fires correctly only if calibrated relative to the prevailing yield. A more complete entry signal would compare total return (underwriting + investment) against cost of capital, not just the AP/TP ratio.
+
+*Not yet implemented. Requires: `investment_return_rate` field in `InsurerConfig` (or a market-level `yield_curve` in `SimulationConfig`); credit at `YearEnd` before computing distributions; stochastic scenario optional.*
+
+---
+
 ## 5. Placement `[PARTIAL]`
 
 Lloyd's operates a subscription market: a lead syndicate sets terms, and followers subscribe on those terms (or decline). The quoting round is orchestrated by the coordinator.
@@ -509,6 +542,15 @@ LossEvent (cat) or attritional schedule
 Each loss updates the syndicate's accumulated loss experience and revises its actuarial estimate — the primary input to §4.1.
 
 Syndicates learn from the full loss on a policy, not their proportional share. All syndicates on the same risk therefore converge toward the same long-run estimate regardless of line size. This is a structural rule.
+
+**Reserve development / IBNR `[PLANNED]`.** The current model settles all claims immediately at `ClaimSettled`, with no reserving lag. Real Lloyd's syndicates operate a 3-year account: an underwriting year is kept open for three years to allow IBNR (Incurred But Not Reported) claims to emerge before the year is reinsured-to-close. Reserve development — the difference between the ultimate loss and the initially held reserve — creates a deferred capital effect:
+
+- **Adverse development** (reserve strengthening): the syndicate books additional capital charges 12–24 months after the loss year. This is a secondary, lagged capital shock that sustains hard markets beyond the year of the triggering event. After Katrina (2005), industry reserves were strengthened through 2008 as loss creep accumulated from business interruption, demand surge, and litigation.
+- **Favourable development** (reserve release): in benign years, releasing excess reserves inflates reported profits and masks deteriorating underwriting quality. When releases exhaust, the true combined ratio steps up abruptly — a hardening trigger with no new catastrophe. The Lloyd's 1988–1992 crisis and the US P&C soft-market collapse in 2001 were both amplified by prior-year reserve deficiency recognition.
+
+Reserve development is a required mechanism before phenomenon §13 can emerge, and it is a contributing cause of the hard-market duration gap identified in phenomenon §1.
+
+*Design: at `PolicyBound`, insurer records an initial IBNR reserve. Annual development applies loss development factors (LDF) to revise the reserve. The difference from the prior-year estimate is booked as a capital adjustment (`ReserveDevelopment` event). At year 3, the remaining reserve is crystallised and any shortfall triggers a capital debit. LDFs would be calibrated from historical chain-ladder data for the relevant line.*
 
 ### §6.2 Loss settlement invariants `[ACTIVE]`
 
@@ -574,6 +616,8 @@ After each annual review (`handle_year_end`), the coordinator checks whether the
 
 **Implementation:** `src/simulation.rs::handle_year_end` → `spawn_new_insurer`. 1-in-3 new entrants are aggressive (optimistic internal cat model; `pml_damage_fraction_override = Some(0.126)`). `InsurerEntered { insurer_id, initial_capital, is_aggressive }` is logged directly. Voluntary exit during soft markets (§7.4) would close the lower tail of the cycle.
 
+**Structural gap — flat supply curve for capital `[PLANNED]`.** The current entry trigger (`market_ap_tp_factor > 1.10`) treats every hard-market year identically: one new entrant per year, no declining marginal attractiveness. In practice, capital formation has an upward-sloping supply curve: the easiest capital (committed PE funds, existing names topping up, established managing agents launching new syndicates) deploys first at moderate expected returns; additional capital requires progressively higher expected returns to attract. After the most severe events (post-Katrina 2006; post-Ian 2023), capacity from new sources continued forming for 2–3 years as the return signal remained elevated — but each successive class entered at lower expected returns as competition absorbed the opportunity. The flat trigger in the simulation allows too-rapid capacity restoration, collapsing hard markets within 1–2 years rather than 4–7 years. A rising supply curve would be implemented as a declining `market_ap_tp_factor` threshold per successive entrant within a hard-market episode, or equivalently as an entry capital requirement that rises with incumbent capacity. This is a prerequisite for matching the empirical hard-market duration observed in the Lloyd's record.
+
 ### §7.2 Exit via insolvency `[ACTIVE (PARTIAL)]`
 
 When an insurer's capital is exhausted by a claim, `on_claim_settled` floors capital at zero,
@@ -592,7 +636,7 @@ Central Fund and managed runoff remain `[TBD]` (§7.3).
 
 **Design note:** the Central Fund is a welfare mechanism, not a cycle mechanism. It should not materially alter cycle period or amplitude.
 
-### §7.4 Voluntary exit `[DEFERRED]`
+### §7.4 Voluntary exit `[ACTIVE via variable line sizes — Phase 5 DONE 2026-04-12]`
 
 Binary exit/re-entry was implemented (Phase 2) but removed because it produced unrealistic synchronised behaviour: all insurers sharing similar aggregate loss histories hit the runoff threshold in the same year (mass exits), and all runoff insurers re-entered simultaneously the moment the market AP/TP factor exceeded 1.10 (mass re-entries). This bears no resemblance to the gradual, idiosyncratic capacity adjustments seen in the Lloyd's market.
 
@@ -603,9 +647,55 @@ Binary exit/re-entry was implemented (Phase 2) but removed because it produced u
 
 Full class exit carries heavy relational costs (broker relationships built over years) and regulatory friction (Lloyd's requires significant lead time and approval). It is reserved for extreme cases, not a routine soft-market lever.
 
-**Deferred until variable line sizes are implemented.** The intended soft-market withdrawal effect will emerge naturally once syndicates can express caution by reducing their line size rather than exiting entirely. Variable participation fractions are planned. At that point, soft-market supply contraction becomes a continuous quantity rather than a binary switch, matching the real market mechanism.
+**Design for variable line soft-market withdrawal.** When `pricing_line` (the insurer's appetite-based fraction) falls below `capacity_line` (the capital-limited fraction), the insurer expresses soft-market caution without any discrete exit decision:
 
-The interaction with phenomenon 1 (Underwriting Cycle) is direct: soft-market supply contraction closes the lower tail of the cycle. Until variable line sizes are in place, the model's soft-market floor is set by the AP/TP signal floor (0.70 × TP) rather than capacity withdrawal. See `docs/roadmap.md Phase 2` for the removal rationale.
+```
+pricing_line = clamp((own_ap_tp_factor - floor_factor) / (1.0 - floor_factor), 0.0, 1.0)
+line_size    = min(capacity_line, pricing_line)
+```
+
+At `own_ap_tp_factor = 1.0` (rates exactly at technical premium), `pricing_line = (1.0 - 0.85) / 0.15 = 1.0` — full capacity offered. At `own_ap_tp_factor = 0.90` (AP 10% below TP, soft floor), `pricing_line = (0.90 - 0.85) / 0.15 ≈ 0.33` — insurer writes one-third of its capital-limited line. At `own_ap_tp_factor ≤ 0.85`, `pricing_line = 0` — insurer declines without exiting. The floor_factor of 0.85 is a calibration parameter; `own_ap_tp_factor < 1.0` is mechanically reachable whenever the insurer's blended factor falls below technical premium during sustained benign years. 
+
+This makes supply contraction a continuous quantity emerging from individual pricing decisions. The broker observes insufficient total line subscription and emits `SubmissionDropped` without any agent-level exit; the insurer remains on the panel and wins business again when its `pricing_line` recovers after a cat shock restores the hard market signal. This is the real Lloyd's mechanism: syndicates price themselves out of business they don't want, not out of the market.
+
+The interaction with phenomenon 1 (Underwriting Cycle) is direct: soft-market supply contraction closes the lower tail of the cycle. See `docs/roadmap.md Phase 5` for the implementation plan and invariant updates.
+
+---
+
+### §7.5 Capital distributions `[ACTIVE]`
+
+**Motivation.** The persistent capital model (§7.0) accumulates retained earnings indefinitely on a fixed exposure pool. Without distributions, a 200-year canonical run shows TotalCap growing 6.3× (1.26B → 8.01B) while total insured exposure stays fixed at 2.5B. The ratio `max_GUL / TotalCap → 0` over time: hard-market pricing signals fire correctly but there is no capacity constraint behind them.
+
+**Lloyd's context — Names distributions.** Lloyd's syndicates operate on a 3-year account. When an underwriting year closes, net profit is crystallised and distributable to Names. Names choose whether to recommit capital or withdraw. This prevents indefinite capital accumulation: the Lloyd's market target solvency ratio (206% actual vs ~140% required) reflects approximately 1.5× excess capital, not the 6× excess that emerges without distributions.
+
+**Capital floor — Solvency II constraint.** Under Solvency II, distributions are prohibited if they would breach the Solvency Capital Requirement (SCR). Tier 1 instruments explicitly block payments when an SCR breach has occurred or would result from the payment. In Lloyd's terms, profit release requires that all liabilities are fully reserved and that the member's Funds at Lloyd's remain above the Economic Capital Assessment (ECA = SCR × 1.35). An insurer whose capital has been eroded by losses must retain profits to rebuild rather than distribute them; Names facing a recovering syndicate do not extract further capital while the book is undercapitalised.
+
+**Implemented mechanism.** At `YearEnd`, after computing year P&L:
+
+```
+net_written   = ytd.premium × (1 − expense_ratio)
+year_profit   = net_written − ytd.total_claims          // via saturating_sub; floored at 0
+distributable = year_profit × payout_ratio              // canonical: 0.70
+
+// Capital floor: only distribute if post-distribution capital ≥ initial_capital.
+// Proxy for Solvency II SCR floor — prevents distributions during capital depletion.
+if capital − distributable ≥ initial_capital:
+    capital −= distributable
+    emit CapitalDistributed { insurer_id, amount: distributable, remaining_capital }
+```
+
+Distribution is suppressed in three cases:
+1. **Loss year** — `year_profit = 0` (saturating_sub); no event emitted.
+2. **Capital depleted** — `capital − distributable < initial_capital`; the insurer retains profit to rebuild.
+3. **`payout_ratio = 0.0`** — distribution disabled (used in tests that do not require this mechanic).
+
+Loss years produce no cash call in the base model — Names are not automatically called to contribute capital. Capital calls are a separate mechanism deferred to a later phase.
+
+**Effect on dynamics.** With a 70% payout and the floor constraint, TotalCap mean-reverts rather than trending upward: benign years distribute surplus above initial_capital, keeping the market near the vulnerability regime. After a cat drawdown (capital below floor → no distribution, profits retained), insurers rebuild over several benign years before distributions resume. The floor prevents the distribution mechanism from accelerating a death spiral when capital is already impaired.
+
+**Event.** `CapitalDistributed { insurer_id: InsurerId, amount: u64, remaining_capital: u64 }`. Logged at `YearEnd` day. Counted in `Distrib(B)` column in the year table. Inv 20: every `CapitalDistributed.amount > 0` (zero distributions are not logged).
+
+**Coupling to investment income (§4.6) `[PLANNED]`.** The current `year_profit = net_written − total_claims` excludes investment income. When §4.6 is implemented, investment income must be included before computing `distributable`: `year_profit = net_written − total_claims + investment_income`. Without this, distributions are understated in high-yield environments and overstated in zero-yield environments. In a high-yield scenario, distributing only the underwriting profit leaves investment income accumulating inside the vehicle, partially replicating the pre-Phase-6 capital ratchet. The correct definition of distributable profit is total economic return — underwriting plus investment — less the retained fraction needed for solvency buffer.
 
 ---
 
