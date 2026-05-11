@@ -21,17 +21,19 @@ function buildFixture() {
   push(359, { YearEnd: { year: 1 } });
 
   // Y2: three different premiums {80,100,120}, mean=100, std≈16.33, CV≈0.1633, spread=0.40
+  // Insurer 4 enters mid-y2 but does not quote until y3 — so y2 should not be flagged
+  // as an entrant year (entrant flag tracks years where an entrant *quotes*).
   push(360, { YearStart: { year: 2 } });
   push(370, { LeadQuoteIssued: { submission_id: 11, insured_id: 1, insurer_id: 1, atp: 80, premium: 80, cat_exposure_at_quote: 0, line_size: 0.25 } });
   push(380, { LeadQuoteIssued: { submission_id: 12, insured_id: 2, insurer_id: 2, atp: 100, premium: 100, cat_exposure_at_quote: 0, line_size: 0.25 } });
   push(390, { LeadQuoteIssued: { submission_id: 13, insured_id: 3, insurer_id: 3, atp: 120, premium: 120, cat_exposure_at_quote: 0, line_size: 0.25 } });
-  // Cat in y2
-  push(395, { LossEvent: { peril: "WindstormAtlantic", territory: "US-NE", severity: 0.1 } });
+  push(395, { InsurerEntered: { insurer_id: 4, initial_capital: 1000 } });
+  // Cat in y2 → post-cat year is y3.
+  push(396, { LossEvent: { peril: "WindstormAtlantic", territory: "US-NE", severity: 0.1 } });
   push(719, { YearEnd: { year: 2 } });
 
-  // Y3: new entrant arrives mid-year + quote. Premiums {200,200} with new entrant {100}.
+  // Y3: entrant insurer 4 quotes for the first time. Premiums {200} from incumbent, {100} from entrant.
   push(720, { YearStart: { year: 3 } });
-  push(725, { InsurerEntered: { insurer_id: 4, initial_capital: 1000 } });
   push(730, { LeadQuoteIssued: { submission_id: 21, insured_id: 1, insurer_id: 1, atp: 200, premium: 200, cat_exposure_at_quote: 0, line_size: 0.25 } });
   push(740, { LeadQuoteIssued: { submission_id: 22, insured_id: 2, insurer_id: 4, atp: 100, premium: 100, cat_exposure_at_quote: 0, line_size: 0.25 } });
   push(1079, { YearEnd: { year: 3 } });
@@ -87,22 +89,30 @@ test("prepPanel6Data — CV and spread computed from LeadQuoteIssued premiums", 
   assert.ok(Math.abs(y2.spread - 0.4) < 1e-9);
 });
 
-test("prepPanel6Data — entrant year flagged when insurer entered in analysis period", () => {
+test("prepPanel6Data — entrant flag tracks years where an entrant quotes, not the entry year", () => {
   const db = parseNDJSONText(buildFixture());
   const data = prepPanel6Data(db);
   const y2 = data.rows.find((r) => r.year === 2);
   const y3 = data.rows.find((r) => r.year === 3);
+  const y4 = data.rows.find((r) => r.year === 4);
+  // Insurer 4 entered in y2 but did not quote — y2 not flagged.
   assert.equal(y2.hasEntrant, false);
+  // Insurer 4 (an entrant) quotes in y3.
   assert.equal(y3.hasEntrant, true);
+  // y4 only has incumbent quotes.
+  assert.equal(y4.hasEntrant, false);
 });
 
-test("prepPanel6Data — cat year flagged from LossEvent WindstormAtlantic", () => {
+test("prepPanel6Data — post-cat year flagged (year following a cat), not the cat year itself", () => {
   const db = parseNDJSONText(buildFixture());
   const data = prepPanel6Data(db);
   const y2 = data.rows.find((r) => r.year === 2);
   const y3 = data.rows.find((r) => r.year === 3);
-  assert.equal(y2.hasCat, true);
-  assert.equal(y3.hasCat, false);
+  const y4 = data.rows.find((r) => r.year === 4);
+  // Cat is in y2; the band marks the year *after* the cat.
+  assert.equal(y2.isPostCat, false);
+  assert.equal(y3.isPostCat, true);
+  assert.equal(y4.isPostCat, false);
 });
 
 test("prepPanel6Data — n<2 year reports null cv/spread", () => {
@@ -124,16 +134,16 @@ test("renderPanel6 returns SVG with CV and spread traces and entrant/cat marks",
   const data = {
     warmupYears: 1,
     rows: [
-      { year: 2, count: 3, mean: 100, cv: 0.16, spread: 0.4, min: 80, max: 120, hasEntrant: false, hasCat: true },
-      { year: 3, count: 3, mean: 150, cv: 0.30, spread: 0.6, min: 100, max: 200, hasEntrant: true, hasCat: false },
-      { year: 4, count: 1, mean: 150, cv: null, spread: null, min: 150, max: 150, hasEntrant: false, hasCat: false },
+      { year: 2, count: 3, mean: 100, cv: 0.16, spread: 0.4, min: 80, max: 120, hasEntrant: false, isPostCat: false },
+      { year: 3, count: 3, mean: 150, cv: 0.30, spread: 0.6, min: 100, max: 200, hasEntrant: true, isPostCat: true },
+      { year: 4, count: 1, mean: 150, cv: null, spread: null, min: 150, max: 150, hasEntrant: false, isPostCat: false },
     ],
   };
   const svg = renderPanel6(data, { asString: true });
   assert.match(svg, /<svg/);
   assert.match(svg, /class="trace-cv"/);
   assert.match(svg, /class="trace-spread"/);
-  assert.match(svg, /class="cat-band"/);
+  assert.match(svg, /class="post-cat-band"/);
   assert.match(svg, /class="entrant-marker"/);
 });
 

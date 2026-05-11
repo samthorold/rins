@@ -4,9 +4,11 @@
 //   • CV (population std / mean) of LeadQuoteIssued.premium across insurers
 //   • Spread (max - min) / mean
 //   Annotations:
-//     - Cat-year band: any year with >=1 LossEvent { peril: WindstormAtlantic }
-//     - Entrant marker: any year where an InsurerEntered fired in the
-//       analysis period (entrants quote at the cheap end)
+//     - Post-cat band: the year *after* a LossEvent { peril: WindstormAtlantic }
+//       (depleted-incumbent rate response bites the following year)
+//     - Entrant marker: any year where an entrant insurer (entered in the
+//       analysis period) issues a LeadQuoteIssued — entrants quote at the
+//       cheap end, so the flag marks when their pricing actually shows up.
 //
 //   prepPanel6Data(db, opts) → { warmupYears, rows }
 //   renderPanel6(data, opts) → SVG element (or string with `asString: true`)
@@ -57,14 +59,25 @@ export function prepPanel6Data(db, opts = {}) {
     if (bucket && typeof e.data.premium === "number") bucket.push(e.data.premium);
   }
 
-  const entrantYears = new Set();
+  // Entrant insurers = those whose InsurerEntered fired in the analysis period.
+  const entrantInsurers = new Set();
   for (const e of db.getEventsByType("InsurerEntered")) {
-    if (typeof e.year === "number" && e.year > warmupYears) entrantYears.add(e.year);
+    if (typeof e.year === "number" && e.year > warmupYears && e.data && typeof e.data.insurer_id === "number") {
+      entrantInsurers.add(e.data.insurer_id);
+    }
+  }
+  // A year is flagged when any entrant insurer issues a lead quote that year.
+  const entrantYears = new Set();
+  for (const e of db.getEventsByType("LeadQuoteIssued")) {
+    if (e.data && entrantInsurers.has(e.data.insurer_id)) entrantYears.add(e.year);
   }
 
-  const catYears = new Set();
+  // Post-cat years: depleted-incumbent rate response bites the year *after* the cat.
+  const postCatYears = new Set();
   for (const e of db.getEventsByType("LossEvent")) {
-    if (e.data && e.data.peril === "WindstormAtlantic") catYears.add(e.year);
+    if (e.data && e.data.peril === "WindstormAtlantic" && typeof e.year === "number") {
+      postCatYears.add(e.year + 1);
+    }
   }
 
   const rows = years.map((y) => {
@@ -78,7 +91,7 @@ export function prepPanel6Data(db, opts = {}) {
       min: stats.min,
       max: stats.max,
       hasEntrant: entrantYears.has(y),
-      hasCat: catYears.has(y),
+      isPostCat: postCatYears.has(y),
     };
   });
 
@@ -139,20 +152,20 @@ function buildSvg(data) {
     .trace-spread { fill: none; stroke: #83a598; stroke-width: 1.4; stroke-dasharray: 4 3; }
     .cv-ref { stroke: #fb4934; stroke-width: 1; stroke-dasharray: 2 3; fill: none; }
     .cv-ref-text { fill: #fb4934; font-size: 10px; }
-    .cat-band { fill: rgba(251,73,52,.10); }
-    .cat-band-label { fill: #fb4934; font-size: 10px; }
+    .post-cat-band { fill: rgba(251,73,52,.10); }
+    .post-cat-band-label { fill: #fb4934; font-size: 10px; }
     .entrant-marker { fill: #8ec07c; stroke: #d8dee9; stroke-width: .8; }
     .entrant-label { fill: #8ec07c; font-size: 9px; }
     .legend-text { fill: #d8dee9; font-size: 11px; }
   </style>`);
 
-  // Cat bands behind everything.
+  // Post-cat bands behind everything (the year *after* a cat).
   for (const r of rows) {
-    if (r.hasCat) {
+    if (r.isPostCat) {
       const x0 = xOf(r.year - 0.5);
       const x1 = xOf(r.year + 0.5);
-      parts.push(`<rect class="cat-band" x="${x0.toFixed(2)}" y="${M.top}" width="${(x1 - x0).toFixed(2)}" height="${IH}" />`);
-      parts.push(`<text class="cat-band-label" x="${((x0 + x1) / 2).toFixed(2)}" y="${(M.top + 10).toFixed(2)}" text-anchor="middle">cat</text>`);
+      parts.push(`<rect class="post-cat-band" x="${x0.toFixed(2)}" y="${M.top}" width="${(x1 - x0).toFixed(2)}" height="${IH}" />`);
+      parts.push(`<text class="post-cat-band-label" x="${((x0 + x1) / 2).toFixed(2)}" y="${(M.top + 10).toFixed(2)}" text-anchor="middle">post-cat</text>`);
     }
   }
 
