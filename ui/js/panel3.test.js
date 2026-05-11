@@ -140,6 +140,62 @@ test("renderPanel3 returns SVG with stacked areas, insolvency markers, and cat l
   assert.match(svg, /US-NE/);
 });
 
+test("renderPanel3 — insolvency marker anchored to y where insurer's stack drops to zero", () => {
+  // Single insurer stacked at the bottom of the chart: capital 800 → 0 in year 3.
+  // The insolvency X must sit at the y that corresponds to capital=0 (the chart's
+  // baseline for an insurer stacked at zero), NOT mid-band of the previous year.
+  const data = {
+    warmupYears: 1,
+    years: [2, 3, 4],
+    series: [
+      { insurerId: 1, entryYear: 1, points: [{ year: 2, capital: 800 }, { year: 3, capital: 0 }, { year: 4, capital: 0 }] },
+    ],
+    insolvencies: [{ year: 3, insurerId: 1 }],
+    catEvents: [],
+  };
+  const svg = renderPanel3(data, { asString: true });
+  // Extract the insolvency marker group + its line ys.
+  const m = svg.match(/<g class="insolvency-marker"[^>]*>\s*<line[^>]*y1="([\d.]+)"[^>]*y2="([\d.]+)"/);
+  assert.ok(m, "expected insolvency marker line");
+  const yMid = (parseFloat(m[1]) + parseFloat(m[2])) / 2;
+  // Chart geometry: top=28, bottom=H-M.bottom = 360-36 = 324. With insurer stacked
+  // at zero in year 3, vMax > 0 and stack-bottom-at-zero corresponds to y=bottom=324.
+  assert.ok(Math.abs(yMid - 324) < 1.5, `expected y≈324 (bottom), got ${yMid}`);
+});
+
+test("renderPanel3 — renders an insurer-id legend", () => {
+  const data = {
+    warmupYears: 1,
+    years: [2, 3],
+    series: [
+      { insurerId: 1, entryYear: 1, points: [{ year: 2, capital: 800 }, { year: 3, capital: 0 }] },
+      { insurerId: 7, entryYear: 1, points: [{ year: 2, capital: 1000 }, { year: 3, capital: 500 }] },
+    ],
+    insolvencies: [],
+    catEvents: [],
+  };
+  const svg = renderPanel3(data, { asString: true });
+  assert.match(svg, /class="legend"/);
+  assert.match(svg, /#1\b/);
+  assert.match(svg, /#7\b/);
+});
+
+test("renderPanel3 — cat marker shows damage_fraction alongside territory", () => {
+  const data = {
+    warmupYears: 1,
+    years: [2, 3],
+    series: [
+      { insurerId: 1, entryYear: 1, points: [{ year: 2, capital: 800 }, { year: 3, capital: 800 }] },
+    ],
+    insolvencies: [],
+    catEvents: [{ year: 3, day: 800, territory: "US-NE", damage_fraction: 0.42 }],
+  };
+  const svg = renderPanel3(data, { asString: true });
+  // Expect both territory and a percent rendering of damage_fraction (e.g. "42%").
+  assert.match(svg, /US-NE/);
+  assert.match(svg, /42%/);
+});
+
 test("renderPanel3 with empty data returns placeholder SVG", () => {
   const empty = { warmupYears: 0, years: [], series: [], insolvencies: [], catEvents: [] };
   const svg = renderPanel3(empty, { asString: true });

@@ -262,27 +262,25 @@ function buildSvg(data) {
     parts.push(`<line class="cat-line" x1="${x}" y1="${top}" x2="${x}" y2="${bottom}" />`);
     let ty = top + 10;
     for (const ev of evs) {
-      parts.push(`<text class="cat-text" x="${(parseFloat(x) + 3).toFixed(2)}" y="${ty.toFixed(2)}">${escapeXml(ev.territory)}</text>`);
+      const pct = Math.round((ev.damage_fraction ?? 0) * 100);
+      const label = `${ev.territory} ${pct}%`;
+      parts.push(`<text class="cat-text" x="${(parseFloat(x) + 3).toFixed(2)}" y="${ty.toFixed(2)}">${escapeXml(label)}</text>`);
       ty += 11;
     }
   }
 
-  // Insolvency markers — red X at the year on the insurer's top-of-band edge
-  // before zeroing (use the previous year's top, or fallback to 0).
+  // Insolvency markers — red X anchored to the y where this insurer's stacked
+  // band drops to zero in the insolvency year (top == bottom of its band there).
   for (const ins of (data.insolvencies ?? [])) {
     if (ins.year < yMin || ins.year > yMax) continue;
     const yearIdx = years.indexOf(ins.year);
     if (yearIdx === -1) continue;
     const x = xOf(ins.year);
-    // Place the X at the top of where the insurer's band would have been
-    // the year before (their last non-zero contribution).
-    const prevIdx = yearIdx > 0 ? yearIdx - 1 : 0;
     const tops = stackTops.get(ins.insurerId);
     const bottoms = stackBottoms.get(ins.insurerId);
     let yMid;
     if (tops && bottoms) {
-      const midVal = (tops[prevIdx] + bottoms[prevIdx]) / 2;
-      yMid = yOf(midVal);
+      yMid = yOf(bottoms[yearIdx]);
     } else {
       yMid = (top + bottom) / 2;
     }
@@ -293,6 +291,21 @@ function buildSvg(data) {
     parts.push(`</g>`);
     parts.push(`<text class="insolvency-text" x="${(x + r + 2).toFixed(2)}" y="${(yMid + 3).toFixed(2)}">#${ins.insurerId}</text>`);
   }
+
+  // Insurer-id legend (top-right inside chart area).
+  const legendRowH = 12;
+  const legendW = 46;
+  const legendX = right - legendW;
+  let legendY = top + 4;
+  parts.push(`<g class="legend">`);
+  for (let i = 0; i < series.length; i++) {
+    const s = series[i];
+    const color = PALETTE[i % PALETTE.length];
+    parts.push(`<rect x="${legendX.toFixed(2)}" y="${legendY.toFixed(2)}" width="9" height="9" fill="${color}" fill-opacity="0.78" />`);
+    parts.push(`<text class="legend-text" x="${(legendX + 13).toFixed(2)}" y="${(legendY + 8).toFixed(2)}">#${s.insurerId}</text>`);
+    legendY += legendRowH;
+  }
+  parts.push(`</g>`);
 
   parts.push(`</svg>`);
   return parts.join("");
