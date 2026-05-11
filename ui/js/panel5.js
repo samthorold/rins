@@ -247,6 +247,14 @@ const TERRITORY_PALETTE = [
   "#d3869b", "#fe8019", "#b8bb26", "#458588",
 ];
 
+function formatSI(v) {
+  const abs = Math.abs(v);
+  if (abs >= 1e9) return `${(v / 1e9).toFixed(1)}B`;
+  if (abs >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  if (abs >= 1e3) return `${(v / 1e3).toFixed(1)}k`;
+  return `${v.toFixed(0)}`;
+}
+
 export function renderPanel5(data, opts = {}) {
   const asString = opts.asString ?? false;
   const svg = buildSvg(data);
@@ -379,7 +387,9 @@ function buildSvg(data) {
     return parts.join("");
   }
 
-  // Build per-insurer territory totals; normalise to fractions for stacked bars.
+  // Stacked bars at absolute sum_insured magnitude. A shared y-scale across
+  // insurers lets a diversified vs. concentrated book differ in total height,
+  // which is the contrast Panel 5 sub-panel B is meant to show.
   const sortedSeries = [...series].sort(
     (a, b) => a.entryYear - b.entryYear || a.insurerId - b.insurerId,
   );
@@ -393,6 +403,26 @@ function buildSvg(data) {
     territoryColour.set(t, TERRITORY_PALETTE[i % TERRITORY_PALETTE.length]);
   });
 
+  let maxTotal = 0;
+  for (const s of sortedSeries) {
+    const im = tMap.get(s.insurerId) ?? new Map();
+    let t = 0;
+    for (const v of im.values()) t += v;
+    if (t > maxTotal) maxTotal = t;
+  }
+  const yScale = maxTotal > 0 ? (bHeight - 4) / maxTotal : 0;
+
+  // Y-axis ticks (0, 50%, 100% of maxTotal).
+  if (maxTotal > 0) {
+    const tickFracs = [0, 0.5, 1.0];
+    for (const f of tickFracs) {
+      const v = f * maxTotal;
+      const y = bBottom - v * yScale;
+      parts.push(`<line class="gridline" x1="${left}" y1="${y.toFixed(2)}" x2="${right}" y2="${y.toFixed(2)}" />`);
+      parts.push(`<text class="axis-text" x="${(left - 6).toFixed(2)}" y="${(y + 3).toFixed(2)}" text-anchor="end">${formatSI(v)}</text>`);
+    }
+  }
+
   for (let bi = 0; bi < sortedSeries.length; bi++) {
     const s = sortedSeries[bi];
     const xPx = left + groupGap + bi * (barW + groupGap);
@@ -400,14 +430,13 @@ function buildSvg(data) {
     let total = 0;
     for (const v of im.values()) total += v;
     if (total <= 0) {
-      // Empty placeholder bar.
       parts.push(`<rect class="terr-bar" data-insurer="${s.insurerId}" x="${xPx.toFixed(2)}" y="${(bBottom - 1).toFixed(2)}" width="${barW.toFixed(2)}" height="1" fill="#232936" />`);
     } else {
       let yCursor = bBottom;
       for (const t of territories) {
         const v = im.get(t) ?? 0;
         if (v <= 0) continue;
-        const h = (v / total) * bHeight;
+        const h = v * yScale;
         yCursor -= h;
         parts.push(`<rect class="terr-bar" data-insurer="${s.insurerId}" data-territory="${t}" x="${xPx.toFixed(2)}" y="${yCursor.toFixed(2)}" width="${barW.toFixed(2)}" height="${h.toFixed(2)}" fill="${territoryColour.get(t)}" />`);
       }

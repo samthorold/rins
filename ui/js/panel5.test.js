@@ -172,6 +172,53 @@ test("renderPanel5 returns SVG with utilisation lines, breach reference, and ter
   assert.match(svg, /class="terr-bar"/);
 });
 
+test("renderPanel5 sub-panel B renders bars at absolute sum_insured magnitude (not normalised)", () => {
+  // Two insurers with very different absolute exposure. Spec (docs/ui.md Panel 5
+  // sub-panel B) requires the bar heights to reflect absolute sum_insured so a
+  // diversified vs. concentrated insurer is visible in magnitude.
+  const data = {
+    warmupYears: 0,
+    years: [1],
+    utilSeries: [
+      { insurerId: 1, entryYear: 1, isEntrant: false, points: [
+        { year: 1, cat_aggregate: 0, capital: 1000, max_cat_aggregate: 1818, utilisation: 0 },
+      ] },
+      { insurerId: 2, entryYear: 1, isEntrant: false, points: [
+        { year: 1, cat_aggregate: 0, capital: 1000, max_cat_aggregate: 1818, utilisation: 0 },
+      ] },
+    ],
+    territoryByYear: new Map([
+      [1, new Map([
+        // Insurer 1 total = 3000 (diversified).
+        [1, new Map([["US-NE", 1000], ["US-SE", 1000], ["US-Gulf", 1000]])],
+        // Insurer 2 total = 1000 (concentrated).
+        [2, new Map([["US-NE", 1000], ["US-SE", 0], ["US-Gulf", 0]])],
+      ])],
+    ]),
+    territories: ["US-NE", "US-SE", "US-Gulf"],
+    selectedYear: 1,
+  };
+  const svg = renderPanel5(data, { asString: true });
+
+  // Parse all terr-bar rects with their data-insurer + height.
+  const rectRe = /<rect class="terr-bar"[^>]*data-insurer="(\d+)"[^>]*height="([\d.]+)"/g;
+  const heightsByInsurer = new Map();
+  let m;
+  while ((m = rectRe.exec(svg)) !== null) {
+    const id = Number(m[1]);
+    const h = Number(m[2]);
+    heightsByInsurer.set(id, (heightsByInsurer.get(id) ?? 0) + h);
+  }
+  const h1 = heightsByInsurer.get(1) ?? 0;
+  const h2 = heightsByInsurer.get(2) ?? 0;
+  assert.ok(h1 > 0 && h2 > 0, `expected positive bar heights, got ${h1}, ${h2}`);
+  // Insurer 1 total exposure is 3× insurer 2's; bar stack height must reflect that.
+  assert.ok(
+    Math.abs(h1 / h2 - 3) < 0.05,
+    `expected absolute-magnitude rendering (h1/h2 ≈ 3), got h1=${h1} h2=${h2} ratio=${(h1 / h2).toFixed(3)}`,
+  );
+});
+
 test("renderPanel5 with empty data returns placeholder SVG", () => {
   const empty = {
     warmupYears: 0,
