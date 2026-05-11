@@ -45,10 +45,10 @@ export function prepPanel4Data(db, opts = {}) {
     const m = countsByYear.get(e.year);
     if (!m) continue;
     const panel = e.data.panel ?? [];
-    for (const [id] of panel) {
-      if (!m.has(id)) m.set(id, 0);
-      m.set(id, m.get(id) + 1);
-    }
+    if (panel.length === 0) continue;
+    const leadId = panel[0][0];
+    if (!m.has(leadId)) m.set(leadId, 0);
+    m.set(leadId, m.get(leadId) + 1);
   }
 
   // Share series — one per insurer, restricted to selected years.
@@ -166,7 +166,7 @@ function buildSvg(data) {
   </style>`);
 
   // ----- Sub-panel A: stacked counts -----
-  parts.push(`<text class="sub-title" x="${left}" y="${(top - 12).toFixed(2)}">Market share (panel placements per year) · gini overlay</text>`);
+  parts.push(`<text class="sub-title" x="${left}" y="${(top - 12).toFixed(2)}">Lead-share (bound policies per lead insurer per year) · gini overlay</text>`);
 
   const stackTotals = years.map((y, i) => {
     let t = 0;
@@ -275,7 +275,7 @@ function buildSvg(data) {
   parts.push(`<text class="axis-text-r" x="${(right + 6).toFixed(2)}" y="${(top - 6).toFixed(2)}" text-anchor="start">gini</text>`);
 
   // ----- Sub-panel B: relationship score heatmap -----
-  parts.push(`<text class="sub-title" x="${left}" y="${(bTop - 6).toFixed(2)}">Relationship scores (×0.80 decay per year-end, +1 per panel placement)</text>`);
+  parts.push(`<text class="sub-title" x="${left}" y="${(bTop - 6).toFixed(2)}">Relationship scores (×0.80 decay per year-end, +1 per lead placement)</text>`);
 
   const sortedSeries = [...series].sort(
     (a, b) => a.entryYear - b.entryYear || a.insurerId - b.insurerId,

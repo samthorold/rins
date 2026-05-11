@@ -54,24 +54,38 @@ test("prepPanel4Data — emits analysis years and one share series per insurer",
   assert.deepEqual(ids, [1, 2, 3, 4]);
 });
 
-test("prepPanel4Data — share counts every panel member of a PolicyBound", () => {
+test("prepPanel4Data — share counts the lead (panel[0]) of each PolicyBound, once", () => {
   const db = parseNDJSONText(buildFixture());
   const data = prepPanel4Data(db);
   const byId = new Map(data.shareSeries.map((s) => [s.insurerId, s]));
   const at = (id, y) => byId.get(id).points.find((p) => p.year === y).count;
-  // Year 2: insurer 1 = 4, insurer 2 = 1, insurer 3 = 1, insurer 4 = 0.
+  // Year 2 leads: policies 10–13 → 1 (×4); policy 20 → 2.
   assert.equal(at(1, 2), 4);
   assert.equal(at(2, 2), 1);
-  assert.equal(at(3, 2), 1);
+  assert.equal(at(3, 2), 0);
   assert.equal(at(4, 2), 0);
-  // Year 3: 1 = 1, 2 = 1, 3 = 1, 4 = 2.
+  // Year 3 leads: policy 30 → 1, policy 31 → 2, policy 32 → 3.
   assert.equal(at(1, 3), 1);
   assert.equal(at(2, 3), 1);
   assert.equal(at(3, 3), 1);
-  assert.equal(at(4, 3), 2);
-  // Year 4: only insurer 1 binds.
+  assert.equal(at(4, 3), 0);
+  // Year 4 leads: policy 40 → 1.
   assert.equal(at(1, 4), 1);
   assert.equal(at(4, 4), 0);
+});
+
+test("prepPanel4Data — stacked bar totals per year equal count(PolicyBound) for that year", () => {
+  const db = parseNDJSONText(buildFixture());
+  const data = prepPanel4Data(db);
+  // Expected PolicyBound counts per analysis year from the fixture.
+  const expected = new Map([[2, 5], [3, 3], [4, 1]]);
+  for (const y of data.years) {
+    const total = data.shareSeries.reduce(
+      (sum, s) => sum + (s.points.find((p) => p.year === y)?.count ?? 0),
+      0,
+    );
+    assert.equal(total, expected.get(y), `year ${y} stacked total`);
+  }
 });
 
 test("prepPanel4Data — gini per analysis year reflects concentration", () => {
@@ -98,20 +112,19 @@ test("prepPanel4Data — entryYear set per insurer; entrants flagged distinctly"
 test("prepPanel4Data — relationship scores apply +1 per bind, ×0.80 each year-end", () => {
   const db = parseNDJSONText(buildFixture());
   const data = prepPanel4Data(db);
-  // scores[year][insurerId] — year 2 entry: incumbents 1's score is the
-  // sum over PolicyBound where insurer 1 in panel, weighted by 0.80^(2 - bind_year).
-  // Year 1 binds for insurer 1: 2 (from policies 1 and 2). Year 2 binds: 4.
-  // So at year=2: score(1) = 2 * 0.80 + 4 = 5.6
+  // scores[year][insurerId] — derived from lead-only counts (panel[0]).
+  // Year 1 leads for insurer 1: 2 (policies 1 and 2). Year 2 leads: 4.
+  // At year=2: score(1) = 2 * 0.80 + 4 = 5.6
   const yMap = new Map(data.scoresByYear.map((r) => [r.year, r.scores]));
   const get = (y, id) => yMap.get(y)[id] ?? 0;
   assert.ok(Math.abs(get(2, 1) - 5.6) < 1e-9, `y2 insurer 1 score: ${get(2, 1)}`);
-  // Year 2 insurer 2: y1 binds = 1 (policy 1), y2 binds = 1 → 1*0.8 + 1 = 1.8
-  assert.ok(Math.abs(get(2, 2) - 1.8) < 1e-9, `y2 insurer 2 score: ${get(2, 2)}`);
+  // Year 2 insurer 2: y1 leads = 0, y2 leads = 1 → 0*0.8 + 1 = 1.0
+  assert.ok(Math.abs(get(2, 2) - 1.0) < 1e-9, `y2 insurer 2 score: ${get(2, 2)}`);
   // Year 2 insurer 4: not yet entered → 0.
   assert.equal(get(2, 4), 0);
-  // Year 3 insurer 4: 2 binds in y3 → 2.0
-  assert.ok(Math.abs(get(3, 4) - 2.0) < 1e-9, `y3 insurer 4 score: ${get(3, 4)}`);
-  // Year 3 insurer 1: (5.6) decay × 0.80 + 1 (one y3 bind) = 5.48
+  // Year 3 insurer 4: no y3 leads → 0.
+  assert.equal(get(3, 4), 0);
+  // Year 3 insurer 1: 5.6 decay × 0.80 + 1 (one y3 lead) = 5.48
   assert.ok(Math.abs(get(3, 1) - 5.48) < 1e-9, `y3 insurer 1 score: ${get(3, 1)}`);
 });
 
