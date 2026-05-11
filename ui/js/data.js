@@ -128,6 +128,7 @@ class Database {
       stats.set(y, {
         year: y,
         bound_premium: 0,
+        lead_premium: 0,
         sum_insured: 0,
         total_assets: 0,
         claims: 0,
@@ -168,6 +169,10 @@ class Database {
               (s._policies_by_insurer.get(insurerId) ?? 0) + 1,
             );
           }
+          break;
+        }
+        case "LeadQuoteIssued": {
+          s.lead_premium += e.data.premium ?? 0;
           break;
         }
         case "ClaimSettled": {

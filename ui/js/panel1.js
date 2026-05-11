@@ -49,7 +49,9 @@ export function prepPanel1Data(db, opts = {}) {
   const ewma = ewmaSeries(crValues, ewmaAlpha);
 
   const rows = filtered.map((s, i) => {
-    const rate_on_line = s.sum_insured > 0 ? s.bound_premium / s.sum_insured : null;
+    // Spec: rate-on-line uses LeadQuoteIssued.premium (lead pricing economics),
+    // not the blended PolicyBound.premium. See docs/ui.md Panel 1.
+    const rate_on_line = s.sum_insured > 0 ? s.lead_premium / s.sum_insured : null;
     return {
       year: s.year,
       rate_on_line,

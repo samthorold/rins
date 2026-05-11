@@ -18,8 +18,11 @@ function buildFixture() {
   push(50, { ClaimSettled: { policy_id: 0, insurer_id: 1, amount: 8, peril: "Attritional", remaining_capital: 992 } });
   push(359, { YearEnd: { year: 1 } });
 
-  // Year 2 (analysis): premium=20 si=200 claims=4 → RoL=10%, LR=0.2, CR=0.5
+  // Year 2 (analysis): lead premium=20 si=200 claims=4 → RoL=10%, LR=0.2, CR=0.5
+  // PolicyBound.premium intentionally differs from LeadQuoteIssued.premium to
+  // verify rate_on_line is sourced from the lead quote, not the bound premium.
   push(360, { YearStart: { year: 2 } });
+  push(363, { LeadQuoteIssued: { submission_id: 1, insured_id: 1, insurer_id: 1, atp: 18, premium: 20, cat_exposure_at_quote: 0, line_size: 1.0 } });
   push(365, { PolicyBound: { policy_id: 1, submission_id: 1, insured_id: 1, panel: [[1, 1.0]], premium: 20, sum_insured: 200 } });
   push(400, { LossEvent: { event_id: 1, peril: "WindstormAtlantic", territory: "US-NE", damage_fraction: 0.1 } });
   push(401, { LossEvent: { event_id: 2, peril: "WindstormAtlantic", territory: "US-Gulf", damage_fraction: 0.1 } });
@@ -27,8 +30,9 @@ function buildFixture() {
   push(500, { InsurerEntered: { insurer_id: 3, initial_capital: 500 } });
   push(719, { YearEnd: { year: 2 } });
 
-  // Year 3 (analysis): premium=30 si=300 claims=15 → RoL=10%, LR=0.5, CR=0.8
+  // Year 3 (analysis): lead premium=30 si=300 claims=15 → RoL=10%, LR=0.5, CR=0.8
   push(720, { YearStart: { year: 3 } });
+  push(723, { LeadQuoteIssued: { submission_id: 2, insured_id: 1, insurer_id: 1, atp: 27, premium: 30, cat_exposure_at_quote: 0, line_size: 1.0 } });
   push(725, { PolicyBound: { policy_id: 2, submission_id: 2, insured_id: 1, panel: [[1, 1.0]], premium: 30, sum_insured: 300 } });
   push(820, { ClaimSettled: { policy_id: 2, insurer_id: 1, amount: 15, peril: "Attritional", remaining_capital: 973 } });
   push(900, { InsurerInsolvent: { insurer_id: 2 } });
@@ -79,6 +83,23 @@ test("prepPanel1Data computes rate_on_line and combined_ratio", () => {
   // y4: no premium → rate_on_line null (avoid div by zero); CR also null
   assert.equal(y4.rate_on_line, null);
   assert.equal(y4.combined_ratio, null);
+});
+
+test("prepPanel1Data sources rate_on_line from LeadQuoteIssued.premium, not PolicyBound.premium", () => {
+  // Fixture: lead quotes premium=50; policy binds at premium=10 (e.g. blended quirk).
+  // Spec form must use the lead premium, so rate_on_line = 50/200 = 0.25 (not 0.05).
+  const lines = [];
+  const push = (day, event) => lines.push(JSON.stringify({ day, event }));
+  push(0, { SimulationStart: { year_start: 1, warmup_years: 0, analysis_years: 1 } });
+  push(0, { InsurerEntered: { insurer_id: 1, initial_capital: 1000 } });
+  push(0, { YearStart: { year: 1 } });
+  push(3, { LeadQuoteIssued: { submission_id: 0, insured_id: 1, insurer_id: 1, atp: 40, premium: 50, cat_exposure_at_quote: 0, line_size: 1.0 } });
+  push(5, { PolicyBound: { policy_id: 0, submission_id: 0, insured_id: 1, panel: [[1, 1.0]], premium: 10, sum_insured: 200 } });
+  push(359, { YearEnd: { year: 1 } });
+  const db = parseNDJSONText(lines.join("\n"));
+  const out = prepPanel1Data(db, { expenseRatio: 0.3 });
+  assert.equal(out.rows.length, 1);
+  assert.ok(Math.abs(out.rows[0].rate_on_line - 50 / 200) < 1e-9);
 });
 
 test("prepPanel1Data computes CR EWMA over the analysis window", () => {

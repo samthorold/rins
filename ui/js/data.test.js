@@ -145,6 +145,15 @@ test("YearStats aggregates premium and sum_insured per year", () => {
   assert.equal(y3.sum_insured, 600);
 });
 
+test("YearStats aggregates LeadQuoteIssued.premium into lead_premium", () => {
+  const db = parseNDJSONText(buildFixture());
+  const [y1, y2, y3] = db.getYearStats();
+  // Only year 1 has a LeadQuoteIssued event in the fixture (premium=10).
+  assert.equal(y1.lead_premium, 10);
+  assert.equal(y2.lead_premium, 0);
+  assert.equal(y3.lead_premium, 0);
+});
+
 test("YearStats aggregates claims and GUL by peril", () => {
   const db = parseNDJSONText(buildFixture());
   const [y1] = db.getYearStats();
