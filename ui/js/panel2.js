@@ -49,7 +49,7 @@ export function summarise(values) {
   };
 }
 
-function aggregateStats(rows) {
+function aggregateStats(rows, pooledValues) {
   // aggregate_cv = std(yearly means) / mean(yearly means).
   const means = rows.map((r) => r.mean).filter((m) => Number.isFinite(m));
   if (means.length === 0) return { individualCV: null, aggregateCV: null, cvRatio: null };
@@ -58,9 +58,15 @@ function aggregateStats(rows) {
   for (const x of means) v += (x - m) * (x - m);
   const aggStd = Math.sqrt(v / means.length);
   const aggregateCV = m > 0 ? aggStd / m : 0;
-  // individual_cv = mean(per-year CV across years where mean > 0).
-  const cvs = rows.map((r) => r.cv).filter((c) => Number.isFinite(c));
-  const individualCV = cvs.length > 0 ? cvs.reduce((a, b) => a + b, 0) / cvs.length : null;
+  // individual_cv = pooled CV across all (insured, year) GUL values.
+  let individualCV = null;
+  if (pooledValues && pooledValues.length > 0) {
+    const pm = pooledValues.reduce((a, b) => a + b, 0) / pooledValues.length;
+    let pv = 0;
+    for (const x of pooledValues) pv += (x - pm) * (x - pm);
+    const pStd = Math.sqrt(pv / pooledValues.length);
+    individualCV = pm > 0 ? pStd / pm : 0;
+  }
   const cvRatio = individualCV !== null && aggregateCV > 0 ? individualCV / aggregateCV : null;
   return { individualCV, aggregateCV, cvRatio };
 }
@@ -122,14 +128,18 @@ export function prepPanel2Data(db, opts = {}) {
     }
   }
 
+  const attrPool = [];
   const attrRows = filteredYears.map((y) => {
     const values = [...attrByYear.get(y).values()];
+    for (const v of values) attrPool.push(v);
     return { year: y, ...summarise(values) };
   });
+  const catPool = [];
   const catRows = filteredYears
     .filter((y) => catActiveYears.has(y))
     .map((y) => {
       const values = [...catByYear.get(y).values()];
+      for (const v of values) catPool.push(v);
       return { year: y, ...summarise(values) };
     });
 
@@ -138,8 +148,8 @@ export function prepPanel2Data(db, opts = {}) {
   return {
     warmupYears,
     nInsureds,
-    attr: { rows: attrRows, ...aggregateStats(attrRows), sqrtN },
-    cat: { rows: catRows, ...aggregateStats(catRows), sqrtN },
+    attr: { rows: attrRows, ...aggregateStats(attrRows, attrPool), sqrtN },
+    cat: { rows: catRows, ...aggregateStats(catRows, catPool), sqrtN },
   };
 }
 

@@ -114,7 +114,7 @@ test("prepPanel2Data — cat rows only in cat-active years", () => {
   assert.equal(y3.n, 4);
 });
 
-test("prepPanel2Data — CV ratio: aggregate_cv = std(yearly means)/mean(yearly means); individual_cv = mean of per-year CV", () => {
+test("prepPanel2Data — CV ratio: aggregate_cv = std(yearly means)/mean(yearly means); individual_cv = pooled CV over all (insured, year) GULs", () => {
   const db = parseNDJSONText(buildFixture());
   const data = prepPanel2Data(db);
   // Yearly attritional means: [2.5, 1, 2]
@@ -122,8 +122,12 @@ test("prepPanel2Data — CV ratio: aggregate_cv = std(yearly means)/mean(yearly 
   const v = ((2.5 - m) ** 2 + (1 - m) ** 2 + (2 - m) ** 2) / 3;
   const aggCv = Math.sqrt(v) / m;
   assert.ok(Math.abs(data.attr.aggregateCV - aggCv) < 1e-9);
-  // Individual CV per year: y2 cv = sqrt(1.25)/2.5; y3 cv = 0; y4 cv = 0
-  const expectedIndCV = (Math.sqrt(1.25) / 2.5 + 0 + 0) / 3;
+  // Pooled individual CV: flatten per-insured per-year GUL across the 3 analysis years.
+  // Y2: [1,2,3,4]; Y3: [1,1,1,1]; Y4: [2,2,2,2]  →  12 values, mean = 22/12
+  const pool = [1, 2, 3, 4, 1, 1, 1, 1, 2, 2, 2, 2];
+  const pm = pool.reduce((a, b) => a + b, 0) / pool.length;
+  const pv = pool.reduce((s, x) => s + (x - pm) ** 2, 0) / pool.length;
+  const expectedIndCV = Math.sqrt(pv) / pm;
   assert.ok(Math.abs(data.attr.individualCV - expectedIndCV) < 1e-9);
   // CV ratio
   assert.ok(Math.abs(data.attr.cvRatio - expectedIndCV / aggCv) < 1e-9);

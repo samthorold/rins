@@ -132,7 +132,9 @@ Same layout but for cat GUL in cat-active years only:
 for each year Y:
   per_insured_attr_gul[insured_id] = sum(AssetDamage.ground_up_loss where peril == Attritional) for that insured in year Y
   market_mean_attr = mean(per_insured_attr_gul.values())
-  individual_cv = std(per_insured_attr_gul.values()) / market_mean_attr
+  # individual_cv is computed once, pooling all per-insured per-year GUL values
+  # across the analysis window (insured × year → flat distribution).
+  individual_cv = std(pooled_per_insured_year_attr_gul) / mean(pooled_per_insured_year_attr_gul)
   aggregate_cv = std(yearly market_mean_attr across years) / mean(yearly market_mean_attr)
 
   # Cat: only in years where LossEvent(WindstormAtlantic) fired
